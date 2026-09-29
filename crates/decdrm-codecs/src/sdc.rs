@@ -195,7 +195,8 @@ impl AudioInfo {
             AudioCodingField::Aac | AudioCodingField::XheAac => self.coder_field & 0x1F,
             _ => 0,
         };
-        let b1 = (u8::from(self.text_flag) << 7) | (u8::from(self.enhancement_flag) << 6) | (coder << 1);
+        let b1 =
+            (u8::from(self.text_flag) << 7) | (u8::from(self.enhancement_flag) << 6) | (coder << 1);
         let mut out = vec![b0, b1];
         if self.coding == AudioCodingField::XheAac {
             out.extend_from_slice(&self.xhe_aac_config);
@@ -237,8 +238,9 @@ impl AudioInfo {
         match self.drm_audio_coding()? {
             DrmAudioCoding::Opus => Some(48_000),
             DrmAudioCoding::XheAac => Some(
-                [9_600, 12_000, 16_000, 19_200, 24_000, 32_000, 38_400, 48_000]
-                    [usize::from(self.sample_rate_code & 7)],
+                [
+                    9_600, 12_000, 16_000, 19_200, 24_000, 32_000, 38_400, 48_000,
+                ][usize::from(self.sample_rate_code & 7)],
             ),
             DrmAudioCoding::Aac => match self.sample_rate_code {
                 0 => Some(8_000),
@@ -281,10 +283,14 @@ impl AudioInfo {
     /// 24 kHz in DRM30); `mode` must be [`AudioMode::ParametricStereo`] only with `sbr`.
     pub fn aac(core_rate_hz: u32, sbr: bool, mode: AudioMode) -> Result<Self, CodecError> {
         let code = Self::sample_rate_code(DrmAudioCoding::Aac, core_rate_hz).ok_or_else(|| {
-            CodecError::InvalidConfig(format!("AAC core rate {core_rate_hz} Hz cannot be signalled"))
+            CodecError::InvalidConfig(format!(
+                "AAC core rate {core_rate_hz} Hz cannot be signalled"
+            ))
         })?;
         if mode == AudioMode::ParametricStereo && !sbr {
-            return Err(CodecError::InvalidConfig("parametric stereo requires SBR".into()));
+            return Err(CodecError::InvalidConfig(
+                "parametric stereo requires SBR".into(),
+            ));
         }
         if mode == AudioMode::Reserved {
             return Err(CodecError::InvalidConfig("reserved audio mode".into()));
@@ -327,7 +333,11 @@ impl AudioInfo {
         Ok(AudioInfo {
             coding: AudioCodingField::XheAac,
             sbr: false,
-            mode: if stereo { AudioMode::Stereo } else { AudioMode::Mono },
+            mode: if stereo {
+                AudioMode::Stereo
+            } else {
+                AudioMode::Mono
+            },
             sample_rate_code: code,
             text_flag: false,
             enhancement_flag: false,
@@ -351,7 +361,9 @@ mod tests {
     fn aac_roundtrip_matches_dream_layout() {
         // HE-AAC, 12 kHz core, mono, text: coding 00, SBR 1, mode 00, rate 001 -> 0x21;
         // text 1, enh 0, coder 00000, rfa 0 -> 0x80.
-        let info = AudioInfo::aac(12_000, true, AudioMode::Mono).unwrap().with_text_flag(true);
+        let info = AudioInfo::aac(12_000, true, AudioMode::Mono)
+            .unwrap()
+            .with_text_flag(true);
         let t9 = info.to_type9_bytes();
         assert_eq!(t9, vec![0x21, 0x80]);
         assert_eq!(AudioInfo::from_type9_bytes(&t9).unwrap(), info);
@@ -390,10 +402,17 @@ mod tests {
         let mjf = AudioInfo::opus(OpusSignalling::CodingField);
         assert_eq!(mjf.to_type9_bytes(), vec![0x45, 0x00]);
         assert_eq!(
-            AudioInfo::from_type9_bytes(&[0x45, 0x00]).unwrap().drm_audio_coding(),
+            AudioInfo::from_type9_bytes(&[0x45, 0x00])
+                .unwrap()
+                .drm_audio_coding(),
             Some(DrmAudioCoding::Opus)
         );
         // Reserved coding -> no decoder.
-        assert_eq!(AudioInfo::from_type9_bytes(&[0x80, 0]).unwrap().drm_audio_coding(), None);
+        assert_eq!(
+            AudioInfo::from_type9_bytes(&[0x80, 0])
+                .unwrap()
+                .drm_audio_coding(),
+            None
+        );
     }
 }

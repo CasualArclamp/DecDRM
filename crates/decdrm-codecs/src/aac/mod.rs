@@ -49,7 +49,9 @@ pub(crate) fn cb_lav(cb: u8) -> i32 {
 
 /// Smallest virtual codebook (16..31) able to carry `max_abs`, or 11 above 2047.
 pub(crate) fn vcb11_for(max_abs: i32) -> u8 {
-    (16..=31).find(|&cb| cb_lav(cb) >= max_abs).unwrap_or(ESC_HCB)
+    (16..=31)
+        .find(|&cb| cb_lav(cb) >= max_abs)
+        .unwrap_or(ESC_HCB)
 }
 
 /// Scalefactor band offsets for 960-sample frames (ISO/IEC 14496-3 Tables 4.130ff;
@@ -60,30 +62,43 @@ pub(crate) struct SfbTable {
 }
 
 const SFB_16_960: [u16; 43] = [
-    0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 100, 112, 124, 136, 148, 160, 172, 184, 196,
-    212, 228, 244, 260, 280, 300, 320, 344, 368, 396, 424, 456, 492, 532, 572, 616, 664, 716,
-    772, 832, 896, 960,
+    0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 100, 112, 124, 136, 148, 160, 172, 184, 196, 212,
+    228, 244, 260, 280, 300, 320, 344, 368, 396, 424, 456, 492, 532, 572, 616, 664, 716, 772, 832,
+    896, 960,
 ];
-const SFB_16_120: [u16; 16] = [0, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 60, 72, 88, 108, 120];
+const SFB_16_120: [u16; 16] = [
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 60, 72, 88, 108, 120,
+];
 const SFB_24_960: [u16; 47] = [
-    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 52, 60, 68, 76, 84, 92, 100, 108, 116, 124,
-    136, 148, 160, 172, 188, 204, 220, 240, 260, 284, 308, 336, 364, 396, 432, 468, 508, 552,
-    600, 652, 704, 768, 832, 896, 960,
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 52, 60, 68, 76, 84, 92, 100, 108, 116, 124, 136,
+    148, 160, 172, 188, 204, 220, 240, 260, 284, 308, 336, 364, 396, 432, 468, 508, 552, 600, 652,
+    704, 768, 832, 896, 960,
 ];
-const SFB_24_120: [u16; 16] = [0, 4, 8, 12, 16, 20, 24, 28, 36, 44, 52, 64, 76, 92, 108, 120];
+const SFB_24_120: [u16; 16] = [
+    0, 4, 8, 12, 16, 20, 24, 28, 36, 44, 52, 64, 76, 92, 108, 120,
+];
 const SFB_48_960: [u16; 50] = [
-    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 88, 96, 108, 120, 132, 144,
-    160, 176, 196, 216, 240, 264, 292, 320, 352, 384, 416, 448, 480, 512, 544, 576, 608, 640,
-    672, 704, 736, 768, 800, 832, 864, 896, 928, 960,
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 88, 96, 108, 120, 132, 144, 160,
+    176, 196, 216, 240, 264, 292, 320, 352, 384, 416, 448, 480, 512, 544, 576, 608, 640, 672, 704,
+    736, 768, 800, 832, 864, 896, 928, 960,
 ];
 const SFB_48_120: [u16; 15] = [0, 4, 8, 12, 16, 20, 28, 36, 44, 56, 68, 80, 96, 112, 120];
 
 /// The 960/120 band tables for an AAC core sampling rate (the rates DRM uses).
 pub(crate) fn sfb_table_960(sample_rate: u32) -> Option<SfbTable> {
     match sample_rate {
-        11_025 | 12_000 | 16_000 => Some(SfbTable { long: &SFB_16_960, short: &SFB_16_120 }),
-        22_050 | 24_000 => Some(SfbTable { long: &SFB_24_960, short: &SFB_24_120 }),
-        32_000 | 44_100 | 48_000 => Some(SfbTable { long: &SFB_48_960, short: &SFB_48_120 }),
+        11_025 | 12_000 | 16_000 => Some(SfbTable {
+            long: &SFB_16_960,
+            short: &SFB_16_120,
+        }),
+        22_050 | 24_000 => Some(SfbTable {
+            long: &SFB_24_960,
+            short: &SFB_24_120,
+        }),
+        32_000 | 44_100 | 48_000 => Some(SfbTable {
+            long: &SFB_48_960,
+            short: &SFB_48_120,
+        }),
         _ => None,
     }
 }
@@ -112,7 +127,11 @@ impl IcsInfo {
 
     /// Lines per window (960 or 120).
     pub(crate) fn window_len(&self) -> usize {
-        if self.is_short() { FRAME_LEN / 8 } else { FRAME_LEN }
+        if self.is_short() {
+            FRAME_LEN / 8
+        } else {
+            FRAME_LEN
+        }
     }
 
     /// Reads MPEG-4 GA `ics_info()` (with the long-window predictor flag).
@@ -265,7 +284,9 @@ pub(crate) fn read_codeword(
 pub(crate) fn codeword_bits(cb: u8, v: &[i32]) -> Result<(u64, u32), CodecError> {
     let lav = cb_lav(cb);
     if v.iter().take(cb_dim(cb)).any(|x| x.abs() > lav) {
-        return Err(CodecError::Repack(format!("value exceeds LAV of codebook {cb}")));
+        return Err(CodecError::Repack(format!(
+            "value exceeds LAV of codebook {cb}"
+        )));
     }
     let idx = match cb {
         1 | 2 => 27 * (v[0] + 1) + 9 * (v[1] + 1) + 3 * (v[2] + 1) + (v[3] + 1),
@@ -274,7 +295,11 @@ pub(crate) fn codeword_bits(cb: u8, v: &[i32]) -> Result<(u64, u32), CodecError>
         7 | 8 => 8 * v[0].abs() + v[1].abs(),
         9 | 10 => 13 * v[0].abs() + v[1].abs(),
         11 | 16..=31 => 17 * v[0].abs().min(16) + v[1].abs().min(16),
-        _ => return Err(CodecError::Repack(format!("codebook {cb} has no codewords"))),
+        _ => {
+            return Err(CodecError::Repack(format!(
+                "codebook {cb} has no codewords"
+            )));
+        }
     } as usize;
     let (code, len) = huffman::tables().spectral(cb).code(idx);
     let mut bits = u64::from(code);

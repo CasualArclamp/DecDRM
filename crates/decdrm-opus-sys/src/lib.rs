@@ -151,8 +151,11 @@ unsafe extern "C" {
     // --- decoder ---
     pub fn opus_decoder_get_size(channels: c_int) -> c_int;
     /// Returns NULL on failure (`error` receives the reason).
-    pub fn opus_decoder_create(Fs: opus_int32, channels: c_int, error: *mut c_int)
-    -> *mut OpusDecoder;
+    pub fn opus_decoder_create(
+        Fs: opus_int32,
+        channels: c_int,
+        error: *mut c_int,
+    ) -> *mut OpusDecoder;
     /// Decodes a packet (or runs PLC when `data` is NULL / `len` is 0) into interleaved
     /// float PCM; returns samples per channel or a negative error code. `frame_size` is
     /// the capacity of `pcm` per channel; for PLC/FEC it must be the exact duration (a
@@ -229,7 +232,10 @@ mod tests {
         unsafe {
             let enc = opus_encoder_create(FS, 1, OPUS_APPLICATION_AUDIO, &mut err);
             assert!(!enc.is_null(), "{err}");
-            assert_eq!(opus_encoder_ctl(enc, OPUS_SET_BITRATE_REQUEST, 32_000i32), OPUS_OK);
+            assert_eq!(
+                opus_encoder_ctl(enc, OPUS_SET_BITRATE_REQUEST, 32_000i32),
+                OPUS_OK
+            );
             assert_eq!(opus_encoder_ctl(enc, OPUS_SET_VBR_REQUEST, 0i32), OPUS_OK);
             let mut br: opus_int32 = 0;
             assert_eq!(
@@ -249,7 +255,10 @@ mod tests {
             assert!(n > 0, "encode failed: {n}");
             // CBR at 32 kbit/s and 20 ms: exactly 80 bytes.
             assert_eq!(n, 80);
-            assert_eq!(opus_packet_get_nb_samples(packet.as_ptr(), n, FS), N as c_int);
+            assert_eq!(
+                opus_packet_get_nb_samples(packet.as_ptr(), n, FS),
+                N as c_int
+            );
             assert_eq!(opus_packet_get_nb_channels(packet.as_ptr()), 1);
 
             let mut out = vec![0f32; 2 * 5760];

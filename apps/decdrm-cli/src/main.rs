@@ -123,6 +123,7 @@ fn rx(a: RxArgs) -> Result<()> {
         match engine.recv_event(Duration::from_millis(200)) {
             Some(EngineEvent::Log(l)) => println!("{l}"),
             Some(EngineEvent::Text(t)) => println!("text: {t}"),
+            Some(EngineEvent::Data { .. }) => {}
             Some(EngineEvent::Stopped { error }) => {
                 if let Some(e) = error {
                     eprintln!("error: {e}");

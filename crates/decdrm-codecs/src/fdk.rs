@@ -68,7 +68,11 @@ fn fdk_error_name(code: i32) -> &'static str {
 }
 
 fn dec_err(code: i32, context: &'static str) -> CodecError {
-    CodecError::Fdk { code, name: fdk_error_name(code), context }
+    CodecError::Fdk {
+        code,
+        name: fdk_error_name(code),
+        context,
+    }
 }
 
 fn enc_err(code: i32, context: &'static str) -> CodecError {
@@ -87,7 +91,11 @@ fn enc_err(code: i32, context: &'static str) -> CodecError {
         ffi::AACENC_ENCODE_EOF => "end of file",
         _ => "error",
     };
-    CodecError::Fdk { code, name, context }
+    CodecError::Fdk {
+        code,
+        name,
+        context,
+    }
 }
 
 /// Version and DRM-relevant capabilities of the linked FDK-AAC library.
@@ -114,7 +122,10 @@ fn lib_infos(f: unsafe extern "C" fn(*mut ffi::LIB_INFO) -> i32) -> Vec<ffi::LIB
     // SAFETY: `info` holds FDK_MODULE_LAST records initialised to FDK_NONE, as the
     // *_GetLibInfo functions require.
     unsafe { f(info.as_mut_ptr()) };
-    info.iter().copied().take_while(|i| i.module_id != ffi::FDK_NONE).collect()
+    info.iter()
+        .copied()
+        .take_while(|i| i.module_id != ffi::FDK_NONE)
+        .collect()
 }
 
 fn module(infos: &[ffi::LIB_INFO], id: ffi::FDK_MODULE_ID) -> Option<ffi::LIB_INFO> {
@@ -124,7 +135,9 @@ fn module(infos: &[ffi::LIB_INFO], id: ffi::FDK_MODULE_ID) -> Option<ffi::LIB_IN
 fn version_str(i: &ffi::LIB_INFO) -> String {
     // SAFETY: FDK fills `versionStr` with a NUL-terminated string (and the array is
     // zero-initialised).
-    unsafe { CStr::from_ptr(i.versionStr.as_ptr()) }.to_string_lossy().into_owned()
+    unsafe { CStr::from_ptr(i.versionStr.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Queries the linked FDK-AAC library.
@@ -135,8 +148,12 @@ pub fn fdk_lib_info() -> FdkLibInfo {
     let aac = flags(&dec, ffi::FDK_AACDEC);
     let sbr = flags(&dec, ffi::FDK_SBRDEC);
     FdkLibInfo {
-        decoder_version: module(&dec, ffi::FDK_AACDEC).map(|i| version_str(&i)).unwrap_or_default(),
-        encoder_version: module(&enc, ffi::FDK_AACENC).map(|i| version_str(&i)).unwrap_or_default(),
+        decoder_version: module(&dec, ffi::FDK_AACDEC)
+            .map(|i| version_str(&i))
+            .unwrap_or_default(),
+        encoder_version: module(&enc, ffi::FDK_AACENC)
+            .map(|i| version_str(&i))
+            .unwrap_or_default(),
         drm: aac & ffi::CAPF_AAC_DRM_BSFORMAT != 0,
         drm_sbr: sbr & ffi::CAPF_SBR_DRM_BS != 0,
         parametric_stereo: sbr & ffi::CAPF_SBR_PS_MPEG != 0,
@@ -206,8 +223,11 @@ impl FdkDrmDecoder {
         };
         // SAFETY: plain constructor call; NULL is handled below.
         let raw = unsafe { ffi::aacDecoder_Open(ffi::TT_DRM, 1) };
-        let handle = NonNull::new(raw)
-            .ok_or(CodecError::Fdk { code: 0, name: "aacDecoder_Open failed", context: "open" })?;
+        let handle = NonNull::new(raw).ok_or(CodecError::Fdk {
+            code: 0,
+            name: "aacDecoder_Open failed",
+            context: "open",
+        })?;
         let mut dec = FdkDrmDecoder {
             handle,
             info: info.clone(),
@@ -272,7 +292,9 @@ impl FdkDrmDecoder {
             core_channels: si.aacNumChannels.clamp(0, 8) as u16,
             sbr,
             ps,
-            usac: si.aot == ffi::AOT_USAC || si.aot == ffi::AOT_DRM_USAC || si.flags & ffi::AC_USAC != 0,
+            usac: si.aot == ffi::AOT_USAC
+                || si.aot == ffi::AOT_DRM_USAC
+                || si.flags & ffi::AC_USAC != 0,
             output_delay: si.outputDelay,
         })
     }
@@ -280,19 +302,32 @@ impl FdkDrmDecoder {
     /// Output geometry expected from the configuration alone, used for silence when FDK
     /// cannot conceal yet (before the first decoded frame).
     fn nominal_geometry(&self) -> Option<(u32, u16, usize)> {
-        let ch = if self.info.mode == AudioMode::Mono { 1 } else { 2 };
+        let ch = if self.info.mode == AudioMode::Mono {
+            1
+        } else {
+            2
+        };
         if self.usac {
             // FDK knows the core rate and core frame length (and the SBR output rate)
             // right after configuration.
             let si = self.raw_stream_info()?;
             let core = u32::try_from(si.aacSampleRate).ok().filter(|&r| r > 0)?;
-            let core_len = usize::try_from(si.aacSamplesPerFrame).ok().filter(|&n| n > 0)?;
-            let rate = u32::try_from(si.extSamplingRate).ok().filter(|&r| r > 0).unwrap_or(core);
+            let core_len = usize::try_from(si.aacSamplesPerFrame)
+                .ok()
+                .filter(|&n| n > 0)?;
+            let rate = u32::try_from(si.extSamplingRate)
+                .ok()
+                .filter(|&r| r > 0)
+                .unwrap_or(core);
             let len = core_len * rate as usize / core as usize;
             return Some((rate, ch, len));
         }
         let core = self.info.sample_rate()?;
-        let (rate, len) = if self.info.sbr { (2 * core, 2 * aac::FRAME_LEN) } else { (core, aac::FRAME_LEN) };
+        let (rate, len) = if self.info.sbr {
+            (2 * core, 2 * aac::FRAME_LEN)
+        } else {
+            (core, aac::FRAME_LEN)
+        };
         Some((rate, ch, len))
     }
 
@@ -320,13 +355,18 @@ impl FdkDrmDecoder {
             self.clear_input();
             return Err(dec_err(err, "decoding"));
         }
-        let Some(si) = self.raw_stream_info() else { return Ok(None) };
+        let Some(si) = self.raw_stream_info() else {
+            return Ok(None);
+        };
         let (ch, n) = (si.numChannels, si.frameSize);
         if ch <= 0 || n <= 0 || (ch as usize) * (n as usize) > OUT_CAPACITY {
             return Ok(None);
         }
         let total = ch as usize * n as usize;
-        let samples: Vec<f32> = self.out[..total].iter().map(|&s| f32::from(s) / 32768.0).collect();
+        let samples: Vec<f32> = self.out[..total]
+            .iter()
+            .map(|&s| f32::from(s) / 32768.0)
+            .collect();
         let rate = si.sampleRate.max(0) as u32;
         self.last = Some((rate, ch as u16, n as usize));
         Ok(Some(PcmFrame {
@@ -339,7 +379,12 @@ impl FdkDrmDecoder {
 
     fn silence(&self) -> Result<PcmFrame, CodecError> {
         let (rate, ch, n) = self.last.ok_or(CodecError::NothingToConceal)?;
-        Ok(PcmFrame { sample_rate: rate, channels: ch, samples: vec![0.0; ch as usize * n], concealed: true })
+        Ok(PcmFrame {
+            sample_rate: rate,
+            channels: ch,
+            samples: vec![0.0; ch as usize * n],
+            concealed: true,
+        })
     }
 }
 
@@ -364,7 +409,8 @@ impl DrmAudioDecoder for FdkDrmDecoder {
         let mut valid = size;
         // SAFETY: `ptr`/`size` describe the live `input` buffer; FDK copies from it and
         // updates `valid`.
-        let err = unsafe { ffi::aacDecoder_Fill(self.handle.as_ptr(), &mut ptr, &size, &mut valid) };
+        let err =
+            unsafe { ffi::aacDecoder_Fill(self.handle.as_ptr(), &mut ptr, &size, &mut valid) };
         if err != ffi::AAC_DEC_OK || valid != 0 {
             self.clear_input();
             return Err(if err != ffi::AAC_DEC_OK {
@@ -396,10 +442,18 @@ impl DrmAudioDecoder for FdkDrmDecoder {
         let si = self.stream_info();
         let (sbr, ps, usac) = match si {
             Some(s) if s.sample_rate > 0 => (s.sbr || self.info.sbr, s.ps, s.usac || self.usac),
-            _ => (self.info.sbr, self.info.mode == AudioMode::ParametricStereo, self.usac),
+            _ => (
+                self.info.sbr,
+                self.info.mode == AudioMode::ParametricStereo,
+                self.usac,
+            ),
         };
         let khz = |hz: u32| {
-            if hz % 1000 == 0 { format!("{}", hz / 1000) } else { format!("{:.1}", hz as f64 / 1000.0) }
+            if (hz / 1000) * 1000 == hz {
+                format!("{}", hz / 1000)
+            } else {
+                format!("{:.1}", f64::from(hz) / 1000.0)
+            }
         };
         let stereo = match self.info.mode {
             AudioMode::Mono => "mono",
@@ -408,7 +462,11 @@ impl DrmAudioDecoder for FdkDrmDecoder {
             AudioMode::Reserved => "reserved mode",
         };
         if usac {
-            let rate = si.map(|s| s.sample_rate).filter(|&r| r > 0).or(self.info.sample_rate()).unwrap_or(0);
+            let rate = si
+                .map(|s| s.sample_rate)
+                .filter(|&r| r > 0)
+                .or(self.info.sample_rate())
+                .unwrap_or(0);
             return format!("xHE-AAC (USAC) {stereo}, {} kHz", khz(rate));
         }
         let core = si
@@ -417,8 +475,16 @@ impl DrmAudioDecoder for FdkDrmDecoder {
             .or(self.info.sample_rate())
             .unwrap_or(0);
         match (sbr, ps) {
-            (true, true) => format!("HE-AAC v2 (SBR+PS) {} kHz core, {} kHz stereo", khz(core), khz(2 * core)),
-            (true, false) => format!("HE-AAC (SBR) {stereo}, {} kHz core, {} kHz output", khz(core), khz(2 * core)),
+            (true, true) => format!(
+                "HE-AAC v2 (SBR+PS) {} kHz core, {} kHz stereo",
+                khz(core),
+                khz(2 * core)
+            ),
+            (true, false) => format!(
+                "HE-AAC (SBR) {stereo}, {} kHz core, {} kHz output",
+                khz(core),
+                khz(2 * core)
+            ),
             _ => format!("AAC {stereo}, {} kHz", khz(core)),
         }
     }
@@ -449,11 +515,16 @@ pub struct FdkEncoderConfig {
     pub stereo: bool,
     /// AAC core sampling rate: 12 000 or 24 000 Hz in DRM30 (ES 201 980 §5.3.1).
     pub core_sample_rate: u32,
-    /// Target bit rate of the AAC payload in bit/s. The encoder runs in constant bit rate
-    /// mode with the peak rate pinned to this value, so every GA frame FDK produces stays
-    /// within `bitrate × 960 / core_sample_rate` bits; DRM re-packing changes the size by
-    /// a few bits either way (VCB11/HCR side info added, MPEG-4 element headers and fill
-    /// removed) — see [`DrmAacFrame::min_len`] for the actual size.
+    /// Target bit rate of the AAC payload in bit/s.
+    ///
+    /// FDK runs in constant-bit-rate mode with the peak rate pinned to this value, so each
+    /// of its MPEG-4 frames is `bitrate × 960 / core_sample_rate / 8` bytes (padded with
+    /// fill elements). The DRM re-packing drops the fill and the MPEG-4 element headers but
+    /// adds VCB11/HCR side information: measured on music-like signals, DRM frames are on
+    /// average 4–10 % *smaller* than that budget, but single frames can exceed it by up to
+    /// ~3 % (a few bytes). A super-frame packer must therefore check the real sizes
+    /// ([`DrmAacFrame::min_len`]); the sum over the 5 or 10 frames of a super frame stays
+    /// well below the budget in practice.
     pub bitrate: u32,
     /// Frames between SBR headers (`None`: every frame, the most robust choice for a
     /// broadcast that listeners join at arbitrary times).
@@ -464,7 +535,13 @@ impl FdkEncoderConfig {
     /// A configuration with the given profile, core rate and bit rate (mono unless
     /// HE-AAC v2).
     pub fn new(profile: AacProfile, core_sample_rate: u32, bitrate: u32) -> Self {
-        Self { profile, stereo: false, core_sample_rate, bitrate, sbr_header_period: None }
+        Self {
+            profile,
+            stereo: false,
+            core_sample_rate,
+            bitrate,
+            sbr_header_period: None,
+        }
     }
 
     /// Whether SBR is used.
@@ -474,17 +551,29 @@ impl FdkEncoderConfig {
 
     /// Sampling rate of the PCM passed to [`FdkDrmEncoder::encode`].
     pub fn input_sample_rate(&self) -> u32 {
-        if self.sbr() { 2 * self.core_sample_rate } else { self.core_sample_rate }
+        if self.sbr() {
+            2 * self.core_sample_rate
+        } else {
+            self.core_sample_rate
+        }
     }
 
     /// Channels of the PCM passed to [`FdkDrmEncoder::encode`].
     pub fn input_channels(&self) -> usize {
-        if self.profile == AacProfile::HeAacV2 || self.stereo { 2 } else { 1 }
+        if self.profile == AacProfile::HeAacV2 || self.stereo {
+            2
+        } else {
+            1
+        }
     }
 
     /// Input samples per channel per frame (960, or 1920 with SBR).
     pub fn frame_len(&self) -> usize {
-        if self.sbr() { 2 * aac::FRAME_LEN } else { aac::FRAME_LEN }
+        if self.sbr() {
+            2 * aac::FRAME_LEN
+        } else {
+            aac::FRAME_LEN
+        }
     }
 
     /// DRM audio mode signalled in the SDC.
@@ -598,7 +687,10 @@ impl FdkDrmEncoder {
     /// Creates and initialises an encoder.
     pub fn new(config: FdkEncoderConfig) -> Result<Self, CodecError> {
         let table = sfb_table_960(config.core_sample_rate).ok_or_else(|| {
-            CodecError::InvalidConfig(format!("unsupported AAC core rate {} Hz", config.core_sample_rate))
+            CodecError::InvalidConfig(format!(
+                "unsupported AAC core rate {} Hz",
+                config.core_sample_rate
+            ))
         })?;
         if !matches!(config.core_sample_rate, 12_000 | 24_000 | 48_000) {
             return Err(CodecError::InvalidConfig(format!(
@@ -629,13 +721,25 @@ impl FdkDrmEncoder {
             AacProfile::HeAac => ffi::AOT_SBR,
             AacProfile::HeAacV2 => ffi::AOT_PS,
         };
-        let mode = if c.input_channels() == 2 { ffi::MODE_2 } else { ffi::MODE_1 };
+        let mode = if c.input_channels() == 2 {
+            ffi::MODE_2
+        } else {
+            ffi::MODE_1
+        };
         let mut params: Vec<(ffi::AACENC_PARAM, u32, &'static str)> = vec![
             (ffi::AACENC_AOT, aot as u32, "AOT"),
             (ffi::AACENC_SAMPLERATE, c.input_sample_rate(), "sample rate"),
             (ffi::AACENC_CHANNELMODE, mode as u32, "channel mode"),
-            (ffi::AACENC_GRANULE_LENGTH, aac::FRAME_LEN as u32, "960-sample granule"),
-            (ffi::AACENC_TRANSMUX, ffi::TT_MP4_RAW as u32, "raw transport"),
+            (
+                ffi::AACENC_GRANULE_LENGTH,
+                aac::FRAME_LEN as u32,
+                "960-sample granule",
+            ),
+            (
+                ffi::AACENC_TRANSMUX,
+                ffi::TT_MP4_RAW as u32,
+                "raw transport",
+            ),
             (ffi::AACENC_BITRATEMODE, 0, "CBR"),
             (ffi::AACENC_BITRATE, c.bitrate, "bit rate"),
             (ffi::AACENC_PEAK_BITRATE, c.bitrate, "peak bit rate"),
@@ -643,7 +747,11 @@ impl FdkDrmEncoder {
         ];
         if c.sbr() {
             params.push((ffi::AACENC_DECDRM_DRM_SBR, 1, "DRM SBR syntax"));
-            params.push((ffi::AACENC_HEADER_PERIOD, c.sbr_header_period.unwrap_or(1).clamp(1, 255), "SBR header period"));
+            params.push((
+                ffi::AACENC_HEADER_PERIOD,
+                c.sbr_header_period.unwrap_or(1).clamp(1, 255),
+                "SBR header period",
+            ));
         }
         for (param, value, what) in params {
             // SAFETY: valid handle; integer parameters.
@@ -698,8 +806,12 @@ impl FdkDrmEncoder {
     /// The SDC type-9 audio information a receiver needs to decode this stream (port of
     /// `CAudioParam::getType9Bytes` semantics; call `.to_type9_bytes()` on it).
     pub fn audio_info(&self) -> AudioInfo {
-        AudioInfo::aac(self.config.core_sample_rate, self.config.sbr(), self.config.audio_mode())
-            .expect("validated in new()")
+        AudioInfo::aac(
+            self.config.core_sample_rate,
+            self.config.sbr(),
+            self.config.audio_mode(),
+        )
+        .expect("validated in new()")
     }
 
     /// Encodes one frame of interleaved PCM (`frame_len() × input_channels()` samples at
@@ -714,7 +826,11 @@ impl FdkDrmEncoder {
             return Ok(None);
         };
         let drm = aac::drm::repack(&au)?;
-        Ok(Some(DrmAacFrame { crc: drm.crc, core: drm.core, sbr: drm.sbr }))
+        Ok(Some(DrmAacFrame {
+            crc: drm.crc,
+            core: drm.core,
+            sbr: drm.sbr,
+        }))
     }
 
     /// Runs FDK on one frame; the raw MPEG-4 access unit is left in `self.output[..n]`.
@@ -751,12 +867,21 @@ impl FdkDrmEncoder {
             bufSizes: &mut out_size,
             bufElSizes: &mut out_el,
         };
-        let in_args = ffi::AACENC_InArgs { numInSamples: self.input.len() as i32, numAncBytes: 0 };
+        let in_args = ffi::AACENC_InArgs {
+            numInSamples: self.input.len() as i32,
+            numAncBytes: 0,
+        };
         let mut out_args = ffi::AACENC_OutArgs::default();
         // SAFETY: the descriptors point at live locals and buffers whose sizes are given in
         // bytes as the API requires; FDK does not retain the pointers.
         let err = unsafe {
-            ffi::aacEncEncode(self.handle.as_ptr(), &in_desc, &out_desc, &in_args, &mut out_args)
+            ffi::aacEncEncode(
+                self.handle.as_ptr(),
+                &in_desc,
+                &out_desc,
+                &in_args,
+                &mut out_args,
+            )
         };
         if err != ffi::AACENC_OK {
             return Err(enc_err(err, "encoding"));
@@ -794,7 +919,10 @@ mod tests {
             // SAFETY: pointer/length of the live `conf` buffer.
             let err = unsafe { ffi::aacDecoder_ConfigRaw(h.as_ptr(), &mut p, &len) };
             assert_eq!(err, ffi::AAC_DEC_OK, "GA decoder config");
-            Self { h, out: vec![0; OUT_CAPACITY] }
+            Self {
+                h,
+                out: vec![0; OUT_CAPACITY],
+            }
         }
 
         fn decode(&mut self, au: &[u8]) -> Vec<f32> {
@@ -804,12 +932,23 @@ mod tests {
             let mut valid = size;
             // SAFETY: pointer/length of the live `buf`; output buffer of OUT_CAPACITY.
             unsafe {
-                assert_eq!(ffi::aacDecoder_Fill(self.h.as_ptr(), &mut p, &size, &mut valid), 0);
-                let err = ffi::aacDecoder_DecodeFrame(self.h.as_ptr(), self.out.as_mut_ptr(), OUT_CAPACITY as i32, 0);
+                assert_eq!(
+                    ffi::aacDecoder_Fill(self.h.as_ptr(), &mut p, &size, &mut valid),
+                    0
+                );
+                let err = ffi::aacDecoder_DecodeFrame(
+                    self.h.as_ptr(),
+                    self.out.as_mut_ptr(),
+                    OUT_CAPACITY as i32,
+                    0,
+                );
                 assert_eq!(err, ffi::AAC_DEC_OK, "GA decode");
                 let si = *ffi::aacDecoder_GetStreamInfo(self.h.as_ptr());
                 let n = (si.frameSize * si.numChannels) as usize;
-                self.out[..n].iter().map(|&s| f32::from(s) / 32768.0).collect()
+                self.out[..n]
+                    .iter()
+                    .map(|&s| f32::from(s) / 32768.0)
+                    .collect()
             }
         }
     }
@@ -897,7 +1036,10 @@ mod tests {
         ];
         let mut total = Stats::default();
         for (rate, stereo, bitrate) in cases {
-            let cfg = FdkEncoderConfig { stereo, ..FdkEncoderConfig::new(AacProfile::Lc, rate, bitrate) };
+            let cfg = FdkEncoderConfig {
+                stereo,
+                ..FdkEncoderConfig::new(AacProfile::Lc, rate, bitrate)
+            };
             let mut enc = FdkDrmEncoder::new(cfg.clone()).unwrap();
             let mut ga_dec = GaDecoder::new(&enc.asc);
             let mut drm_dec = FdkDrmDecoder::new(&enc.audio_info()).unwrap();
@@ -910,14 +1052,28 @@ mod tests {
                     continue;
                 }
                 let raw = enc.output[..n].to_vec();
-                let Some(au) = parse_raw_data_block(&raw, &enc.table).unwrap() else { continue };
+                let Some(au) = parse_raw_data_block(&raw, &enc.table).unwrap() else {
+                    continue;
+                };
                 collect_stats(&mut stats, &au);
                 let drm = aac::drm::repack(&au).unwrap();
-                let frame = DrmAacFrame { crc: drm.crc, core: drm.core, sbr: drm.sbr };
+                let frame = DrmAacFrame {
+                    crc: drm.crc,
+                    core: drm.core,
+                    sbr: drm.sbr,
+                };
                 let reference = ga_dec.decode(&raw);
-                let got = drm_dec.decode(&frame.to_bytes(), Some(frame.crc())).unwrap();
-                assert!(!got.concealed, "{rate} Hz stereo={stereo} {bitrate} bit/s frame {i}: concealed");
-                assert_eq!(got.samples, reference, "{rate} Hz stereo={stereo} {bitrate} bit/s frame {i}");
+                let got = drm_dec
+                    .decode(&frame.to_bytes(), Some(frame.crc()))
+                    .unwrap();
+                assert!(
+                    !got.concealed,
+                    "{rate} Hz stereo={stereo} {bitrate} bit/s frame {i}: concealed"
+                );
+                assert_eq!(
+                    got.samples, reference,
+                    "{rate} Hz stereo={stereo} {bitrate} bit/s frame {i}"
+                );
             }
             eprintln!("{rate} Hz stereo={stereo} {bitrate} bit/s: {stats:?}");
             total.frames += stats.frames;
@@ -939,11 +1095,18 @@ mod tests {
         core.push(0b1011, 4);
         let mut sbr = BitBuf::new();
         sbr.push(0b110, 3);
-        let f = DrmAacFrame { crc: 0, core, sbr: Some(sbr) };
+        let f = DrmAacFrame {
+            crc: 0,
+            core,
+            sbr: Some(sbr),
+        };
         assert_eq!(f.min_len(), 1);
         // core 1011, gap 0, SBR reversed at the end: 011.
         assert_eq!(f.to_bytes(), vec![0b1011_0011]);
-        assert_eq!(f.to_bytes_padded(2).unwrap(), vec![0b1011_0000, 0b0000_0011]);
+        assert_eq!(
+            f.to_bytes_padded(2).unwrap(),
+            vec![0b1011_0000, 0b0000_0011]
+        );
         assert!(f.to_bytes_padded(0).is_err());
     }
 
@@ -953,7 +1116,11 @@ mod tests {
         for j in 0..len {
             let t = (frame * len + j) as f64 / f64::from(fs);
             let f0 = 196.0 * (1.0 + 0.01 * (2.0 * std::f64::consts::PI * 5.0 * t).sin());
-            let burst = if frame % 11 == 5 && j > len / 3 { 0.5 } else { 0.0 };
+            let burst = if frame % 11 == 5 && j > len / 3 {
+                0.5
+            } else {
+                0.0
+            };
             for ch in 0..channels {
                 *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 let noise = f64::from(*seed >> 8) / f64::from(1u32 << 24) * 2.0 - 1.0;
@@ -981,20 +1148,35 @@ mod tests {
             (AacProfile::HeAacV2, 12_000, false, 18_000),
             (AacProfile::HeAac, 24_000, true, 32_000),
         ] {
-            let cfg = FdkEncoderConfig { stereo, ..FdkEncoderConfig::new(profile, rate, bitrate) };
+            let cfg = FdkEncoderConfig {
+                stereo,
+                ..FdkEncoderConfig::new(profile, rate, bitrate)
+            };
             let mut enc = FdkDrmEncoder::new(cfg.clone()).unwrap();
             let budget = f64::from(bitrate) * 960.0 / f64::from(rate) / 8.0;
             let mut seed = 5u32;
             let (mut ga, mut drm) = (Vec::new(), Vec::new());
             for i in 0..300 {
-                let pcm = noisy_music(i, cfg.frame_len(), cfg.input_sample_rate(), cfg.input_channels(), &mut seed);
+                let pcm = noisy_music(
+                    i,
+                    cfg.frame_len(),
+                    cfg.input_sample_rate(),
+                    cfg.input_channels(),
+                    &mut seed,
+                );
                 let n = enc.encode_raw(&pcm).unwrap();
                 if n == 0 {
                     continue;
                 }
-                let au = parse_raw_data_block(&enc.output[..n], &enc.table).unwrap().unwrap();
+                let au = parse_raw_data_block(&enc.output[..n], &enc.table)
+                    .unwrap()
+                    .unwrap();
                 let d = aac::drm::repack(&au).unwrap();
-                let f = DrmAacFrame { crc: d.crc, core: d.core, sbr: d.sbr };
+                let f = DrmAacFrame {
+                    crc: d.crc,
+                    core: d.core,
+                    sbr: d.sbr,
+                };
                 ga.push(n);
                 drm.push(f.min_len());
             }
@@ -1007,7 +1189,10 @@ mod tests {
                 ga.iter().max().unwrap()
             );
             assert!(dm < budget, "DRM mean {dm:.1} B above budget {budget:.1} B");
-            assert!((dx as f64) < budget * 1.06 + 2.0, "DRM max {dx} B vs budget {budget:.1} B");
+            assert!(
+                (dx as f64) < budget * 1.06 + 2.0,
+                "DRM max {dx} B vs budget {budget:.1} B"
+            );
         }
     }
 }

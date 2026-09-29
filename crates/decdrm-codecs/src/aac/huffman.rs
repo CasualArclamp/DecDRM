@@ -114,9 +114,13 @@ fn load() -> HuffTables {
     let mut codes = vec![0u32; 121];
     let mut lens = vec![0u8; 121];
     // SAFETY: both buffers hold 121 entries, the capacity passed.
-    let n = unsafe { fdk::decdrm_fdk_huffman_scalefactor(codes.as_mut_ptr(), lens.as_mut_ptr(), 121) };
+    let n =
+        unsafe { fdk::decdrm_fdk_huffman_scalefactor(codes.as_mut_ptr(), lens.as_mut_ptr(), 121) };
     assert_eq!(n, 121, "FDK shim returned no scalefactor table");
-    HuffTables { spectral, scf: Codebook::new(codes, lens) }
+    HuffTables {
+        spectral,
+        scf: Codebook::new(codes, lens),
+    }
 }
 
 #[cfg(test)]

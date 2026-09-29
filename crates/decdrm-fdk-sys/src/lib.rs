@@ -537,8 +537,11 @@ pub const AACENC_DECDRM_DRM_SBR: AACENC_PARAM = 0x0F01;
 
 unsafe extern "C" {
     // --- decoder ---
-    pub fn aacDecoder_AncDataInit(self_: HANDLE_AACDECODER, buffer: *mut UCHAR, size: c_int)
-    -> AAC_DECODER_ERROR;
+    pub fn aacDecoder_AncDataInit(
+        self_: HANDLE_AACDECODER,
+        buffer: *mut UCHAR,
+        size: c_int,
+    ) -> AAC_DECODER_ERROR;
     pub fn aacDecoder_AncDataGet(
         self_: HANDLE_AACDECODER,
         index: c_int,
@@ -550,8 +553,10 @@ unsafe extern "C" {
         param: AACDEC_PARAM,
         value: INT,
     ) -> AAC_DECODER_ERROR;
-    pub fn aacDecoder_GetFreeBytes(self_: HANDLE_AACDECODER, pFreeBytes: *mut UINT)
-    -> AAC_DECODER_ERROR;
+    pub fn aacDecoder_GetFreeBytes(
+        self_: HANDLE_AACDECODER,
+        pFreeBytes: *mut UINT,
+    ) -> AAC_DECODER_ERROR;
     /// Opens a decoder; returns NULL on failure.
     pub fn aacDecoder_Open(transportFmt: TRANSPORT_TYPE, nrOfLayers: UINT) -> HANDLE_AACDECODER;
     /// Configures the decoder out of band. For [`TT_DRM`], `conf[0]` is the SDC entity type
@@ -595,8 +600,10 @@ unsafe extern "C" {
         inargs: *const AACENC_InArgs,
         outargs: *mut AACENC_OutArgs,
     ) -> AACENC_ERROR;
-    pub fn aacEncInfo(hAacEncoder: HANDLE_AACENCODER, pInfo: *mut AACENC_InfoStruct)
-    -> AACENC_ERROR;
+    pub fn aacEncInfo(
+        hAacEncoder: HANDLE_AACENCODER,
+        pInfo: *mut AACENC_InfoStruct,
+    ) -> AACENC_ERROR;
     pub fn aacEncoder_SetParam(
         hAacEncoder: HANDLE_AACENCODER,
         param: AACENC_PARAM,
@@ -742,7 +749,10 @@ mod tests {
         assert_eq!(c.len(), rust.len(), "shim and Rust tables differ in length");
         for ((cname, cval), (rname, rval)) in c.iter().zip(rust.iter()) {
             assert_eq!(cname, rname, "table order mismatch");
-            assert_eq!(cval, rval, "layout mismatch for {cname}: C {cval} vs Rust {rval}");
+            assert_eq!(
+                cval, rval,
+                "layout mismatch for {cname}: C {cval} vs Rust {rval}"
+            );
         }
     }
 
@@ -751,11 +761,18 @@ mod tests {
         // SAFETY: `info` has FDK_MODULE_LAST records initialised to FDK_NONE, as required.
         let r = unsafe { f(info.as_mut_ptr()) };
         assert_eq!(r, 0);
-        info.iter().copied().take_while(|i| i.module_id != FDK_NONE).collect()
+        info.iter()
+            .copied()
+            .take_while(|i| i.module_id != FDK_NONE)
+            .collect()
     }
 
     fn flags_of(infos: &[LIB_INFO], id: FDK_MODULE_ID) -> UINT {
-        infos.iter().find(|i| i.module_id == id).map(|i| i.flags).unwrap_or(0)
+        infos
+            .iter()
+            .find(|i| i.module_id == id)
+            .map(|i| i.flags)
+            .unwrap_or(0)
     }
 
     #[test]
@@ -775,7 +792,10 @@ mod tests {
         let dec = infos.iter().find(|i| i.module_id == FDK_AACDEC).unwrap();
         // SAFETY: the library fills `versionStr` with a NUL-terminated string.
         let v = unsafe { CStr::from_ptr(dec.versionStr.as_ptr()) };
-        assert!(v.to_str().unwrap().starts_with("3."), "decoder version {v:?}");
+        assert!(
+            v.to_str().unwrap().starts_with("3."),
+            "decoder version {v:?}"
+        );
     }
 
     #[test]
@@ -791,15 +811,30 @@ mod tests {
         // SAFETY: valid out-pointer; the handle is closed below.
         unsafe {
             assert_eq!(aacEncOpen(&mut h, 0, 1), AACENC_OK);
-            assert_eq!(aacEncoder_SetParam(h, AACENC_AOT, AOT_SBR as UINT), AACENC_OK);
+            assert_eq!(
+                aacEncoder_SetParam(h, AACENC_AOT, AOT_SBR as UINT),
+                AACENC_OK
+            );
             assert_eq!(aacEncoder_SetParam(h, AACENC_SAMPLERATE, 24000), AACENC_OK);
-            assert_eq!(aacEncoder_SetParam(h, AACENC_CHANNELMODE, MODE_1 as UINT), AACENC_OK);
-            assert_eq!(aacEncoder_SetParam(h, AACENC_GRANULE_LENGTH, 960), AACENC_OK);
-            assert_eq!(aacEncoder_SetParam(h, AACENC_TRANSMUX, TT_MP4_RAW as UINT), AACENC_OK);
+            assert_eq!(
+                aacEncoder_SetParam(h, AACENC_CHANNELMODE, MODE_1 as UINT),
+                AACENC_OK
+            );
+            assert_eq!(
+                aacEncoder_SetParam(h, AACENC_GRANULE_LENGTH, 960),
+                AACENC_OK
+            );
+            assert_eq!(
+                aacEncoder_SetParam(h, AACENC_TRANSMUX, TT_MP4_RAW as UINT),
+                AACENC_OK
+            );
             assert_eq!(aacEncoder_SetParam(h, AACENC_BITRATE, 16000), AACENC_OK);
             assert_eq!(aacEncoder_SetParam(h, AACENC_DECDRM_DRM_SBR, 1), AACENC_OK);
             assert_eq!(aacEncoder_GetParam(h, AACENC_DECDRM_DRM_SBR), 1);
-            assert_eq!(aacEncoder_SetParam(h, AACENC_DECDRM_DRM_SBR, 7), AACENC_INVALID_CONFIG);
+            assert_eq!(
+                aacEncoder_SetParam(h, AACENC_DECDRM_DRM_SBR, 7),
+                AACENC_INVALID_CONFIG
+            );
             // Initialise with a NULL call, as documented in aacenc_lib.h.
             let r = aacEncEncode(
                 h,
@@ -831,17 +866,22 @@ mod tests {
             };
             assert_eq!(n, sizes[cb as usize], "codebook {cb}");
             let n = n as usize;
-            assert!(lens[..n].iter().all(|&l| (1..=16).contains(&l)), "codebook {cb} lengths");
+            assert!(
+                lens[..n].iter().all(|&l| (1..=16).contains(&l)),
+                "codebook {cb} lengths"
+            );
             // A complete prefix code satisfies Kraft's equality.
             let kraft: f64 = lens[..n].iter().map(|&l| 0.5f64.powi(l as i32)).sum();
-            assert!((kraft - 1.0).abs() < 1e-9, "codebook {cb} Kraft sum {kraft}");
+            assert!(
+                (kraft - 1.0).abs() < 1e-9,
+                "codebook {cb} Kraft sum {kraft}"
+            );
         }
         let mut codes = [0u32; 121];
         let mut lens = [0u8; 121];
         // SAFETY: buffers hold 121 entries.
-        let n = unsafe {
-            decdrm_fdk_huffman_scalefactor(codes.as_mut_ptr(), lens.as_mut_ptr(), 121)
-        };
+        let n =
+            unsafe { decdrm_fdk_huffman_scalefactor(codes.as_mut_ptr(), lens.as_mut_ptr(), 121) };
         assert_eq!(n, 121);
         assert_eq!(lens[60], 1, "delta 0 is the 1-bit codeword");
         let kraft: f64 = lens.iter().map(|&l| 0.5f64.powi(l as i32)).sum();

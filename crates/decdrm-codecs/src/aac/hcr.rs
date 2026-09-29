@@ -23,8 +23,8 @@ const CB_PRIORITY: [u8; 32] = [
 
 /// Maximum codeword length per codebook including sign and escape bits (FDK `aMaxCwLen`).
 const MAX_CW_LEN: [u32; 32] = [
-    0, 11, 9, 20, 16, 13, 11, 14, 12, 17, 14, 49, 0, 0, 0, 0, 14, 17, 21, 21, 25, 25, 29, 29,
-    29, 29, 33, 33, 33, 37, 37, 41,
+    0, 11, 9, 20, 16, 13, 11, 14, 12, 17, 14, 49, 0, 0, 0, 0, 14, 17, 21, 21, 25, 25, 29, 29, 29,
+    29, 33, 33, 33, 37, 37, 41,
 ];
 
 /// FDK's decoder limits (`MAX_HCR_SETS`, codewords per set, `LEN_OF_LONGEST_CW_TOP_LENGTH`).
@@ -81,20 +81,30 @@ pub(crate) fn encode(sections: &[HcrSection]) -> Result<HcrBlock, CodecError> {
     //    (HcrSortCodebookAndNumCodewordInSection).
     let mut sorted: Vec<(u8, Codeword)> = Vec::new();
     for prio in (1..=22u8).rev() {
-        for s in sections.iter().filter(|s| CB_PRIORITY[usize::from(s.cb & 31)] == prio) {
+        for s in sections
+            .iter()
+            .filter(|s| CB_PRIORITY[usize::from(s.cb & 31)] == prio)
+        {
             sorted.extend(s.codewords.iter().map(|&cw| (s.cb, cw)));
         }
     }
     let total: usize = sorted.iter().map(|(_, cw)| cw.len as usize).sum();
     if sorted.is_empty() || total == 0 {
-        return Ok(HcrBlock { data: BitBuf::new(), longest: 0 });
+        return Ok(HcrBlock {
+            data: BitBuf::new(),
+            longest: 0,
+        });
     }
     let longest = sorted.iter().map(|(_, cw)| cw.len).max().unwrap_or(0);
     if longest > MAX_LONGEST_CW {
-        return Err(CodecError::Repack(format!("codeword of {longest} bits exceeds HCR limit")));
+        return Err(CodecError::Repack(format!(
+            "codeword of {longest} bits exceeds HCR limit"
+        )));
     }
     if total >= 1 << 14 {
-        return Err(CodecError::Repack(format!("{total} bits of spectral data exceed HCR limit")));
+        return Err(CodecError::Repack(format!(
+            "{total} bits of spectral data exceed HCR limit"
+        )));
     }
 
     // 2. Segmentation grid (HcrPrepareSegmentationGrid).
@@ -103,7 +113,11 @@ pub(crate) fn encode(sections: &[HcrSection]) -> Result<HcrBlock, CodecError> {
     for &(cb, _) in &sorted {
         let width = MAX_CW_LEN[usize::from(cb & 31)].min(longest) as usize;
         if start + width <= total {
-            segs.push(Segment { left: start, right: start + width - 1, remaining: width });
+            segs.push(Segment {
+                left: start,
+                right: start + width - 1,
+                remaining: width,
+            });
             start += width;
         } else {
             let last = segs.last_mut().expect("first segment always fits");
@@ -115,11 +129,15 @@ pub(crate) fn encode(sections: &[HcrSection]) -> Result<HcrBlock, CodecError> {
     }
     let n = segs.len();
     if n > MAX_SEGMENTS {
-        return Err(CodecError::Repack(format!("{n} HCR segments exceed the decoder limit")));
+        return Err(CodecError::Repack(format!(
+            "{n} HCR segments exceed the decoder limit"
+        )));
     }
     let num_sets = (sorted.len() - 1) / n + 1;
     if num_sets > MAX_SETS {
-        return Err(CodecError::Repack(format!("{num_sets} HCR sets exceed the decoder limit")));
+        return Err(CodecError::Repack(format!(
+            "{num_sets} HCR sets exceed the decoder limit"
+        )));
     }
 
     let mut out = BitBuf::zeros(total);
@@ -127,7 +145,9 @@ pub(crate) fn encode(sections: &[HcrSection]) -> Result<HcrBlock, CodecError> {
     // 3. Priority codewords: codeword i starts segment i, read left to right (DecodePCWs).
     for (seg, &(_, cw)) in segs.iter_mut().zip(sorted.iter()) {
         if cw.len as usize > seg.remaining {
-            return Err(CodecError::Repack("priority codeword does not fit its segment".into()));
+            return Err(CodecError::Repack(
+                "priority codeword does not fit its segment".into(),
+            ));
         }
         for i in 0..cw.len {
             out.set(seg.left, cw.bit(i));
@@ -143,7 +163,10 @@ pub(crate) fn encode(sections: &[HcrSection]) -> Result<HcrBlock, CodecError> {
     let mut next = n;
     for _set in 1..num_sets {
         let count = (sorted.len() - next).min(n);
-        let set: Vec<Codeword> = sorted[next..next + count].iter().map(|&(_, cw)| cw).collect();
+        let set: Vec<Codeword> = sorted[next..next + count]
+            .iter()
+            .map(|&(_, cw)| cw)
+            .collect();
         next += count;
         let mut cursor = vec![0u32; count];
         let mut pending = vec![true; count];
@@ -188,7 +211,9 @@ pub(crate) fn encode(sections: &[HcrSection]) -> Result<HcrBlock, CodecError> {
         };
     }
     if next != sorted.len() || segs.iter().any(|s| s.remaining != 0) {
-        return Err(CodecError::Repack("HCR segmentation left bits unused".into()));
+        return Err(CodecError::Repack(
+            "HCR segmentation left bits unused".into(),
+        ));
     }
     Ok(HcrBlock { data: out, longest })
 }
@@ -204,7 +229,10 @@ mod tests {
         // lengths from the Huffman trees; here the known lengths stand in for that).
         let mut sorted: Vec<(u8, u32)> = Vec::new();
         for prio in (1..=22u8).rev() {
-            for s in sections.iter().filter(|s| CB_PRIORITY[usize::from(s.cb & 31)] == prio) {
+            for s in sections
+                .iter()
+                .filter(|s| CB_PRIORITY[usize::from(s.cb & 31)] == prio)
+            {
                 sorted.extend(s.codewords.iter().map(|cw| (s.cb, cw.len)));
             }
         }
@@ -215,7 +243,11 @@ mod tests {
         for &(cb, _) in &sorted {
             let width = MAX_CW_LEN[usize::from(cb)].min(longest) as usize;
             if start + width <= total {
-                segs.push(Segment { left: start, right: start + width - 1, remaining: width });
+                segs.push(Segment {
+                    left: start,
+                    right: start + width - 1,
+                    remaining: width,
+                });
                 start += width;
             } else {
                 let last = segs.last_mut().unwrap();
@@ -286,12 +318,16 @@ mod tests {
             let nsec = 1 + rnd(12) as usize;
             let sections: Vec<HcrSection> = (0..nsec)
                 .map(|_| {
-                    let cb = [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 17, 20, 31][rnd(16) as usize];
+                    let cb =
+                        [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 17, 20, 31][rnd(16) as usize];
                     let ncw = if cb == 0 { 0 } else { 1 + rnd(40) as usize };
                     let codewords = (0..ncw)
                         .map(|_| {
                             let len = 1 + rnd(u64::from(MAX_CW_LEN[usize::from(cb)])) as u32;
-                            Codeword { bits: rnd(1 << len), len }
+                            Codeword {
+                                bits: rnd(1 << len),
+                                len,
+                            }
                         })
                         .collect();
                     HcrSection { cb, codewords }
@@ -305,7 +341,10 @@ mod tests {
             let want: Vec<(u64, u32)> = {
                 let mut v = Vec::new();
                 for prio in (1..=22u8).rev() {
-                    for s in sections.iter().filter(|s| CB_PRIORITY[usize::from(s.cb)] == prio) {
+                    for s in sections
+                        .iter()
+                        .filter(|s| CB_PRIORITY[usize::from(s.cb)] == prio)
+                    {
                         v.extend(s.codewords.iter().map(|cw| (cw.bits, cw.len)));
                     }
                 }

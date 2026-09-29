@@ -48,14 +48,20 @@ pub(crate) fn repack(au: &GaAccessUnit) -> Result<DrmAu, CodecError> {
         Element::Sce { info, ics } => {
             let ch = prepare(info, ics)?;
             if ch.hcr.data.len() > 6144 {
-                return Err(CodecError::Repack("spectral data too long for an SCE".into()));
+                return Err(CodecError::Repack(
+                    "spectral data too long for an SCE".into(),
+                ));
             }
             info.write_drm(&mut w);
             write_side_info(&mut w, &ch);
             w.append(&ch.ics.tns_bits);
             let crc = crc_over(&w);
             w.append(&ch.hcr.data);
-            Ok(DrmAu { crc, core: w, sbr: au.sbr.clone() })
+            Ok(DrmAu {
+                crc,
+                core: w,
+                sbr: au.sbr.clone(),
+            })
         }
         Element::Cpe { info, ms_bits, ics } => {
             let ch0 = prepare(info, &ics[0])?;
@@ -69,7 +75,11 @@ pub(crate) fn repack(au: &GaAccessUnit) -> Result<DrmAu, CodecError> {
             let crc = crc_over(&w);
             w.append(&ch0.hcr.data);
             w.append(&ch1.hcr.data);
-            Ok(DrmAu { crc, core: w, sbr: au.sbr.clone() })
+            Ok(DrmAu {
+                crc,
+                core: w,
+                sbr: au.sbr.clone(),
+            })
         }
     }
 }
@@ -127,7 +137,10 @@ fn prepare<'a>(info: &IcsInfo, ics: &'a Ics) -> Result<Channel<'a>, CodecError> 
         for sfb in 0..max_sfb {
             let c = ics.sfb_cb[g][sfb];
             if c == ESC_HCB {
-                let (lo, hi) = (usize::from(info.swb_offset[sfb]), usize::from(info.swb_offset[sfb + 1]));
+                let (lo, hi) = (
+                    usize::from(info.swb_offset[sfb]),
+                    usize::from(info.swb_offset[sfb + 1]),
+                );
                 let mut m = 0i32;
                 for w in w0..w0 + info.group_len[g] {
                     for &v in &ics.spec[w * wlen + lo..w * wlen + hi] {
@@ -163,10 +176,16 @@ fn prepare<'a>(info: &IcsInfo, ics: &'a Ics) -> Result<Channel<'a>, CodecError> 
     if !info.is_short() {
         let mut sfb = 0usize;
         for &(c, n) in &sections[0] {
-            let (lo, hi) = (usize::from(info.swb_offset[sfb]), usize::from(info.swb_offset[sfb + n]));
+            let (lo, hi) = (
+                usize::from(info.swb_offset[sfb]),
+                usize::from(info.swb_offset[sfb + n]),
+            );
             sfb += n;
             if !is_spectral_cb(c) {
-                hsecs.push(HcrSection { cb: 0, codewords: Vec::new() });
+                hsecs.push(HcrSection {
+                    cb: 0,
+                    codewords: Vec::new(),
+                });
                 continue;
             }
             let dim = cb_dim(c);
@@ -177,21 +196,34 @@ fn prepare<'a>(info: &IcsInfo, ics: &'a Ics) -> Result<Channel<'a>, CodecError> 
                 cws.push(Codeword { bits, len });
                 k += dim;
             }
-            hsecs.push(HcrSection { cb: c, codewords: cws });
+            hsecs.push(HcrSection {
+                cb: c,
+                codewords: cws,
+            });
         }
     } else {
         // Short windows: HcrInit()'s unit-interleaved order — for each band, each 4-line
         // unit, each window (group by group) — with a new section whenever the codebook
         // changes along that path.
         for sfb in 0..max_sfb {
-            let (lo, hi) = (usize::from(info.swb_offset[sfb]), usize::from(info.swb_offset[sfb + 1]));
+            let (lo, hi) = (
+                usize::from(info.swb_offset[sfb]),
+                usize::from(info.swb_offset[sfb + 1]),
+            );
             for unit in (lo..hi).step_by(4) {
                 for (g, row) in cb.iter().enumerate() {
-                    let c = if is_spectral_cb(row[sfb]) { row[sfb] } else { 0 };
+                    let c = if is_spectral_cb(row[sfb]) {
+                        row[sfb]
+                    } else {
+                        0
+                    };
                     let w0 = info.group_start(g);
                     for w in w0..w0 + info.group_len[g] {
                         if hsecs.last().map(|s| s.cb) != Some(c) {
-                            hsecs.push(HcrSection { cb: c, codewords: Vec::new() });
+                            hsecs.push(HcrSection {
+                                cb: c,
+                                codewords: Vec::new(),
+                            });
                         }
                         if c == 0 {
                             continue;
@@ -201,7 +233,11 @@ fn prepare<'a>(info: &IcsInfo, ics: &'a Ics) -> Result<Channel<'a>, CodecError> 
                         for k in (0..4).step_by(dim) {
                             tuple[..dim].copy_from_slice(&ics.spec[base + k..base + k + dim]);
                             let (bits, len) = codeword_bits(c, &tuple[..dim])?;
-                            hsecs.last_mut().expect("pushed above").codewords.push(Codeword { bits, len });
+                            hsecs
+                                .last_mut()
+                                .expect("pushed above")
+                                .codewords
+                                .push(Codeword { bits, len });
                         }
                     }
                 }
@@ -209,5 +245,10 @@ fn prepare<'a>(info: &IcsInfo, ics: &'a Ics) -> Result<Channel<'a>, CodecError> 
         }
     }
     let hcr = hcr::encode(&hsecs)?;
-    Ok(Channel { ics, short: info.is_short(), sections, hcr })
+    Ok(Channel {
+        ics,
+        short: info.is_short(),
+        sections,
+        hcr,
+    })
 }

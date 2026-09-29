@@ -12,6 +12,7 @@ pub mod snapshot;
 pub mod source;
 
 pub use decdrm_core::rx::{InputFormat, RealChannel, ReceiverConfig};
+pub use decdrm_data;
 pub use session::{Session, SessionEvent};
 pub use snapshot::{AudioStatus, InputStatus, ServiceView, Snapshot};
 pub use source::{InputSpec, Source, SourceInfo};
@@ -62,7 +63,12 @@ pub enum Command {
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
     Log(String),
+    /// A complete text message of the selected audio service.
     Text(String),
+    /// Output of a data service decoder (slideshow images, Journaline pages, EPG,
+    /// website files, raw data). `short_id` is the service it belongs to. Feed these
+    /// into the GUI models in `decdrm_data::{slideshow, journaline, website}`.
+    Data { short_id: u8, event: decdrm_data::DataEvent },
     /// The worker finished (end of file, stop, or error).
     Stopped { error: Option<String> },
 }

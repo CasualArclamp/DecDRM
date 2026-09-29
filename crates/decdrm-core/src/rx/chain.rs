@@ -99,8 +99,13 @@ pub(super) struct SymbolChain {
     sdc_cells: Vec<EqCell>,
     sdc_dec: MlcDecoder,
     msc_cells: Vec<EqCell>,
-    msc_count: usize,
-    /// Cell collection is aligned to a super-frame start.
+    /// MSC cells before each super-frame symbol (position of its first MSC cell).
+    msc_offset: Vec<usize>,
+    /// Collecting a multiplex frame that started at a frame boundary.
+    msc_collecting: bool,
+    /// Frames were lost: restart the cell deinterleaver before the next frame.
+    msc_gap: bool,
+    /// SDC collection is aligned to a super-frame start.
     sf_synced: bool,
     msc: Option<(MscConfig, CellDeinterleaver, MlcDecoder)>,
     msc_iterations: usize,
@@ -132,7 +137,9 @@ impl SymbolChain {
             sdc_cells: Vec::new(),
             sdc_dec,
             msc_cells: Vec::new(),
-            msc_count: 0,
+            msc_offset: msc_offsets(&map),
+            msc_collecting: false,
+            msc_gap: true,
             sf_synced: false,
             msc: None,
             msc_iterations: cfg.msc_iterations,
@@ -195,10 +202,12 @@ impl SymbolChain {
             if self.timing_tracking {
                 self.chanest.start_timing_tracking();
             }
+            self.msc_offset = msc_offsets(&map);
             self.map = map;
             self.sdc_cells.clear();
             self.msc_cells.clear();
-            self.msc_count = 0;
+            self.msc_collecting = false;
+            self.msc_gap = true;
             self.sf_synced = false;
             self.msc = None;
             self.sdc_mode = SdcMode::Qam4; // force SDC decoder rebuild below
@@ -259,7 +268,8 @@ impl SymbolChain {
             self.fac_cells.clear();
             self.sdc_cells.clear();
             self.msc_cells.clear();
-            self.msc_count = 0;
+            self.msc_collecting = false;
+            self.msc_gap = true;
             self.sf_synced = false;
         }
         let eq = self.chanest.process(&cells, fs.symbol, win.shift);
@@ -347,7 +357,8 @@ impl SymbolChain {
                         if resync || self.frame_id.is_none() {
                             self.sdc_cells.clear();
                             self.msc_cells.clear();
-                            self.msc_count = 0;
+                            self.msc_collecting = false;
+                            self.msc_gap = true;
                             self.sf_synced = false;
                         }
                         self.frame_id = Some(this);
@@ -374,15 +385,8 @@ impl SymbolChain {
         if sf_sym == 0 {
             self.sf_synced = true;
             self.sdc_cells.clear();
-            if self.msc_count != 0 && self.msc_count != 3 * map.msc_cells_per_frame {
-                self.msc_cells.clear();
-            }
-            self.msc_count = 0;
         }
-        if !self.sf_synced {
-            return;
-        }
-        if sf_sym < map.mode().sdc_symbols() {
+        if self.sf_synced && sf_sym < map.mode().sdc_symbols() {
             for &c in map.sdc_carriers(sf_sym) {
                 self.sdc_cells.push(cells[c as usize]);
             }
@@ -393,18 +397,33 @@ impl SymbolChain {
             }
         }
 
-        let useful = 3 * map.msc_cells_per_frame;
+        // The MSC cells of a super frame form three multiplex frames of N_MUX cells
+        // followed by 0..=2 dummy cells. Collection may start at any multiplex-frame
+        // boundary, so audio can begin up to a super frame earlier after sync.
+        let n_mux = map.msc_cells_per_frame;
+        let useful = 3 * n_mux;
+        let mut pos = self.msc_offset[sf_sym];
         for &c in map.msc_carriers(sf_sym) {
-            if self.msc_count < useful {
-                self.msc_cells.push(cells[c as usize]);
-                self.msc_count += 1;
-                if self.msc_cells.len() == map.msc_cells_per_frame {
-                    let frame = std::mem::take(&mut self.msc_cells);
-                    if let Some(m) = self.decode_msc(frame) {
-                        events.push(ChainEvent::Msc(m));
+            if pos < useful {
+                if pos % n_mux == 0 {
+                    if self.msc_collecting && !self.msc_cells.is_empty() {
+                        // Should not happen with consistent timing; drop the partial frame.
+                        self.msc_gap = true;
+                    }
+                    self.msc_cells.clear();
+                    self.msc_collecting = true;
+                }
+                if self.msc_collecting {
+                    self.msc_cells.push(cells[c as usize]);
+                    if self.msc_cells.len() == n_mux {
+                        let frame = std::mem::take(&mut self.msc_cells);
+                        if let Some(m) = self.decode_msc(frame) {
+                            events.push(ChainEvent::Msc(m));
+                        }
                     }
                 }
             }
+            pos += 1;
         }
     }
 
@@ -424,8 +443,11 @@ impl SymbolChain {
     }
 
     fn decode_msc(&mut self, frame: Vec<EqCell>) -> Option<MscFrame> {
-        let (cfg, deint, dec) = self.msc.as_mut()?;
-        let _ = cfg;
+        let gap = std::mem::replace(&mut self.msc_gap, false);
+        let (_, deint, dec) = self.msc.as_mut()?;
+        if gap {
+            *deint = CellDeinterleaver::new(frame.len(), deint.depth());
+        }
         let deint_cells = deint.push(&frame)?;
         let mut bits = Vec::new();
         let info = dec.decode(&deint_cells, &mut bits);
@@ -441,6 +463,18 @@ impl SymbolChain {
             path_metric: info.path_metrics.last().copied().unwrap_or(0.0),
         })
     }
+}
+
+/// Number of MSC cells before each super-frame symbol.
+fn msc_offsets(map: &CellMap) -> Vec<usize> {
+    let mut acc = 0;
+    (0..map.symbols_per_superframe)
+        .map(|sym| {
+            let here = acc;
+            acc += map.msc_carriers(sym).len();
+            here
+        })
+        .collect()
 }
 
 fn track_reset(chanest: &mut ChannelEstimator) {

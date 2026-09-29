@@ -12,7 +12,11 @@ pub(crate) struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     pub(crate) fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, len_bits: data.len() * 8 }
+        Self {
+            data,
+            pos: 0,
+            len_bits: data.len() * 8,
+        }
     }
 
     /// Current position in bits from the start.
@@ -88,7 +92,7 @@ impl BitBuf {
     }
 
     pub(crate) fn push_bit(&mut self, b: u32) {
-        if self.len % 8 == 0 {
+        if self.len & 7 == 0 {
             self.bytes.push(0);
         }
         if b & 1 != 0 {
@@ -101,7 +105,10 @@ impl BitBuf {
     /// Appends the `n <= 64` least significant bits of `v`, MSB first.
     pub(crate) fn push(&mut self, v: u64, n: u32) {
         debug_assert!(n <= 64);
-        debug_assert!(n == 64 || v >> n == 0, "value {v:#x} does not fit in {n} bits");
+        debug_assert!(
+            n == 64 || v >> n == 0,
+            "value {v:#x} does not fit in {n} bits"
+        );
         for i in (0..n).rev() {
             self.push_bit(((v >> i) & 1) as u32);
         }
@@ -130,7 +137,10 @@ impl BitBuf {
 
     /// A buffer of `n` zero bits.
     pub(crate) fn zeros(n: usize) -> Self {
-        Self { bytes: vec![0; n.div_ceil(8)], len: n }
+        Self {
+            bytes: vec![0; n.div_ceil(8)],
+            len: n,
+        }
     }
 
     /// The bytes, zero-padded to a whole number of bytes.

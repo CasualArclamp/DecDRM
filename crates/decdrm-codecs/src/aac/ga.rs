@@ -10,7 +10,7 @@ use crate::CodecError;
 use crate::bits::{BitBuf, BitReader};
 
 use super::{
-    ESC_HCB, IcsInfo, INTENSITY_HCB, INTENSITY_HCB2, NOISE_HCB, SfbTable, ZERO_HCB, cb_dim,
+    ESC_HCB, INTENSITY_HCB, INTENSITY_HCB2, IcsInfo, NOISE_HCB, SfbTable, ZERO_HCB, cb_dim,
     huffman, is_spectral_cb, read_codeword,
 };
 
@@ -32,10 +32,17 @@ pub(crate) struct Ics {
 /// The channel element of an access unit.
 #[derive(Debug, Clone)]
 pub(crate) enum Element {
-    Sce { info: IcsInfo, ics: Ics },
+    Sce {
+        info: IcsInfo,
+        ics: Ics,
+    },
     /// Channel pair with common window; `ms_bits` is `ms_mask_present` plus the mask,
     /// verbatim.
-    Cpe { info: IcsInfo, ms_bits: BitBuf, ics: [Ics; 2] },
+    Cpe {
+        info: IcsInfo,
+        ms_bits: BitBuf,
+        ics: [Ics; 2],
+    },
 }
 
 /// A parsed GA access unit.
@@ -91,7 +98,14 @@ pub(crate) fn parse_raw_data_block(
                 let ms_bits = r.slice(ms_start, r.position());
                 let (_, ics0) = read_ics(&mut r, table, Some(&info))?;
                 let (_, ics1) = read_ics(&mut r, table, Some(&info))?;
-                set_once(&mut element, Element::Cpe { info, ms_bits, ics: [ics0, ics1] })?;
+                set_once(
+                    &mut element,
+                    Element::Cpe {
+                        info,
+                        ms_bits,
+                        ics: [ics0, ics1],
+                    },
+                )?;
             }
             4 => {
                 // ID_DSE: skip.
@@ -170,7 +184,9 @@ fn read_ics(
     let scf_bits = r.slice(scf_start, r.position());
 
     if r.bit()? != 0 {
-        return Err(CodecError::Repack("pulse data cannot be expressed in DRM syntax".into()));
+        return Err(CodecError::Repack(
+            "pulse data cannot be expressed in DRM syntax".into(),
+        ));
     }
     let tns_present = r.bit()? != 0;
     let tns_bits = if tns_present {
@@ -181,10 +197,22 @@ fn read_ics(
         BitBuf::new()
     };
     if r.bit()? != 0 {
-        return Err(CodecError::Repack("gain control data is not supported".into()));
+        return Err(CodecError::Repack(
+            "gain control data is not supported".into(),
+        ));
     }
     let spec = read_spectral_data(r, &info, &sfb_cb)?;
-    Ok((info, Ics { global_gain, sfb_cb, scf_bits, tns_present, tns_bits, spec }))
+    Ok((
+        info,
+        Ics {
+            global_gain,
+            sfb_cb,
+            scf_bits,
+            tns_present,
+            tns_bits,
+            spec,
+        },
+    ))
 }
 
 /// GA `section_data()` (4-bit codebooks), expanded to a codebook per band.
@@ -279,14 +307,20 @@ fn read_spectral_data(
         let w0 = info.group_start(g);
         for (sfb, &cb) in cbs.iter().enumerate() {
             if !is_spectral_cb(cb) {
-                debug_assert!(matches!(cb, ZERO_HCB | NOISE_HCB | INTENSITY_HCB | INTENSITY_HCB2));
+                debug_assert!(matches!(
+                    cb,
+                    ZERO_HCB | NOISE_HCB | INTENSITY_HCB | INTENSITY_HCB2
+                ));
                 continue;
             }
             if cb > ESC_HCB {
                 return Err(CodecError::Bitstream("virtual codebook in GA stream"));
             }
             let dim = cb_dim(cb);
-            let (lo, hi) = (usize::from(info.swb_offset[sfb]), usize::from(info.swb_offset[sfb + 1]));
+            let (lo, hi) = (
+                usize::from(info.swb_offset[sfb]),
+                usize::from(info.swb_offset[sfb + 1]),
+            );
             for w in w0..w0 + info.group_len[g] {
                 let base = w * wlen;
                 let mut k = lo;

@@ -6,12 +6,19 @@ use std::f64::consts::PI;
 
 /// `n` samples of `amp·sin(2π f t)` at `fs`, starting at sample index `start`.
 pub fn sine(f: f64, amp: f64, fs: u32, start: usize, n: usize) -> Vec<f64> {
-    (start..start + n).map(|i| amp * (2.0 * PI * f * i as f64 / f64::from(fs)).sin()).collect()
+    (start..start + n)
+        .map(|i| amp * (2.0 * PI * f * i as f64 / f64::from(fs)).sin())
+        .collect()
 }
 
 /// Deinterleaves channel `ch` of `channels`.
 pub fn channel(samples: &[f32], channels: usize, ch: usize) -> Vec<f64> {
-    samples.iter().skip(ch).step_by(channels).map(|&s| f64::from(s)).collect()
+    samples
+        .iter()
+        .skip(ch)
+        .step_by(channels)
+        .map(|&s| f64::from(s))
+        .collect()
 }
 
 /// Magnitude of the DFT of `x` (Hann-windowed) at frequency `f`, scaled so that a sine of

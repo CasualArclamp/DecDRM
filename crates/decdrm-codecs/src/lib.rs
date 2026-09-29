@@ -52,15 +52,15 @@
 //!   some type implementing the trait, chosen at run time (Rust's version of a virtual
 //!   base class pointer). The trait requires `Send`, so a decoder can be moved to the
 //!   audio thread. The wrappers are *not* `Sync` (not shareable between threads by
-//!   reference), because the C libraries do no locking; see [`fdk`](crate::fdk) for the
+//!   reference), because the C libraries do no locking; see [`fdk`] for the
 //!   details.
 //! * `Result<T, CodecError>` is returned instead of throwing; `?` propagates errors.
 
 mod aac;
 mod bits;
 pub mod crc;
-mod fdk;
-mod opus;
+pub mod fdk;
+pub mod opus;
 pub mod sdc;
 
 pub use fdk::{
@@ -94,12 +94,20 @@ pub struct PcmFrame {
 impl PcmFrame {
     /// Samples per channel.
     pub fn frames(&self) -> usize {
-        if self.channels == 0 { 0 } else { self.samples.len() / usize::from(self.channels) }
+        if self.channels == 0 {
+            0
+        } else {
+            self.samples.len() / usize::from(self.channels)
+        }
     }
 
     /// Duration in seconds.
     pub fn duration(&self) -> f64 {
-        if self.sample_rate == 0 { 0.0 } else { self.frames() as f64 / f64::from(self.sample_rate) }
+        if self.sample_rate == 0 {
+            0.0
+        } else {
+            self.frames() as f64 / f64::from(self.sample_rate)
+        }
     }
 }
 

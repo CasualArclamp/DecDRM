@@ -38,14 +38,22 @@ const MAX_DURATION: usize = 5760;
 
 fn opus_err(code: i32, context: &'static str) -> CodecError {
     // SAFETY: opus_strerror returns a static NUL-terminated string for any input.
-    let msg = unsafe { CStr::from_ptr(ffi::opus_strerror(code)) }.to_string_lossy().into_owned();
-    CodecError::Opus { code, message: msg, context }
+    let msg = unsafe { CStr::from_ptr(ffi::opus_strerror(code)) }
+        .to_string_lossy()
+        .into_owned();
+    CodecError::Opus {
+        code,
+        message: msg,
+        context,
+    }
 }
 
 /// The libopus version string, e.g. `"libopus 1.6.1"`.
 pub fn opus_version() -> String {
     // SAFETY: returns a static NUL-terminated string.
-    unsafe { CStr::from_ptr(ffi::opus_get_version_string()) }.to_string_lossy().into_owned()
+    unsafe { CStr::from_ptr(ffi::opus_get_version_string()) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Human-readable description of an Opus TOC byte (RFC 6716 §3.1).
@@ -53,9 +61,22 @@ fn describe_toc(toc: u8) -> String {
     let config = toc >> 3;
     let stereo = if toc & 0x04 != 0 { "stereo" } else { "mono" };
     let (mode, bw, ms) = match config {
-        0..=11 => ("SILK", ["narrowband", "mediumband", "wideband"][usize::from(config / 4)], [10.0, 20.0, 40.0, 60.0][usize::from(config % 4)]),
-        12..=15 => ("hybrid", ["super-wideband", "fullband"][usize::from((config - 12) / 2)], [10.0, 20.0][usize::from(config % 2)]),
-        _ => ("CELT", ["narrowband", "wideband", "super-wideband", "fullband"][usize::from((config - 16) / 4)], [2.5, 5.0, 10.0, 20.0][usize::from(config % 4)]),
+        0..=11 => (
+            "SILK",
+            ["narrowband", "mediumband", "wideband"][usize::from(config / 4)],
+            [10.0, 20.0, 40.0, 60.0][usize::from(config % 4)],
+        ),
+        12..=15 => (
+            "hybrid",
+            ["super-wideband", "fullband"][usize::from((config - 12) / 2)],
+            [10.0, 20.0][usize::from(config % 2)],
+        ),
+        _ => (
+            "CELT",
+            ["narrowband", "wideband", "super-wideband", "fullband"]
+                [usize::from((config - 16) / 4)],
+            [2.5, 5.0, 10.0, 20.0][usize::from(config % 4)],
+        ),
     };
     format!("Opus {mode} {bw} {stereo}, {ms} ms frames, 48 kHz")
 }
@@ -97,7 +118,12 @@ impl OpusDrmDecoder {
     }
 
     /// Runs `opus_decode_float`; `packet = None` runs packet-loss concealment.
-    fn run(&mut self, packet: Option<&[u8]>, frame_size: usize, fec: bool) -> Result<usize, CodecError> {
+    fn run(
+        &mut self,
+        packet: Option<&[u8]>,
+        frame_size: usize,
+        fec: bool,
+    ) -> Result<usize, CodecError> {
         let (ptr, len) = match packet {
             Some(p) => (p.as_ptr(), p.len() as i32),
             None => (std::ptr::null(), 0),
@@ -140,7 +166,13 @@ impl OpusDrmDecoder {
     /// Duration of a packet in samples at 48 kHz, if it parses.
     fn packet_duration(packet: &[u8]) -> Option<usize> {
         // SAFETY: valid slice pointer/length.
-        let n = unsafe { ffi::opus_packet_get_nb_samples(packet.as_ptr(), packet.len() as i32, OPUS_SAMPLE_RATE as i32) };
+        let n = unsafe {
+            ffi::opus_packet_get_nb_samples(
+                packet.as_ptr(),
+                packet.len() as i32,
+                OPUS_SAMPLE_RATE as i32,
+            )
+        };
         (n > 0 && n as usize <= MAX_DURATION).then_some(n as usize)
     }
 }
@@ -239,8 +271,11 @@ pub struct OpusEncoderConfig {
     /// in the super frame's CRC position. Dream derives it from the super frame:
     /// `(audio payload bytes − header bytes) / 20`, minus one for the CRC.
     pub packet_bytes: usize,
+    /// Encoder application mode.
     pub application: OpusApplication,
+    /// Signal-type hint.
     pub signal: OpusSignal,
+    /// Audio bandwidth (also used as the maximum bandwidth, as Dream does).
     pub bandwidth: OpusBandwidth,
     /// In-band FEC (Dream then also sets 100 % expected packet loss).
     pub fec: bool,
@@ -290,7 +325,9 @@ impl OpusDrmEncoder {
     /// Creates an encoder with Dream's settings (CBR, complexity 10, LSB depth 16, no DTX).
     pub fn new(config: OpusEncoderConfig) -> Result<Self, CodecError> {
         if !(1..=2).contains(&config.channels) {
-            return Err(CodecError::InvalidConfig("Opus needs 1 or 2 channels".into()));
+            return Err(CodecError::InvalidConfig(
+                "Opus needs 1 or 2 channels".into(),
+            ));
         }
         if !(2..=OPUS_MAX_PACKET).contains(&config.packet_bytes) {
             return Err(CodecError::InvalidConfig(format!(
@@ -305,10 +342,19 @@ impl OpusDrmEncoder {
         let mut err = 0;
         // SAFETY: valid arguments and out-pointer.
         let raw = unsafe {
-            ffi::opus_encoder_create(OPUS_SAMPLE_RATE as i32, config.channels as i32, app, &mut err)
+            ffi::opus_encoder_create(
+                OPUS_SAMPLE_RATE as i32,
+                config.channels as i32,
+                app,
+                &mut err,
+            )
         };
         let handle = NonNull::new(raw).ok_or_else(|| opus_err(err, "opus_encoder_create"))?;
-        let enc = Self { handle, buf: vec![0; OPUS_MAX_PACKET], config };
+        let enc = Self {
+            handle,
+            buf: vec![0; OPUS_MAX_PACKET],
+            config,
+        };
         let c = &enc.config;
         let bw = match c.bandwidth {
             OpusBandwidth::Narrowband => ffi::OPUS_BANDWIDTH_NARROWBAND,
@@ -330,11 +376,23 @@ impl OpusDrmEncoder {
             (ffi::OPUS_SET_COMPLEXITY_REQUEST, 10, "complexity"),
             (ffi::OPUS_SET_LSB_DEPTH_REQUEST, 16, "LSB depth"),
             (ffi::OPUS_SET_DTX_REQUEST, 0, "DTX off"),
-            (ffi::OPUS_SET_FORCE_CHANNELS_REQUEST, c.channels as i32, "force channels"),
+            (
+                ffi::OPUS_SET_FORCE_CHANNELS_REQUEST,
+                c.channels as i32,
+                "force channels",
+            ),
             (ffi::OPUS_SET_BANDWIDTH_REQUEST, bw, "bandwidth"),
             (ffi::OPUS_SET_MAX_BANDWIDTH_REQUEST, bw, "max bandwidth"),
-            (ffi::OPUS_SET_INBAND_FEC_REQUEST, i32::from(c.fec), "in-band FEC"),
-            (ffi::OPUS_SET_PACKET_LOSS_PERC_REQUEST, if c.fec { 100 } else { 0 }, "packet loss"),
+            (
+                ffi::OPUS_SET_INBAND_FEC_REQUEST,
+                i32::from(c.fec),
+                "in-band FEC",
+            ),
+            (
+                ffi::OPUS_SET_PACKET_LOSS_PERC_REQUEST,
+                if c.fec { 100 } else { 0 },
+                "packet loss",
+            ),
             (ffi::OPUS_SET_SIGNAL_REQUEST, signal, "signal type"),
         ];
         for (req, value, what) in settings {
@@ -356,8 +414,18 @@ impl OpusDrmEncoder {
     pub fn lookahead(&self) -> usize {
         let mut v: i32 = 0;
         // SAFETY: getter request with an opus_int32 out-pointer.
-        let r = unsafe { ffi::opus_encoder_ctl(self.handle.as_ptr(), ffi::OPUS_GET_LOOKAHEAD_REQUEST, &mut v as *mut i32) };
-        if r == ffi::OPUS_OK { v.max(0) as usize } else { 0 }
+        let r = unsafe {
+            ffi::opus_encoder_ctl(
+                self.handle.as_ptr(),
+                ffi::OPUS_GET_LOOKAHEAD_REQUEST,
+                &mut v as *mut i32,
+            )
+        };
+        if r == ffi::OPUS_OK {
+            v.max(0) as usize
+        } else {
+            0
+        }
     }
 
     /// SDC audio information for this service (see [`OpusSignalling`]).
@@ -389,7 +457,10 @@ impl OpusDrmEncoder {
             return Err(opus_err(n, "opus_encode_float"));
         }
         let data = self.buf[..n as usize].to_vec();
-        Ok(OpusDrmFrame { crc: dream_opus_crc(&data), data })
+        Ok(OpusDrmFrame {
+            crc: dream_opus_crc(&data),
+            data,
+        })
     }
 }
 
@@ -399,9 +470,21 @@ mod tests {
 
     #[test]
     fn toc_descriptions() {
-        assert_eq!(describe_toc(0xFC), "Opus CELT fullband stereo, 20 ms frames, 48 kHz");
-        assert_eq!(describe_toc(0x08), "Opus SILK narrowband mono, 20 ms frames, 48 kHz");
-        assert_eq!(describe_toc(0x70), "Opus hybrid fullband mono, 10 ms frames, 48 kHz");
-        assert_eq!(describe_toc(0x78), "Opus hybrid fullband mono, 20 ms frames, 48 kHz");
+        assert_eq!(
+            describe_toc(0xFC),
+            "Opus CELT fullband stereo, 20 ms frames, 48 kHz"
+        );
+        assert_eq!(
+            describe_toc(0x08),
+            "Opus SILK narrowband mono, 20 ms frames, 48 kHz"
+        );
+        assert_eq!(
+            describe_toc(0x70),
+            "Opus hybrid fullband mono, 10 ms frames, 48 kHz"
+        );
+        assert_eq!(
+            describe_toc(0x78),
+            "Opus hybrid fullband mono, 20 ms frames, 48 kHz"
+        );
     }
 }

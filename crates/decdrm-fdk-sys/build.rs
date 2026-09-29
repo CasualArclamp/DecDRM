@@ -160,7 +160,10 @@ fn main() {
             .canonicalize()
             .unwrap_or_else(|_| panic!("FDK-AAC sources not found at {}", fdk_root.display())),
     );
-    if !fdk_root.join("libAACdec/include/aacdecoder_lib.h").is_file() {
+    if !fdk_root
+        .join("libAACdec/include/aacdecoder_lib.h")
+        .is_file()
+    {
         panic!(
             "FDK-AAC submodule at {} is empty; run `git submodule update --init third_party/fdk-aac`",
             fdk_root.display()
@@ -172,8 +175,14 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=csrc");
     for lib in FDK_LIBS {
-        println!("cargo:rerun-if-changed={}", fdk_root.join(lib).join("src").display());
-        println!("cargo:rerun-if-changed={}", fdk_root.join(lib).join("include").display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            fdk_root.join(lib).join("src").display()
+        );
+        println!(
+            "cargo:rerun-if-changed={}",
+            fdk_root.join(lib).join("include").display()
+        );
     }
 
     let patched = apply_patches(&fdk_root, &out_dir.join("fdk-patched"));
@@ -196,7 +205,11 @@ fn main() {
             }
         }
     }
-    assert!(sources.len() >= 170, "unexpectedly few FDK sources ({})", sources.len());
+    assert!(
+        sources.len() >= 170,
+        "unexpectedly few FDK sources ({})",
+        sources.len()
+    );
 
     let mut build = cc::Build::new();
     build.cpp(true).warnings(false).cargo_warnings(false);
@@ -224,7 +237,10 @@ fn main() {
 
     // The codec is unusably slow unoptimised; always build it optimised, but keep the
     // profile's setting when it is already higher.
-    let opt: u32 = env::var("OPT_LEVEL").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let opt: u32 = env::var("OPT_LEVEL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     build.opt_level(opt.max(2));
 
     build.files(&sources);
@@ -261,7 +277,9 @@ fn apply_patches(fdk_root: &Path, patch_root: &Path) -> Vec<(String, PathBuf)> {
         );
         // Mirror the original directory's headers next to the copy so that quoted
         // includes (`#include "foo.h"`) still resolve relative to the source file.
-        let rel_dir = Path::new(patch.file).parent().expect("patched file has a directory");
+        let rel_dir = Path::new(patch.file)
+            .parent()
+            .expect("patched file has a directory");
         let dst_dir = patch_root.join(rel_dir);
         fs::create_dir_all(&dst_dir).expect("create patch dir");
         let src_dir = fdk_root.join(rel_dir);
@@ -290,7 +308,10 @@ fn strip_verbatim(p: PathBuf) -> PathBuf {
 
 /// Avoids touching the patched file (and so forcing a recompile) when nothing changed.
 fn write_if_changed(path: &Path, contents: &str) {
-    if fs::read_to_string(path).map(|old| old == contents).unwrap_or(false) {
+    if fs::read_to_string(path)
+        .map(|old| old == contents)
+        .unwrap_or(false)
+    {
         return;
     }
     fs::write(path, contents).unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));

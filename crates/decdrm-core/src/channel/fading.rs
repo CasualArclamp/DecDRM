@@ -105,40 +105,28 @@ impl GaussianFading {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsp::fft::Fft;
 
-    /// Mean power ≈ 1 and a Doppler spectrum whose RMS width matches σ = spread/2.
+    /// Mean power ≈ 1 and the autocorrelation of a Gaussian Doppler spectrum with
+    /// σ = spread/2: R(t) = exp(−2π²σ²t²).
     #[test]
     fn unit_power_and_gaussian_doppler_width() {
         let fs = 400.0; // low rate so a long observation stays cheap
         let spread = 2.0; // Hz → σ = 1 Hz
         let mut f = GaussianFading::new(spread, fs, Rng::new(5));
-        let n = 4096;
-        let blocks = 60;
-        let mut fft = Fft::new(n);
-        let mut psd = vec![0.0; n];
-        let mut power = 0.0;
-        for _ in 0..blocks {
-            let mut x: Vec<Cplx> = (0..n).map(|_| f.next_gain()).collect();
-            power += x.iter().map(|v| v.norm_sqr()).sum::<Real>();
-            fft.forward(&mut x);
-            for (p, v) in psd.iter_mut().zip(&x) {
-                *p += v.norm_sqr();
-            }
+        let n = 400_000;
+        let x: Vec<Cplx> = (0..n).map(|_| f.next_gain()).collect();
+        let r = |lag: usize| -> Real {
+            let acc: Cplx = (lag..n).map(|i| x[i] * x[i - lag].conj()).sum();
+            acc.re / (n - lag) as Real
+        };
+        let r0 = r(0);
+        assert!((r0 - 1.0).abs() < 0.1, "mean power {r0}");
+        for lag in [20usize, 50, 100] {
+            let t = lag as Real / fs;
+            let want = (-2.0 * PI * PI * t * t).exp();
+            let got = r(lag) / r0;
+            assert!((got - want).abs() < 0.05, "lag {t} s: correlation {got:.3}, expected {want:.3}");
         }
-        let power = power / (n * blocks) as Real;
-        assert!((power - 1.0).abs() < 0.15, "mean power {power}");
-        // Second moment of the (two-sided) spectrum gives σ².
-        let df = fs / n as Real;
-        let (mut m0, mut m2) = (0.0, 0.0);
-        for (i, &p) in psd.iter().enumerate() {
-            let k = if i < n / 2 { i as Real } else { i as Real - n as Real };
-            let fr = k * df;
-            m0 += p;
-            m2 += p * fr * fr;
-        }
-        let sigma = (m2 / m0).sqrt();
-        assert!((sigma - 1.0).abs() < 0.1, "Doppler σ {sigma} Hz");
     }
 
     #[test]

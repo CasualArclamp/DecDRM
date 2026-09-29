@@ -24,8 +24,16 @@ impl Rng {
 }
 
 fn sane(pcm: &PcmFrame) {
-    assert!(pcm.channels == 1 || pcm.channels == 2, "{} channels", pcm.channels);
-    assert!(pcm.sample_rate >= 8_000 && pcm.sample_rate <= 48_000, "{} Hz", pcm.sample_rate);
+    assert!(
+        pcm.channels == 1 || pcm.channels == 2,
+        "{} channels",
+        pcm.channels
+    );
+    assert!(
+        pcm.sample_rate >= 8_000 && pcm.sample_rate <= 48_000,
+        "{} Hz",
+        pcm.sample_rate
+    );
     assert_eq!(pcm.samples.len() % usize::from(pcm.channels), 0);
     assert!(pcm.samples.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
 }
@@ -37,7 +45,11 @@ fn hammer(dec: &mut dyn DrmAudioDecoder, rng: &mut Rng, calls: usize) -> (usize,
         let len = rng.below(400) as usize;
         let frame = rng.bytes(len);
         let crc = rng.next() as u8;
-        let r = if rng.below(10) == 0 { dec.conceal() } else { dec.decode(&frame, Some(crc)) };
+        let r = if rng.below(10) == 0 {
+            dec.conceal()
+        } else {
+            dec.decode(&frame, Some(crc))
+        };
         match r {
             Ok(pcm) => {
                 sane(&pcm);
@@ -108,7 +120,10 @@ fn corrupted_aac_frames_are_concealed_and_recovered() {
     let mut frames = Vec::new();
     for i in 0..60 {
         let pcm: Vec<f32> = (0..1920)
-            .map(|j| (0.4 * (2.0 * std::f64::consts::PI * 440.0 * (i * 1920 + j) as f64 / 24_000.0).sin()) as f32)
+            .map(|j| {
+                (0.4 * (2.0 * std::f64::consts::PI * 440.0 * (i * 1920 + j) as f64 / 24_000.0)
+                    .sin()) as f32
+            })
             .collect();
         if let Some(f) = enc.encode(&pcm).unwrap() {
             frames.push(f);
@@ -121,28 +136,36 @@ fn corrupted_aac_frames_are_concealed_and_recovered() {
         let damaged = i >= 20 && i % 3 == 0;
         if damaged {
             match i % 4 {
-                0 => crc ^= 0x5A,                                          // wrong CRC
+                0 => crc ^= 0x5A, // wrong CRC
                 1 => {
-                    let k = rng.below(bytes.len() as u64) as usize;       // bit error in the
-                    bytes[k.min(4)] ^= 0x10;                                // CRC-protected start
+                    let k = rng.below(bytes.len() as u64) as usize; // bit error in the
+                    bytes[k.min(4)] ^= 0x10; // CRC-protected start
                 }
-                2 => bytes.truncate(bytes.len() / 2),                      // truncated
-                _ => bytes = rng.bytes(bytes.len()),                       // replaced by noise
+                2 => bytes.truncate(bytes.len() / 2), // truncated
+                _ => bytes = rng.bytes(bytes.len()),  // replaced by noise
             }
         }
-        let pcm = dec.decode(&bytes, Some(crc)).expect("damaged frames are concealed");
+        let pcm = dec
+            .decode(&bytes, Some(crc))
+            .expect("damaged frames are concealed");
         sane(&pcm);
         if damaged && pcm.concealed {
             concealed_bad += 1;
         }
         if !damaged && i > 45 {
-            assert!(!pcm.concealed, "frame {i} after the damage should decode cleanly");
+            assert!(
+                !pcm.concealed,
+                "frame {i} after the damage should decode cleanly"
+            );
         }
     }
     eprintln!("{concealed_bad} damaged frames flagged as concealed");
     assert!(concealed_bad >= 8);
     // AAC without a CRC byte is a usage error.
-    assert!(matches!(dec.decode(&frames[0].to_bytes(), None), Err(CodecError::InvalidInput(_))));
+    assert!(matches!(
+        dec.decode(&frames[0].to_bytes(), None),
+        Err(CodecError::InvalidInput(_))
+    ));
 }
 
 #[test]
@@ -153,9 +176,15 @@ fn opus_decoder_survives_garbage_and_uses_fec_on_crc_errors() {
     eprintln!("opus garbage: {ok} ok, {err} errors");
     assert_eq!(err, 0, "Opus garbage is always concealed");
 
-    let mut enc = OpusDrmEncoder::new(OpusEncoderConfig { fec: true, ..OpusEncoderConfig::new(1, 60) }).unwrap();
+    let mut enc = OpusDrmEncoder::new(OpusEncoderConfig {
+        fec: true,
+        ..OpusEncoderConfig::new(1, 60)
+    })
+    .unwrap();
     for i in 0..50 {
-        let pcm: Vec<f32> = (0..960).map(|j| 0.3 * ((i * 960 + j) as f32 * 0.05).sin()).collect();
+        let pcm: Vec<f32> = (0..960)
+            .map(|j| 0.3 * ((i * 960 + j) as f32 * 0.05).sin())
+            .collect();
         let f = enc.encode(&pcm).unwrap();
         let wrong = i % 5 == 4;
         let crc = if wrong { f.crc ^ 1 } else { f.crc };
@@ -173,7 +202,9 @@ fn opus_decoder_survives_garbage_and_uses_fec_on_crc_errors() {
 #[test]
 fn configuration_errors_are_reported() {
     // Coding mismatch between the request and the SDC bytes.
-    let aac = AudioInfo::aac(12_000, false, AudioMode::Mono).unwrap().to_type9_bytes();
+    let aac = AudioInfo::aac(12_000, false, AudioMode::Mono)
+        .unwrap()
+        .to_type9_bytes();
     assert!(open_decoder(DrmAudioCoding::XheAac, &aac).is_err());
     // Too short.
     assert!(open_decoder(DrmAudioCoding::Aac, &[0x00]).is_err());
@@ -184,8 +215,12 @@ fn configuration_errors_are_reported() {
     // Encoder: unsupported core rate.
     assert!(FdkDrmEncoder::new(FdkEncoderConfig::new(AacProfile::Lc, 16_000, 16_000)).is_err());
     // Encoder: wrong input length.
-    let mut enc = FdkDrmEncoder::new(FdkEncoderConfig::new(AacProfile::Lc, 12_000, 16_000)).unwrap();
-    assert!(matches!(enc.encode(&[0.0; 10]), Err(CodecError::InvalidInput(_))));
+    let mut enc =
+        FdkDrmEncoder::new(FdkEncoderConfig::new(AacProfile::Lc, 12_000, 16_000)).unwrap();
+    assert!(matches!(
+        enc.encode(&[0.0; 10]),
+        Err(CodecError::InvalidInput(_))
+    ));
 }
 
 #[test]
