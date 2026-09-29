@@ -93,10 +93,7 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
             let (word, help) = fmt_interleaving(c.interleaving);
             value(ui, "Interleaving", word).on_hover_text(help);
         }
-        if let Some(t) = &snap.time_utc {
-            ui.separator();
-            value(ui, "Time", t.as_str()).on_hover_text("Broadcast time and date from the SDC.");
-        }
+        // The broadcast time is shown large at the top of the side panel.
     });
 
     // Row 2: measurements and the input.

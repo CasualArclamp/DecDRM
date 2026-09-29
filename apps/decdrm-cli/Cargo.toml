@@ -11,8 +11,15 @@ rust-version.workspace = true
 name = "decdrm"
 path = "src/main.rs"
 
+[features]
+# DecDRM's experimental EnCodec codec in the receiver and the transmitter (pulls in
+# candle): `cargo build --release -p decdrm-cli --features encodec`. The weights are
+# fetched with `decdrm models download encodec` (available in every build).
+encodec = ["decdrm-engine/encodec", "decdrm-station/encodec"]
+
 [dependencies]
 decdrm-engine = { path = "../../crates/decdrm-engine" }
+decdrm-encodec = { path = "../../crates/decdrm-encodec" }
 decdrm-io = { path = "../../crates/decdrm-io" }
 decdrm-station = { path = "../../crates/decdrm-station" }
 clap = { version = "4.6", features = ["derive"] }

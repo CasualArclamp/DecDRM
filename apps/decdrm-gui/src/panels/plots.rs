@@ -1,4 +1,5 @@
-//! Plot tabs: input spectrum, constellations, channel, impulse response and SNR.
+//! Plot tabs: input spectrum and its waterfall, constellations, channel, impulse
+//! response and SNR.
 //!
 //! The plots are monitoring displays: their axes are set from the data every frame and
 //! zooming/dragging is disabled; hovering shows the value under the cursor.
@@ -6,14 +7,29 @@
 use super::{Palette, placeholder};
 use crate::plots::{DB_FLOOR, PlotData, Points, SpectrumPlot};
 use crate::settings::PlotTab;
-use eframe::egui::{Color32, Ui};
+use crate::waterfall::{ROW_SECONDS, WATERFALL_ROWS, Waterfall};
+use eframe::egui::{Color32, RichText, TextureHandle, TextureOptions, Ui};
 use egui_plot::{
-    HLine, HoverPosition, Line, LineStyle, MarkerShape, Plot, PlotBounds, PlotPoints,
-    Points as Scatter, Span, VLine,
+    HLine, HoverPosition, Line, LineStyle, MarkerShape, Plot, PlotBounds, PlotImage, PlotPoint,
+    PlotPoints, Points as Scatter, Span, VLine,
 };
 
+/// The waterfall's image on the GPU, rebuilt only when the history has changed and the
+/// tab is shown (at most at the ~10 Hz snapshot rate).
+#[derive(Default)]
+pub struct WaterfallTexture {
+    handle: Option<TextureHandle>,
+    generation: u64,
+}
+
 /// Tab bar plus the selected tab.
-pub fn show(ui: &mut Ui, tab: &mut PlotTab, data: &PlotData) {
+pub fn show(
+    ui: &mut Ui,
+    tab: &mut PlotTab,
+    data: &PlotData,
+    waterfall: &Waterfall,
+    texture: &mut WaterfallTexture,
+) {
     ui.horizontal(|ui| {
         for t in PlotTab::ALL {
             ui.selectable_value(tab, t, t.label());
@@ -32,6 +48,7 @@ pub fn show(ui: &mut Ui, tab: &mut PlotTab, data: &PlotData) {
             &pal,
             avail.y,
         ),
+        PlotTab::Waterfall => waterfall_plot(ui, data, waterfall, texture, &pal, avail.y - 22.0),
         PlotTab::Constellations => {
             let side = (avail.x / 3.0 - 8.0).min(avail.y - 24.0).max(80.0);
             constellation_row(ui, data, &pal, side);
@@ -128,6 +145,85 @@ pub fn spectrum_plot(
                 p.line(line(name, &s.points, pal.spectrum).width(1.0));
             }
         });
+}
+
+/// The spectrum's history, newest at the top, on the Spectrum plot's frequency axis
+/// with the DRM band edges and the DC carrier of the latest snapshot.
+fn waterfall_plot(
+    ui: &mut Ui,
+    data: &PlotData,
+    waterfall: &Waterfall,
+    texture: &mut WaterfallTexture,
+    pal: &Palette,
+    height: f32,
+) {
+    if waterfall.is_empty() {
+        placeholder(
+            ui,
+            "No spectrum yet: the waterfall fills while the receiver runs.",
+        );
+        return;
+    }
+    if texture.handle.is_none() || texture.generation != waterfall.generation() {
+        let image = waterfall.image();
+        match &mut texture.handle {
+            Some(h) => h.set(image, TextureOptions::LINEAR),
+            None => {
+                texture.handle = Some(ui.ctx().load_texture(
+                    "waterfall",
+                    image,
+                    TextureOptions::LINEAR,
+                ));
+            }
+        }
+        texture.generation = waterfall.generation();
+    }
+    let Some(handle) = &texture.handle else {
+        return;
+    };
+    // The same span as `SpectrumPlot`: 0 … 24 kHz for a real signal, ±24 kHz for I/Q.
+    let (x0, x1) = if waterfall.real() {
+        (0.0, 24.0)
+    } else {
+        (-24.0, 24.0)
+    };
+    let seconds = WATERFALL_ROWS as f64 * ROW_SECONDS;
+    base_plot("waterfall")
+        .height(height.max(120.0))
+        .x_axis_label("frequency (kHz)")
+        .y_axis_label("time (s)")
+        .label_formatter(hover_label("kHz", 2, "s", 1))
+        .show(ui, |p| {
+            p.set_plot_bounds(PlotBounds::from_min_max([x0, -seconds], [x1, 0.0]));
+            p.image(PlotImage::new(
+                "waterfall",
+                handle.id(),
+                PlotPoint::new((x0 + x1) / 2.0, -seconds / 2.0),
+                [(x1 - x0) as f32, seconds as f32],
+            ));
+            if let Some((lo, hi)) = data.spectrum.band_khz {
+                for x in [lo, hi] {
+                    p.vline(VLine::new("DRM signal", x).color(pal.band_edge).width(1.0));
+                }
+            }
+            if let Some(dc) = data.spectrum.dc_khz {
+                p.vline(
+                    VLine::new("DC carrier", dc)
+                        .color(pal.marker)
+                        .style(LineStyle::dashed_dense()),
+                );
+            }
+        });
+    let (lo, hi) = waterfall.levels();
+    ui.label(
+        RichText::new(format!(
+            "{} rows (~{:.0} s), newest at the top; colours {lo:.0} … {hi:.0} dB, following the noise floor and the strongest signals",
+            waterfall.rows(),
+            waterfall.rows() as f64 * ROW_SECONDS
+        ))
+        .weak()
+        .small(),
+    );
 }
 
 /// FAC, SDC and MSC constellations side by side, each `side` × `side`.

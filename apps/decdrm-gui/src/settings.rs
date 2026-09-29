@@ -128,6 +128,7 @@ pub enum PlotTab {
     #[default]
     Overview,
     Spectrum,
+    Waterfall,
     Constellations,
     Channel,
     Impulse,
@@ -135,9 +136,10 @@ pub enum PlotTab {
 }
 
 impl PlotTab {
-    pub const ALL: [PlotTab; 6] = [
+    pub const ALL: [PlotTab; 7] = [
         Self::Overview,
         Self::Spectrum,
+        Self::Waterfall,
         Self::Constellations,
         Self::Channel,
         Self::Impulse,
@@ -148,6 +150,7 @@ impl PlotTab {
         match self {
             Self::Overview => "Overview",
             Self::Spectrum => "Spectrum",
+            Self::Waterfall => "Waterfall",
             Self::Constellations => "Constellations",
             Self::Channel => "Channel",
             Self::Impulse => "Impulse response",
@@ -163,16 +166,18 @@ pub enum DataTab {
     #[default]
     Slideshow,
     Journaline,
+    Epg,
     Info,
 }
 
 impl DataTab {
-    pub const ALL: [DataTab; 3] = [Self::Slideshow, Self::Journaline, Self::Info];
+    pub const ALL: [DataTab; 4] = [Self::Slideshow, Self::Journaline, Self::Epg, Self::Info];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Slideshow => "Slideshow",
             Self::Journaline => "Journaline",
+            Self::Epg => "EPG",
             Self::Info => "Data info",
         }
     }

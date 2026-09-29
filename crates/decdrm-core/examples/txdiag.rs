@@ -12,7 +12,7 @@ fn main() {
     let so = SpectrumOccupancy::new(a[2].parse().unwrap()).unwrap();
     let secs: f64 = a.get(3).map(|s| s.parse().unwrap()).unwrap_or(6.0);
     let txc = TxConfig { mode, occupancy: so, ..Default::default() };
-    let mut tx = Transmitter::new(txc.clone()).unwrap();
+    let mut tx = Transmitter::new(txc).unwrap();
     let mut out = OutputStage::new(tx.layout(), OutputConfig::iq(0.0)).unwrap();
     let cap = tx.msc_capacity();
     let fac = Fac {

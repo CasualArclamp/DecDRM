@@ -26,6 +26,9 @@ use decdrm_core::tx::Transmitter;
 use decdrm_core::tx::output::OutputStage;
 use decdrm_data::DataEncoder;
 use decdrm_io::FileWriter;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Status of a running station, for user interfaces (see [`Station::status`]).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -40,10 +43,14 @@ pub struct StationStatus {
     pub output_peak_dbfs: f32,
     /// Output samples clipped to full scale so far.
     pub clipped_samples: u64,
+    /// The output file (resolved path), if any.
+    pub output_file: Option<PathBuf>,
     /// Name of the sound card being fed, if any.
     pub device: Option<String>,
     /// Sound-card underruns so far.
     pub device_underruns: u64,
+    /// Signal queued on the sound card (not yet played), milliseconds.
+    pub device_buffer_ms: Option<f64>,
     /// SDC blocks produced.
     pub sdc_blocks: u64,
     /// Data field bytes used by the last SDC block, and the capacity.
@@ -103,6 +110,30 @@ struct DataStream {
     encoder: DataEncoder,
 }
 
+/// Stops a station's sound-card waits from another thread (see [`Station::stop_handle`]).
+///
+/// After [`StopHandle::stop`], writing to the sound card returns at once (the rest of
+/// the frame is not queued) and [`Station::finish`] does not wait for the queued signal
+/// to play out; file output is unaffected. The station's owner still ends its frame
+/// loop and calls `finish` as usual.
+///
+/// Rust note: the handle is an `Arc<AtomicBool>` — a flag shared between threads
+/// without a lock; `Clone` gives another handle to the same flag.
+#[derive(Debug, Clone, Default)]
+pub struct StopHandle(Arc<AtomicBool>);
+
+impl StopHandle {
+    /// Ask the station to stop waiting for the sound card.
+    pub fn stop(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`Self::stop`] was called.
+    pub fn is_stopped(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 /// A DRM30 transmitter station (see the module docs).
 ///
 /// ```no_run
@@ -134,6 +165,7 @@ pub struct Station {
     status: StationStatus,
     baseband: Vec<Cplx>,
     samples: Vec<f32>,
+    stop: StopHandle,
 }
 
 // Compile-time check that a station can be moved to a worker thread (e.g. by a GUI).
@@ -147,6 +179,13 @@ impl Station {
     /// open the outputs.
     pub fn new(cfg: StationConfig) -> Result<Self> {
         let plan = cfg.validate()?;
+        Self::with_plan(cfg, plan)
+    }
+
+    /// Like [`Self::new`] with the plan of an earlier `cfg.validate()` (e.g. one a user
+    /// interface has already shown), so the configuration is not checked twice. `plan`
+    /// must come from this `cfg`.
+    pub fn with_plan(cfg: StationConfig, plan: MultiplexPlan) -> Result<Self> {
         let tx = Transmitter::new(plan.tx)?;
         let output = OutputStage::new(plan.layout, plan.output)?;
         let names: Vec<String> =
@@ -205,8 +244,9 @@ impl Station {
         let file = crate::output::open_file(&cfg, channels)?;
         let device = DeviceSink::open(&cfg.output, channels)?;
 
+        let output_file = cfg.output.file.as_ref().map(|f| cfg.resolve(f));
         let mut station = Self {
-            status: StationStatus { sdc_capacity: plan.sdc_capacity, ..Default::default() },
+            status: StationStatus { sdc_capacity: plan.sdc_capacity, output_file, ..Default::default() },
             cfg,
             plan,
             tx,
@@ -221,6 +261,7 @@ impl Station {
             names,
             baseband: Vec::new(),
             samples: Vec::new(),
+            stop: StopHandle::default(),
         };
         station.update_status();
         Ok(station)
@@ -239,6 +280,13 @@ impl Station {
     /// The current status.
     pub fn status(&self) -> &StationStatus {
         &self.status
+    }
+
+    /// A handle that stops the station's sound-card waits from another thread (e.g. a
+    /// GUI's Stop button while [`Self::transmit_frame`] waits for room on a stalled
+    /// sound card).
+    pub fn stop_handle(&self) -> StopHandle {
+        self.stop.clone()
     }
 
     /// Number of output channels (1 real, 2 I/Q) at 48 kHz.
@@ -297,7 +345,8 @@ impl Station {
     }
 
     /// End the transmission: flush the channel filter's tail to the outputs, complete
-    /// the file and play out the sound card's buffer. Returns the final status.
+    /// the file and play out the sound card's buffer (not after [`StopHandle::stop`]).
+    /// Returns the final status.
     pub fn finish(mut self) -> Result<StationStatus> {
         self.samples.clear();
         self.output.flush(&mut self.samples);
@@ -306,7 +355,7 @@ impl Station {
             f.finalize().map_err(StationError::Output)?;
         }
         if let Some(d) = self.device.as_mut() {
-            d.drain();
+            d.drain(&self.stop);
         }
         self.update_status();
         Ok(self.status)
@@ -317,7 +366,7 @@ impl Station {
             f.write(&self.samples).map_err(StationError::Output)?;
         }
         if let Some(d) = self.device.as_mut() {
-            d.write(&self.samples)?;
+            d.write(&self.samples, &self.stop)?;
         }
         Ok(())
     }
@@ -336,6 +385,7 @@ impl Station {
         st.clipped_samples = self.output.clipped_samples();
         st.device = self.device.as_ref().map(|d| d.name().to_string());
         st.device_underruns = self.device.as_ref().map_or(0, DeviceSink::underruns);
+        st.device_buffer_ms = self.device.as_ref().map(|d| d.queued().as_secs_f64() * 1000.0);
         st.sdc_blocks = self.sdc.blocks;
         st.sdc_bytes_used = self.sdc.last_used;
         st.time_sent = self.sdc.last_time.as_ref().map(crate::time::format_entity);
@@ -369,5 +419,40 @@ impl Station {
                     .collect(),
             })
             .collect();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AudioInputSettings, AudioSettings, Codec, OutputSettings, ServiceSettings};
+
+    #[test]
+    fn with_plan_status_and_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = ServiceSettings::new("Test", 0x42);
+        service.audio = Some(AudioSettings::new(Codec::HeAac, AudioInputSettings::tone(440.0)));
+        let cfg = StationConfig {
+            output: OutputSettings { file: Some("out.wav".into()), ..Default::default() },
+            services: vec![service],
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let plan = cfg.validate().unwrap();
+        let mut station = Station::with_plan(cfg, plan).unwrap();
+        let wav = dir.path().join("out.wav");
+        assert_eq!(station.status().output_file.as_deref(), Some(wav.as_path()));
+        assert_eq!(station.status().device_buffer_ms, None, "no sound card");
+        station.transmit_frame().unwrap();
+        // A stop request only concerns sound-card waits: the file still gets everything.
+        let stop = station.stop_handle();
+        assert!(!stop.is_stopped());
+        stop.stop();
+        assert!(station.stop_handle().is_stopped(), "handles share one flag");
+        station.transmit_frame().unwrap();
+        let status = station.finish().unwrap();
+        assert_eq!(status.frames, 2);
+        let bytes = std::fs::metadata(&wav).unwrap().len();
+        assert!(bytes > 2 * 19_200 * 2, "{bytes} bytes");
     }
 }

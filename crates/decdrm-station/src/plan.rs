@@ -29,6 +29,9 @@
 //! typically 94–97 %, less for stereo AAC with a 24 kHz core, which overshoots its
 //! budget by up to 10 % at low rates. A super frame that still overflows drops a frame,
 //! which the receiver conceals. Opus packets are constant size: ⌊payload / 20⌋ bytes.
+//! EnCodec (DecDRM's experimental extension) takes the highest of its fixed bit rates
+//! that fits and spends the rest on CRC granularity and repetition
+//! (`decdrm_encodec::plan`).
 
 use crate::config::{AppKind, Codec, Part, SignalFormat, StationConfig};
 use crate::error::{ConfigProblems, Result, StationError};
@@ -161,6 +164,8 @@ pub struct AudioPlan {
     pub opus_packet_bytes: usize,
     /// SDC type 9 parameters.
     pub params: AudioParams,
+    /// EnCodec: bandwidth and DRM framing (signalled in `params`).
+    pub encodec: Option<decdrm_encodec::EncodecConfig>,
 }
 
 impl AudioPlan {
@@ -176,6 +181,10 @@ impl AudioPlan {
             Codec::Aac => format!("AAC {ch}, {} kHz", self.core_rate / 1000),
             Codec::HeAac => format!("HE-AAC {ch}, {} kHz core", self.core_rate / 1000),
             Codec::HeAacV2 => format!("HE-AAC v2 ({ch}), {} kHz core", self.core_rate / 1000),
+            Codec::Encodec => match self.encodec {
+                Some(c) => format!("{}, 24 kHz mono", c.describe()),
+                None => "EnCodec, 24 kHz mono".into(),
+            },
         }
     }
 }
@@ -277,7 +286,7 @@ impl MultiplexPlan {
 /// Default AAC core rate of a codec.
 fn default_core_rate(codec: Codec) -> u32 {
     match codec {
-        Codec::Aac => 24_000,
+        Codec::Aac | Codec::Encodec => 24_000,
         Codec::HeAac | Codec::HeAacV2 => 12_000,
         Codec::Opus => 48_000,
     }
@@ -769,6 +778,11 @@ fn check_audio(cfg: &StationConfig, name: &str, a: &crate::config::AudioSettings
     if a.codec == Codec::Opus && rate != 48_000 {
         p.push(format!("{name}: Opus always runs at 48 kHz; remove core_rate"));
     }
+    if a.codec == Codec::Encodec {
+        check_encodec(name, a, rate, p);
+    } else if a.bandwidth_kbps.is_some() {
+        p.push(format!("{name}: bandwidth_kbps is only used by codec = \"encodec\""));
+    }
     if !(a.share.is_finite() && a.share > 0.0) {
         p.push(format!("{name}: share must be a positive number"));
     }
@@ -911,6 +925,9 @@ fn stream_requests(cfg: &StationConfig, p: &mut Problems) -> Vec<Request> {
 
 /// Codec parameters of an audio service carried in `stream`.
 fn audio_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::result::Result<AudioPlan, String> {
+    if a.codec == Codec::Encodec {
+        return encodec_plan(a, stream);
+    }
     let codec = a.codec;
     let core_rate = a.core_rate.unwrap_or_else(|| default_core_rate(codec));
     let stereo = a.stereo || codec == Codec::HeAacV2;
@@ -998,6 +1015,81 @@ fn audio_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::res
         encoder_bitrate,
         opus_packet_bytes,
         params,
+        encodec: None,
+    })
+}
+
+// ---------------------------------------------------------------------------------
+// EnCodec (DecDRM's experimental neural codec)
+// ---------------------------------------------------------------------------------
+
+/// Checks of an EnCodec service: 24 kHz mono, a valid bandwidth, and the codec built in
+/// with its weights installed (so `decdrm tx --check` already tells).
+fn check_encodec(name: &str, a: &crate::config::AudioSettings, rate: u32, p: &mut Problems) {
+    if rate != decdrm_encodec::SAMPLE_RATE {
+        p.push(format!("{name}: EnCodec always runs at 24 kHz; remove core_rate"));
+    }
+    if a.stereo {
+        p.push(format!("{name}: EnCodec (the 24 kHz model) is mono; remove stereo = true"));
+    }
+    if let Some(kbps) = a.bandwidth_kbps
+        && decdrm_encodec::Bandwidth::from_kbps(kbps).is_none()
+    {
+        p.push(format!("{name}: EnCodec bandwidth_kbps {kbps} is not one of 1.5, 3, 6, 12 and 24"));
+    }
+    if !decdrm_encodec::BUILT_IN {
+        p.push(format!(
+            "{name}: EnCodec is not built into this program (build with `--features encodec`, e.g. \
+             cargo build --release -p decdrm-cli --features encodec)"
+        ));
+    } else if let Err(e) = decdrm_encodec::find_weights() {
+        p.push(format!("{name}: {e}"));
+    }
+}
+
+/// EnCodec parameters of an audio service carried in `stream`: the requested
+/// bandwidth, or the highest that fits, and the framing that spends the spare bytes on
+/// robustness (`decdrm_encodec::plan`).
+fn encodec_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::result::Result<AudioPlan, String> {
+    let text = a.text.iter().any(|t| !t.is_empty());
+    let len = stream.bytes();
+    let text_bytes = if text { TEXT_MESSAGE_BYTES } else { 0 };
+    let super_frame_len = len.saturating_sub(text_bytes);
+    let requested = a.bandwidth_kbps.and_then(decdrm_encodec::Bandwidth::from_kbps);
+    let config = decdrm_encodec::choose_config(super_frame_len, requested).map_err(|e| {
+        let kbit = |bytes: usize| bytes as f64 * 8.0 / FRAME_SECONDS / 1000.0;
+        let remedy = if stream.hierarchical {
+            "the hierarchical stream's length is fixed by the channel: use a higher protection_hierarchical, \
+             HMsym instead of HMmix, or a wider channel"
+        } else {
+            "reduce the data bit rates, or use a wider channel, 64-QAM or a higher protection level number"
+        };
+        let lower = if requested.is_some() { "a lower bandwidth_kbps, " } else { "" };
+        format!(
+            "{:.1} kbit/s left for the audio stream; EnCodec {} needs at least {:.1} kbit/s ({lower}{remedy})",
+            kbit(len),
+            e.bandwidth,
+            kbit(e.needed + text_bytes)
+        )
+    })?;
+    let rate = decdrm_encodec::SAMPLE_RATE;
+    let params =
+        AudioParams::new(stream.id, AudioCodec::Encodec, false, AudioMode::Mono, rate, text, config.codec_config().to_vec());
+    Ok(AudioPlan {
+        stream: stream.id,
+        codec: Codec::Encodec,
+        core_rate: rate,
+        stereo: false,
+        input_rate: rate,
+        input_channels: 1,
+        text,
+        frames_per_super_frame: decdrm_encodec::FRAMES_PER_SUPER_FRAME,
+        super_frame_len,
+        payload_len: decdrm_encodec::FrameLayout::new(config).min_bytes(),
+        encoder_bitrate: config.bandwidth.bits_per_second(),
+        opus_packet_bytes: 0,
+        params,
+        encodec: Some(config),
     })
 }
 

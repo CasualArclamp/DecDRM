@@ -20,6 +20,7 @@
 use crate::data::DataServices;
 use crate::indicators::Indicators;
 use crate::plots::PlotData;
+use crate::waterfall::Waterfall;
 use decdrm_engine::{Command, Engine, EngineConfig, EngineEvent, InputSpec, ServiceView, Snapshot};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -111,6 +112,8 @@ pub struct RxSession {
     pub snap: Snapshot,
     /// Plot data prepared from `snap`.
     pub plots: PlotData,
+    /// History of the input spectrum.
+    pub waterfall: Waterfall,
     pub indicators: Indicators,
     pub data: DataServices,
     pub log: LogBuffer,
@@ -131,6 +134,7 @@ impl Default for RxSession {
             stopping: false,
             snap: Snapshot::default(),
             plots: PlotData::default(),
+            waterfall: Waterfall::default(),
             indicators: Indicators::default(),
             data: DataServices::default(),
             log: LogBuffer::default(),
@@ -159,6 +163,7 @@ impl RxSession {
         self.live = matches!(cfg.input, InputSpec::Device { .. });
         self.snap = Snapshot::default();
         self.plots = PlotData::default();
+        self.waterfall.clear();
         self.indicators.clear();
         self.data.clear();
         self.texts.clear();
@@ -235,15 +240,19 @@ impl RxSession {
         if let Some(t) = now_unix {
             self.data.tick(t);
         }
+        // Due a little early: repaints come every ~100 ms with some jitter, and a
+        // strict limit would skip every other one (halving the waterfall's row rate).
         let due = self
             .last_fetch
-            .is_none_or(|t| now.duration_since(t) >= FETCH_INTERVAL);
+            .is_none_or(|t| now.duration_since(t) >= FETCH_INTERVAL * 4 / 5);
         if due || finished {
             let snap = engine.snapshot();
             // `seq` counts the engine's publications: the same number means the same
             // content, so the plot data need not be prepared again.
             if snap.seq != self.snap.seq {
                 self.plots = PlotData::from_snapshot(&snap);
+                self.waterfall
+                    .push(&snap.visuals.spectrum_db, snap.visuals.real_input);
             }
             self.snap = snap;
             self.last_fetch = Some(now);

@@ -51,4 +51,4 @@ pub use config::{
 pub use data::load_journaline;
 pub use error::{ConfigProblems, Result, StationError};
 pub use plan::{AppPlan, AudioPlan, MultiplexPlan, ServicePlan, StreamContent, StreamPlan};
-pub use station::{AppStatus, AudioStatus, ServiceStatus, Station, StationStatus};
+pub use station::{AppStatus, AudioStatus, ServiceStatus, Station, StationStatus, StopHandle};

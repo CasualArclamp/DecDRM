@@ -3,8 +3,9 @@
 //! The pattern is the receiver's (see `receiver.rs` for why the GUI works on published
 //! copies): the worker owns the station; about ten times per second it publishes a
 //! [`TxSnapshot`] into an `Arc<Mutex<_>>`, and the GUI clones it. The stop request
-//! goes to the worker through a channel, and the worker's log lines and end (with the
-//! error, if any) come back through another. The receiver and the transmitter are
+//! goes to the worker through a channel — and through the station's [`StopHandle`],
+//! which also cuts short a wait for room on a slow or stalled sound card — and the
+//! worker's log lines and end (with the error, if any) come back through another. The receiver and the transmitter are
 //! independent, so both can run at once (e.g. a loopback through a virtual cable).
 //!
 //! Pacing: a sound-card output blocks the worker while the card's buffer is full, so
@@ -15,10 +16,9 @@
 use crate::plots::SpectrumPlot;
 use crate::spectrum::SpectrumAverager;
 use crate::tx_config::signal_band;
-use decdrm_station::{Station, StationConfig, StationStatus};
+use decdrm_station::{MultiplexPlan, Station, StationConfig, StationStatus, StopHandle};
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -45,8 +45,6 @@ pub struct TxSnapshot {
     pub band_hz: Option<(f64, f64)>,
     /// Frames to transmit (the duration limit), if any.
     pub frames_limit: Option<u64>,
-    /// The output file, resolved.
-    pub output_file: Option<PathBuf>,
     /// The station has been created (outputs open).
     pub started: bool,
 }
@@ -65,20 +63,23 @@ struct TxWorker {
     cmd: Sender<Cmd>,
     events: Receiver<TxEvent>,
     shared: Arc<Mutex<TxSnapshot>>,
+    /// The station's stop handle, once the worker has created the station.
+    stop: Arc<Mutex<Option<StopHandle>>>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl TxWorker {
-    fn start(cfg: StationConfig, frames: Option<u64>) -> Self {
+    fn start(cfg: StationConfig, plan: MultiplexPlan, frames: Option<u64>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (ev_tx, ev_rx) = mpsc::channel();
         let first = TxSnapshot {
             frames_limit: frames,
-            output_file: cfg.output.file.as_ref().map(|f| cfg.resolve(f)),
             ..TxSnapshot::default()
         };
         let shared = Arc::new(Mutex::new(first.clone()));
         let worker_shared = Arc::clone(&shared);
+        let stop = Arc::new(Mutex::new(None));
+        let worker_stop = Arc::clone(&stop);
         let handle = std::thread::Builder::new()
             .name("decdrm-station".into())
             .spawn(move || {
@@ -87,7 +88,15 @@ impl TxWorker {
                 // is our promise that nothing half-updated is used afterwards: the
                 // station is dropped with the closure.
                 let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    run(cfg, first, &cmd_rx, &ev_tx, &worker_shared)
+                    run(
+                        cfg,
+                        plan,
+                        first,
+                        &cmd_rx,
+                        &ev_tx,
+                        &worker_shared,
+                        &worker_stop,
+                    )
                 }));
                 let error = match result {
                     Ok(Ok(())) => None,
@@ -104,6 +113,7 @@ impl TxWorker {
             cmd: cmd_tx,
             events: ev_rx,
             shared,
+            stop,
             handle: Some(handle),
         }
     }
@@ -111,12 +121,23 @@ impl TxWorker {
     fn snapshot(&self) -> TxSnapshot {
         self.shared.lock().map(|s| s.clone()).unwrap_or_default()
     }
+
+    /// Ask the worker to stop: through the channel (checked between frames) and the
+    /// station's stop handle (which ends a wait on the sound card at once).
+    fn request_stop(&self) {
+        let _ = self.cmd.send(Cmd::Stop);
+        if let Ok(slot) = self.stop.lock()
+            && let Some(h) = slot.as_ref()
+        {
+            h.stop();
+        }
+    }
 }
 
 impl Drop for TxWorker {
     fn drop(&mut self) {
         if let Some(h) = self.handle.take() {
-            let _ = self.cmd.send(Cmd::Stop);
+            self.request_stop();
             let _ = h.join();
         }
     }
@@ -135,15 +156,21 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// the inputs have ended, then finish it (completing the file).
 fn run(
     cfg: StationConfig,
+    plan: MultiplexPlan,
     mut snap: TxSnapshot,
     cmd: &Receiver<Cmd>,
     events: &Sender<TxEvent>,
     shared: &Mutex<TxSnapshot>,
+    stop: &Mutex<Option<StopHandle>>,
 ) -> Result<(), String> {
     let log = |line: String| {
         let _ = events.send(TxEvent::Log(line));
     };
-    let mut station = Station::new(cfg).map_err(|e| e.to_string())?;
+    // The GUI has just validated `cfg` and shown this plan; no need to check twice.
+    let mut station = Station::with_plan(cfg, plan).map_err(|e| e.to_string())?;
+    if let Ok(mut slot) = stop.lock() {
+        *slot = Some(station.stop_handle());
+    }
     let plan = station.plan();
     let (dc, band) = signal_band(plan.layout, plan.output.format);
     let channels = station.output_channels();
@@ -247,13 +274,20 @@ impl TxSession {
         )
     }
 
-    /// Start transmitting `cfg` (checked beforehand), for at most `frames` frames.
-    pub fn start(&mut self, cfg: StationConfig, frames: Option<u64>, label: String) {
+    /// Start transmitting `cfg` with its `plan` (from `cfg.validate()`), for at most
+    /// `frames` frames.
+    pub fn start(
+        &mut self,
+        cfg: StationConfig,
+        plan: MultiplexPlan,
+        frames: Option<u64>,
+        label: String,
+    ) {
         self.shutdown();
         self.error = None;
         self.push_message(format!("── transmit: {label}"));
         self.label = label;
-        let worker = TxWorker::start(cfg, frames);
+        let worker = TxWorker::start(cfg, plan, frames);
         self.snap = worker.snapshot();
         self.spectrum = SpectrumPlot::default();
         self.worker = Some(worker);
@@ -266,7 +300,7 @@ impl TxSession {
     /// out the sound card's buffer) and then reports its end.
     pub fn stop(&mut self) {
         if let Some(w) = &self.worker {
-            let _ = w.cmd.send(Cmd::Stop);
+            w.request_stop();
             self.stopping = true;
         }
     }
@@ -343,7 +377,7 @@ impl TxSession {
 mod tests {
     use super::*;
     use crate::settings::TxOutput;
-    use crate::tx_config::{EXAMPLE_STATION, Overrides, frames_for, materialize_example, prepare};
+    use crate::tx_config::{EXAMPLE_STATION, Overrides, check, frames_for, materialize_example};
 
     fn wait_until_stopped(tx: &mut TxSession) {
         let t0 = Instant::now();
@@ -382,15 +416,15 @@ mod tests {
             file: Some(wav.clone()),
             device: None,
         };
-        let cfg = prepare(EXAMPLE_STATION, &dir, &ov).unwrap();
+        let (cfg, plan) = check(EXAMPLE_STATION, &dir, &ov).unwrap();
         let mut tx = TxSession::default();
-        tx.start(cfg, frames_for(2.0), "test".into());
+        tx.start(cfg, plan, frames_for(2.0), "test".into());
         assert!(tx.is_running());
         wait_until_stopped(&mut tx);
         assert_eq!(tx.error, None, "{:?}", tx.messages);
         assert!(tx.snap.started);
         assert_eq!(tx.snap.status.frames, 5);
-        assert_eq!(tx.snap.output_file.as_deref(), Some(wav.as_path()));
+        assert_eq!(tx.snap.status.output_file.as_deref(), Some(wav.as_path()));
         assert!(!tx.snap.spectrum_db.is_empty());
         assert_eq!(tx.snap.status.services.len(), 2);
         // 2 s of 48 kHz 16-bit mono plus the channel filter's tail and the header.
@@ -410,10 +444,10 @@ mod tests {
             file: Some(wav.clone()),
             device: None,
         };
-        let cfg = prepare(EXAMPLE_STATION, &dir, &ov).unwrap();
+        let (cfg, plan) = check(EXAMPLE_STATION, &dir, &ov).unwrap();
         let mut tx = TxSession::default();
         let limit = frames_for(3600.0);
-        tx.start(cfg, limit, "long".into());
+        tx.start(cfg, plan, limit, "long".into());
         tx.stop();
         assert!(tx.is_stopping());
         wait_until_stopped(&mut tx);
@@ -431,16 +465,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A station that cannot be created reports its error and ends.
+    /// A station that cannot be created reports its error and ends: here the Journaline
+    /// page file disappears between the check and the start.
     #[test]
     fn errors_are_reported() {
         let dir = std::env::temp_dir().join(format!("decdrm-gui-tx-err-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // The Journaline page file is missing in this directory.
-        let mut cfg = prepare(EXAMPLE_STATION, &dir, &Overrides::default()).unwrap();
+        materialize_example(&dir).unwrap();
+        let (mut cfg, plan) = check(EXAMPLE_STATION, &dir, &Overrides::default()).unwrap();
         cfg.output.file = Some(dir.join("never.wav"));
+        std::fs::remove_file(dir.join("journaline.toml")).unwrap();
         let mut tx = TxSession::default();
-        tx.start(cfg, frames_for(1.0), "broken".into());
+        tx.start(cfg, plan, frames_for(1.0), "broken".into());
         wait_until_stopped(&mut tx);
         let e = tx.error.clone().unwrap_or_default();
         assert!(e.contains("journaline"), "{e}");

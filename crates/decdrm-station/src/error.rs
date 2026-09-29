@@ -13,9 +13,10 @@ pub enum StationError {
     /// The configuration is inconsistent (every problem found is listed).
     #[error("{0}")]
     Config(ConfigProblems),
-    /// A configuration file could not be parsed.
+    /// A configuration file could not be parsed. `location` is the (line, column),
+    /// both counted from 1, where the parser stopped, if it reported one.
     #[error("{path}: {message}")]
-    Parse { path: PathBuf, message: String },
+    Parse { path: PathBuf, message: String, location: Option<(usize, usize)> },
     /// A file or directory named in the configuration could not be read.
     #[error("{path}: {source}")]
     Io {
@@ -39,6 +40,9 @@ pub enum StationError {
     /// The output file or sound card failed.
     #[error("output: {0}")]
     Output(#[source] decdrm_io::Error),
+    /// The sound card stopped taking samples (e.g. a virtual cable whose reader went away).
+    #[error("output: the sound card \"{device}\" took no samples for {seconds:.1} s")]
+    DeviceStalled { device: String, seconds: f64 },
     /// The transmitter chain rejected its input (a bug if the plan was validated).
     #[error("transmitter: {0}")]
     Tx(#[from] decdrm_core::tx::TxError),
@@ -64,6 +68,14 @@ impl StationError {
         match self {
             Self::Config(p) => &p.0,
             _ => &[],
+        }
+    }
+
+    /// (line, column), both from 1, of a parse error, for pointing at it in an editor.
+    pub fn location(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Parse { location, .. } => *location,
+            _ => None,
         }
     }
 }

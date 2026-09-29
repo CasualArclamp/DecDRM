@@ -5,8 +5,9 @@
 //! Pipeline: [`Receiver`] → FAC/SDC into the multiplex model ([`Ensemble`]), which
 //! yields the MSC configuration → decoded MSC frames are demultiplexed into streams →
 //! the selected audio service's stream goes through the super-frame deframer and the
-//! codec (FDK-AAC / Opus), its text message through the text decoder, and every data
-//! application's stream through a `decdrm-data` decoder.
+//! codec (FDK-AAC / Opus / EnCodec with the `encodec` feature), its text message through
+//! the text decoder, and every data application's stream through a `decdrm-data`
+//! decoder.
 
 use decdrm_codecs::{DrmAudioCoding, DrmAudioDecoder, PcmFrame, open_decoder};
 use decdrm_core::fac::{Fac, LANGUAGES, PROGRAMME_TYPES};
@@ -429,13 +430,17 @@ impl Session {
 
 fn build_audio(short_id: u8, params: &AudioParams, stream: StreamLengths) -> Result<AudioPipeline, String> {
     let coding = match params.codec {
-        AudioCodec::Aac => DrmAudioCoding::Aac,
-        AudioCodec::XheAac => DrmAudioCoding::XheAac,
-        AudioCodec::Opus => DrmAudioCoding::Opus,
+        AudioCodec::Aac => Some(DrmAudioCoding::Aac),
+        AudioCodec::XheAac => Some(DrmAudioCoding::XheAac),
+        AudioCodec::Opus => Some(DrmAudioCoding::Opus),
+        AudioCodec::Encodec => None,
         AudioCodec::Reserved => return Err("reserved audio coding (CELP/HVXC are not supported)".into()),
     };
     let deframer = AudioDeframer::new(params, stream).map_err(|e| e.to_string())?;
-    let decoder = open_decoder(coding, &params.type9_bytes).map_err(|e| e.to_string())?;
+    let decoder = match coding {
+        Some(coding) => open_decoder(coding, &params.type9_bytes).map_err(|e| e.to_string())?,
+        None => open_encodec(params)?,
+    };
     Ok(AudioPipeline {
         short_id,
         stream_id: params.stream_id,
@@ -445,6 +450,19 @@ fn build_audio(short_id: u8, params: &AudioParams, stream: StreamLengths) -> Res
         decoder,
         text: TextMessageDecoder::new(),
     })
+}
+
+/// The decoder of a DecDRM EnCodec service (the `encodec` feature). The model weights
+/// are loaded (once per process) from the default location, see
+/// `decdrm_encodec::weights`.
+#[cfg(feature = "encodec")]
+fn open_encodec(params: &AudioParams) -> Result<Box<dyn DrmAudioDecoder>, String> {
+    decdrm_encodec::open_decoder(&params.type9_bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(not(feature = "encodec"))]
+fn open_encodec(_params: &AudioParams) -> Result<Box<dyn DrmAudioDecoder>, String> {
+    Err("EnCodec (not built in)".into())
 }
 
 /// Whether two application entries describe the same data channel: the same stream,
@@ -471,6 +489,7 @@ fn describe_audio(p: &AudioParams) -> String {
         AudioCodec::Aac => "AAC",
         AudioCodec::XheAac => "xHE-AAC",
         AudioCodec::Opus => "Opus",
+        AudioCodec::Encodec => return describe_encodec(p),
         AudioCodec::Reserved => "reserved",
     };
     let mode = match p.mode {
@@ -480,6 +499,21 @@ fn describe_audio(p: &AudioParams) -> String {
         _ => "?",
     };
     format!("{codec} {mode} {} kHz{}", p.sample_rate_hz / 1000, if p.text_flag { ", text" } else { "" })
+}
+
+/// E.g. `EnCodec 6 kbit/s mono 24 kHz, text` — DecDRM's experimental extension — with
+/// `(not built in)` when this build cannot decode it (no `encodec` feature).
+fn describe_encodec(p: &AudioParams) -> String {
+    let bandwidth = match decdrm_encodec::EncodecConfig::from_codec_config(&p.codec_config) {
+        Ok(c) => format!("{} ", c.bandwidth),
+        Err(e) => format!("({e}) "),
+    };
+    format!(
+        "EnCodec {bandwidth}mono {} kHz{}{}",
+        p.sample_rate_hz / 1000,
+        if p.text_flag { ", text" } else { "" },
+        if decdrm_encodec::BUILT_IN { "" } else { " (not built in)" }
+    )
 }
 
 fn describe_service(s: &ServiceInfo) -> String {

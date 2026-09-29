@@ -16,6 +16,9 @@ milestone checklist (keep it current).
 - `crates/decdrm-engine` — worker thread: source → `Session` (receiver + multiplex +
   audio/text/data pipelines) → audio out / data store; `Snapshot`s for the UIs.
 - `crates/decdrm-station` — transmitter application layer (TOML station config).
+- `crates/decdrm-encodec` — experimental EnCodec codec; candle only with the
+  `encodec` feature (engine/station/cli/gui forward it). Weights live in the
+  git-ignored `models/` (`decdrm models download encodec`).
 - `apps/decdrm-cli` (binary `decdrm`: `rx`, `tx`, `devices`), `apps/decdrm-gui` (egui,
   MSRV 1.95 because of eframe).
 - `third_party/` — pinned submodules (fdk-aac v2.0.3, opus v1.6.1, libxaac v0.1.13);

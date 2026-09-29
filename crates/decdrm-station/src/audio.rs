@@ -1,11 +1,12 @@
 //! Audio services: the input (file, sound card or test tone, converted to the encoder's
-//! rate and channel count), the encoder (FDK-AAC or Opus) and the logical frame of
-//! each 400 ms multiplex frame (audio super frame plus text message piece).
+//! rate and channel count), the encoder (FDK-AAC, Opus, or EnCodec with the `encodec`
+//! feature) and the logical frame of each 400 ms multiplex frame (audio super frame plus
+//! text message piece).
 //!
 //! Timing: one call of [`AudioChain::next_logical_frame`] consumes exactly 400 ms of
 //! PCM at the encoder's input rate — five or ten AAC granules of 960 core samples
-//! (1920 input samples with SBR), or twenty 20 ms Opus frames — and produces one audio
-//! super frame (ES 201 980 §5.4.1).
+//! (1920 input samples with SBR), twenty 20 ms Opus frames, or thirty 320-sample
+//! EnCodec frames at 24 kHz — and produces one audio super frame (ES 201 980 §5.4.1).
 //!
 //! FDK-AAC has an encoder delay: its first calls return no frame. The encoder is primed
 //! with silence at start-up until it delivers its first frame, after which every
@@ -473,9 +474,49 @@ impl OpusEncoder {
     }
 }
 
+/// EnCodec encoder producing DecDRM's EnCodec super frames (the `encodec` feature).
+#[cfg(feature = "encodec")]
+struct EncodecEncoder {
+    enc: decdrm_encodec::EncodecDrmEncoder,
+    encoder_errors: u64,
+}
+
+#[cfg(feature = "encodec")]
+impl EncodecEncoder {
+    fn super_frame(&mut self, pcm: &[f32], len: usize) -> Vec<u8> {
+        match self.enc.super_frame(pcm, len) {
+            Ok(sf) => sf,
+            Err(_) => {
+                // Zeros fail every CRC of the super frame, so the receiver conceals it.
+                self.encoder_errors += 1;
+                vec![0; len]
+            }
+        }
+    }
+}
+
+/// The EnCodec encoder of `plan`, with the encoder half of the model from the default
+/// location (`decdrm_encodec::weights`).
+#[cfg(feature = "encodec")]
+fn open_encodec(plan: &AudioPlan) -> std::result::Result<Encoder, decdrm_codecs::CodecError> {
+    let config = plan
+        .encodec
+        .ok_or_else(|| decdrm_codecs::CodecError::InvalidConfig("EnCodec service without a configuration".into()))?;
+    decdrm_encodec::EncodecDrmEncoder::open(config)
+        .map(|enc| Encoder::Encodec(EncodecEncoder { enc, encoder_errors: 0 }))
+        .map_err(|e| decdrm_codecs::CodecError::Unsupported(e.to_string()))
+}
+
+#[cfg(not(feature = "encodec"))]
+fn open_encodec(_plan: &AudioPlan) -> std::result::Result<Encoder, decdrm_codecs::CodecError> {
+    Err(decdrm_codecs::CodecError::Unsupported("EnCodec is not built in (build with `--features encodec`)".into()))
+}
+
 enum Encoder {
     Aac(AacEncoder),
     Opus(OpusEncoder),
+    #[cfg(feature = "encodec")]
+    Encodec(EncodecEncoder),
 }
 
 // ---------------------------------------------------------------------------------
@@ -521,6 +562,7 @@ impl AudioChain {
             .map_err(|message| StationError::Input { service: name.clone(), message })?;
         let encoder = match plan.codec {
             Codec::Opus => OpusEncoder::new(plan, stream).map(Encoder::Opus),
+            Codec::Encodec => open_encodec(plan),
             _ => AacEncoder::new(plan, stream).map(Encoder::Aac),
         }
         .map_err(|source| StationError::Codec { service: name, source })?;
@@ -564,6 +606,13 @@ impl AudioChain {
             Encoder::Opus(e) => {
                 let sf = e.super_frame(&self.pcm, len)?;
                 self.counters.frames_dropped = e.encoder_errors;
+                self.counters.encoder_errors = e.encoder_errors;
+                sf
+            }
+            #[cfg(feature = "encodec")]
+            Encoder::Encodec(e) => {
+                let sf = e.super_frame(&self.pcm, len);
+                self.counters.frames_dropped = e.encoder_errors * decdrm_encodec::FRAMES_PER_SUPER_FRAME as u64;
                 self.counters.encoder_errors = e.encoder_errors;
                 sf
             }

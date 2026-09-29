@@ -58,18 +58,44 @@ pub fn problems_of(e: &StationError) -> Vec<String> {
     }
 }
 
+/// Why the editor text cannot be transmitted: every problem found, and for a TOML
+/// syntax error the (line, column) where the parser stopped.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Problems {
+    pub list: Vec<String>,
+    pub location: Option<(usize, usize)>,
+}
+
+impl Problems {
+    fn one(problem: impl Into<String>) -> Self {
+        Self {
+            list: vec![problem.into()],
+            location: None,
+        }
+    }
+}
+
+impl From<&StationError> for Problems {
+    fn from(e: &StationError) -> Self {
+        Self {
+            list: problems_of(e),
+            location: e.location(),
+        }
+    }
+}
+
 /// Parse the editor text, resolve relative paths against `base_dir` (the file's
 /// directory) and apply the overrides.
-pub fn prepare(text: &str, base_dir: &Path, ov: &Overrides) -> Result<StationConfig, Vec<String>> {
-    let mut cfg = StationConfig::from_toml_str(text).map_err(|e| problems_of(&e))?;
+pub fn prepare(text: &str, base_dir: &Path, ov: &Overrides) -> Result<StationConfig, Problems> {
+    let mut cfg = StationConfig::from_toml_str(text).map_err(|e| Problems::from(&e))?;
     cfg.base_dir = Some(base_dir.to_path_buf());
     match ov.output {
         TxOutput::Config => {}
         TxOutput::File => {
             let Some(file) = &ov.file else {
-                return Err(vec![
-                    "output: choose the file to write (\"…\" next to File)".into(),
-                ]);
+                return Err(Problems::one(
+                    "output: choose the file to write (\"…\" next to File)",
+                ));
             };
             cfg.output.file = Some(file.clone());
             cfg.output.device = None;
@@ -87,10 +113,28 @@ pub fn check(
     text: &str,
     base_dir: &Path,
     ov: &Overrides,
-) -> Result<(StationConfig, MultiplexPlan), Vec<String>> {
+) -> Result<(StationConfig, MultiplexPlan), Problems> {
     let cfg = prepare(text, base_dir, ov)?;
-    let plan = cfg.validate().map_err(|e| problems_of(&e))?;
+    let plan = cfg.validate().map_err(|e| Problems::from(&e))?;
     Ok((cfg, plan))
+}
+
+/// Character index (not byte index) where line `line` (counted from 1) of `text`
+/// starts, for placing an editor cursor; the end of the text past the last line.
+pub fn line_start_char(text: &str, line: usize) -> usize {
+    if line <= 1 {
+        return 0;
+    }
+    let mut seen = 1;
+    for (i, c) in text.chars().enumerate() {
+        if c == '\n' {
+            seen += 1;
+            if seen == line {
+                return i + 1;
+            }
+        }
+    }
+    text.chars().count()
 }
 
 /// Frames for a duration limit (400 ms each, rounded up); `None` for a non-positive
@@ -258,12 +302,40 @@ mod tests {
         let broken = EXAMPLE_STATION.replace("occupancy = 3", "occupancy = 9");
         let problems = check(&broken, &dir, &Overrides::default()).unwrap_err();
         assert!(
-            problems.iter().any(|p| p.contains("occupancy")),
+            problems.list.iter().any(|p| p.contains("occupancy")),
             "{problems:?}"
         );
-        let parse = check("[channel\n", &dir, &Overrides::default()).unwrap_err();
-        assert_eq!(parse.len(), 1, "a parse error is one message: {parse:?}");
+        assert_eq!(
+            problems.location, None,
+            "a semantic problem has no position"
+        );
+        let parse = check(
+            "[channel]\nmode = \"B\"\nmode = \"A\"\n",
+            &dir,
+            &Overrides::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            parse.list.len(),
+            1,
+            "a parse error is one message: {parse:?}"
+        );
+        assert_eq!(
+            parse.location.map(|(line, _)| line),
+            Some(3),
+            "the duplicate key's line"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn line_starts() {
+        let text = "a\nbé\n\nc";
+        assert_eq!(line_start_char(text, 1), 0);
+        assert_eq!(line_start_char(text, 2), 2);
+        assert_eq!(line_start_char(text, 3), 5, "characters, not bytes");
+        assert_eq!(line_start_char(text, 4), 6);
+        assert_eq!(line_start_char(text, 9), 7, "past the end: the end");
     }
 
     #[test]

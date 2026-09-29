@@ -13,6 +13,12 @@ rust-version = "1.95"
 name = "decdrm-gui"
 path = "src/main.rs"
 
+[features]
+# DecDRM's experimental EnCodec codec in the receiver and the transmitter (pulls in
+# candle): `cargo run --release -p decdrm-gui --features encodec`. Fetch the weights
+# with `decdrm models download encodec`.
+encodec = ["decdrm-engine/encodec", "decdrm-station/encodec"]
+
 [dependencies]
 decdrm-engine = { path = "../../crates/decdrm-engine" }
 decdrm-core = { path = "../../crates/decdrm-core" }
@@ -33,6 +39,8 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 # Settings file.
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1"
+# Programme guides arrive as TS 102 818 XML.
+quick-xml = "0.41"
 
 # eframe's default feature set turns on winit's defaults; with eframe's defaults off we
 # re-enable them here (Linux only): Wayland and X11 client libraries are then loaded at

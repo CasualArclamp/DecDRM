@@ -678,7 +678,8 @@ pub fn civil_from_mjd(mjd: u32) -> (i32, u8, u8) {
 pub struct AudioInfo {
     pub short_id: u8,
     pub stream_id: u8,
-    /// Audio coding (2 bits): 0 AAC, 1 reserved (Opus in Dream), 2 reserved, 3 xHE-AAC.
+    /// Audio coding (2 bits): 0 AAC, 1 reserved (Opus in Dream), 2 reserved (EnCodec in
+    /// DecDRM, with its codec specific config), 3 xHE-AAC.
     pub coding: u8,
     /// SBR flag (AAC; rfa otherwise).
     pub sbr: bool,
@@ -693,7 +694,8 @@ pub struct AudioInfo {
     pub coder_field: u8,
     /// The final rfa bit.
     pub rfa: bool,
-    /// Codec specific config (xHE-AAC static config; empty for AAC).
+    /// Codec specific config (xHE-AAC static config, DecDRM's EnCodec config; empty for
+    /// AAC).
     pub codec_config: Vec<u8>,
 }
 

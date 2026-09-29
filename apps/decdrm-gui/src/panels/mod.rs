@@ -2,7 +2,9 @@
 //! what the user asked for (or mutate settings directly); they hold no receiver
 //! logic of their own.
 
+pub mod broadcast;
 pub mod data_info;
+pub mod epg;
 pub mod journaline;
 pub mod log;
 pub mod plots;
@@ -20,6 +22,8 @@ use eframe::egui::{self, Color32, RichText, Sense, Stroke, Ui, vec2};
 pub struct Palette {
     pub spectrum: Color32,
     pub band: Color32,
+    /// Edges of the DRM band where a fill would hide the data (waterfall).
+    pub band_edge: Color32,
     pub marker: Color32,
     pub fac: Color32,
     pub sdc: Color32,
@@ -40,6 +44,7 @@ impl Palette {
             Self {
                 spectrum: Color32::from_rgb(110, 170, 255),
                 band: Color32::from_rgba_unmultiplied(70, 200, 110, 36),
+                band_edge: Color32::from_rgb(90, 220, 130),
                 marker: Color32::from_rgb(240, 150, 50),
                 fac: Color32::from_rgb(240, 180, 60),
                 sdc: Color32::from_rgb(90, 210, 120),
@@ -56,6 +61,7 @@ impl Palette {
             Self {
                 spectrum: Color32::from_rgb(20, 90, 200),
                 band: Color32::from_rgba_unmultiplied(30, 160, 70, 40),
+                band_edge: Color32::from_rgb(20, 150, 60),
                 marker: Color32::from_rgb(200, 100, 0),
                 fac: Color32::from_rgb(190, 120, 0),
                 sdc: Color32::from_rgb(20, 140, 60),

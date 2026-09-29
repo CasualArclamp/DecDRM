@@ -54,8 +54,8 @@ pub fn show(ui: &mut Ui, data: &DataServices) {
                                 ),
                             );
                         }
-                        if s.epg_objects > 0 {
-                            row("EPG objects", s.epg_objects.to_string());
+                        if !s.epg.is_empty() {
+                            row("EPG objects", s.epg.len().to_string());
                         }
                         if s.mot_objects > 0 {
                             row("Other MOT objects", s.mot_objects.to_string());

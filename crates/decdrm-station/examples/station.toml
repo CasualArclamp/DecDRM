@@ -47,9 +47,12 @@ iso_country = "gb"           # ... and ISO 3166 country code
 programme_type = "Pop Music" # FAC programme type: name from table 19 or 0-31
 
 [service.audio]
-codec = "he-aac"             # "aac", "he-aac" (SBR), "he-aac-v2" (SBR + parametric stereo), "opus"
+codec = "he-aac"             # "aac", "he-aac" (SBR), "he-aac-v2" (SBR + parametric stereo), "opus", "encodec"
 core_rate = 12000            # AAC core rate: 12000 (5 frames per 400 ms) or 24000 (10 frames)
 stereo = false               # stereo coding (HE-AAC v2 is always parametric stereo)
+# bandwidth_kbps = 6         # "encodec" only (DecDRM's experimental neural codec, 24 kHz mono; needs a
+                             # build with --features encodec and `decdrm models download encodec`):
+                             # 1.5, 3, 6, 12 or 24 kbit/s; default: the highest that fits the stream
 # share = 1.0                # weight when several audio services split the capacity
 # part = "B"                 # "A" puts the stream into the higher protected part
 # hierarchical = false       # HMsym/HMmix: carry this stream in the hierarchical part

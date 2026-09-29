@@ -13,7 +13,7 @@ use crate::indicators::fmt_time;
 use crate::settings::{Settings, TxOutput};
 use crate::transmitter::TxSession;
 use crate::tx_config::{self, EXAMPLE_STATION, Overrides};
-use decdrm_station::{AudioStatus, ServiceStatus, StationConfig, StationStatus};
+use decdrm_station::{AudioStatus, MultiplexPlan, ServiceStatus, StationConfig, StationStatus};
 use eframe::egui::{self, Color32, RichText, Ui};
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 /// Outcome of the last check, and the text it was made for.
 enum Checked {
     Ok { plan: String, output: String },
-    Problems(Vec<String>),
+    Problems(tx_config::Problems),
 }
 
 /// State of the Transmitter tab (the editor; the running station is a
@@ -36,6 +36,8 @@ pub struct TxPage {
     example_dir: PathBuf,
     checked: Option<(Checked, String)>,
     notice: Option<String>,
+    /// Scroll the editor to the line of the last TOML syntax error (once).
+    scroll_to_error: bool,
 }
 
 impl TxPage {
@@ -48,6 +50,7 @@ impl TxPage {
             example_dir,
             checked: None,
             notice: None,
+            scroll_to_error: false,
         };
         if let Some(path) = settings.station_config.clone()
             && let Err(e) = page.load(&path)
@@ -188,26 +191,40 @@ impl TxPage {
 
     /// Check the editor text with the overrides; keeps the result for display and
     /// returns the configuration if it is valid.
-    fn check(&mut self, settings: &Settings) -> Option<StationConfig> {
+    fn check(&mut self, settings: &Settings) -> Option<(StationConfig, MultiplexPlan)> {
         let base = self.base_dir();
-        let (checked, cfg) = match tx_config::check(&self.text, &base, &Self::overrides(settings)) {
-            Ok((cfg, plan)) => (
-                Checked::Ok {
-                    plan: plan.describe(&cfg),
-                    output: tx_config::describe_output(&cfg, &plan),
-                },
-                Some(cfg),
-            ),
-            Err(problems) => (Checked::Problems(problems), None),
-        };
+        let (checked, result) =
+            match tx_config::check(&self.text, &base, &Self::overrides(settings)) {
+                Ok((cfg, plan)) => (
+                    Checked::Ok {
+                        plan: plan.describe(&cfg),
+                        output: tx_config::describe_output(&cfg, &plan),
+                    },
+                    Some((cfg, plan)),
+                ),
+                Err(problems) => {
+                    self.scroll_to_error = problems.location.is_some();
+                    (Checked::Problems(problems), None)
+                }
+            };
         self.checked = Some((checked, self.text.clone()));
-        cfg
+        result
+    }
+
+    /// Line (from 1) of the last TOML syntax error, while the text is unchanged.
+    fn error_line(&self) -> Option<usize> {
+        match &self.checked {
+            Some((Checked::Problems(p), text)) if *text == self.text => {
+                p.location.map(|(line, _)| line)
+            }
+            _ => None,
+        }
     }
 
     /// Check and, if possible, start transmitting.
     pub fn transmit(&mut self, settings: &Settings, tx: &mut TxSession, allow_device: bool) {
         self.notice = None;
-        let Some(cfg) = self.check(settings) else {
+        let Some((cfg, plan)) = self.check(settings) else {
             self.notice = Some(
                 "cannot transmit: the configuration has problems (listed on the right)".into(),
             );
@@ -231,7 +248,7 @@ impl TxPage {
         } else {
             ""
         };
-        tx.start(cfg, frames, format!("{name}{unsaved}"));
+        tx.start(cfg, plan, frames, format!("{name}{unsaved}"));
     }
 
     pub fn show(
@@ -355,17 +372,66 @@ impl TxPage {
     }
 
     fn editor(&mut self, ui: &mut Ui) {
+        let error_line = self.error_line();
+        let error_bg = Palette::for_ui(ui).error.gamma_multiply(0.35);
+        // Rust note: the layouter is a closure the `TextEdit` borrows for this frame. It
+        // lays the text out as the code editor would, with the line of a TOML syntax
+        // error on a red background. It captures only copies (`error_line`,
+        // `error_bg`), so it does not conflict with the editor borrowing `self.text`.
+        let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+            let font = egui::TextStyle::Monospace.resolve(ui.style());
+            let color = ui.visuals().text_color();
+            let mut job = egui::text::LayoutJob::default();
+            for (i, line) in buf.as_str().split_inclusive('\n').enumerate() {
+                let background = if Some(i + 1) == error_line {
+                    error_bg
+                } else {
+                    Color32::TRANSPARENT
+                };
+                job.append(
+                    line,
+                    0.0,
+                    egui::text::TextFormat {
+                        font_id: font.clone(),
+                        color,
+                        background,
+                        ..Default::default()
+                    },
+                );
+            }
+            job.wrap.max_width = wrap_width;
+            ui.ctx().fonts_mut(|f| f.layout_job(job))
+        };
+        let id = egui::Id::new("station_toml_editor");
         egui::ScrollArea::vertical()
             .id_salt("tx_editor")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.text)
-                        .id_salt("station_toml")
-                        .code_editor()
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(40),
-                );
+                let mut edit = egui::TextEdit::multiline(&mut self.text)
+                    .id(id)
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(40);
+                if error_line.is_some() {
+                    edit = edit.layouter(&mut layouter);
+                }
+                let output = edit.show(ui);
+                if let Some(line) = error_line.filter(|_| self.scroll_to_error) {
+                    // Scroll the error into view and put the cursor at its line.
+                    let index = tx_config::line_start_char(&self.text, line);
+                    let cursor = egui::text::CCursor::new(index);
+                    let rect = output
+                        .galley
+                        .pos_from_cursor(cursor)
+                        .translate(output.galley_pos.to_vec2());
+                    ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                    let mut state = output.state;
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(cursor)));
+                    state.store(ui.ctx(), id);
+                    self.scroll_to_error = false;
+                }
             });
     }
 
@@ -430,9 +496,18 @@ impl TxPage {
                 ui.add(egui::Label::new(RichText::new(plan).monospace()).wrap());
             }
             Checked::Problems(problems) => {
-                let n = problems.len();
+                let n = problems.list.len();
                 heading(ui, &format!("{n} problem{}", if n == 1 { "" } else { "s" }));
-                for p in problems {
+                if let Some((line, column)) = problems.location {
+                    ui.label(
+                        RichText::new(format!(
+                            "line {line}, column {column} (marked in the editor)"
+                        ))
+                        .color(pal.error)
+                        .strong(),
+                    );
+                }
+                for p in &problems.list {
                     ui.add(
                         egui::Label::new(RichText::new(format!("– {p}")).color(pal.error)).wrap(),
                     );
@@ -574,8 +649,13 @@ fn status_section(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
                 })
                 .on_hover_text("Times the sound card ran out of signal.");
                 ui.end_row();
+                if let Some(ms) = s.device_buffer_ms {
+                    value(ui, "Queued", format!("{ms:.0} ms"))
+                        .on_hover_text("Signal waiting on the sound card, not yet played.");
+                    ui.end_row();
+                }
             }
-            if let Some(f) = &snap.output_file {
+            if let Some(f) = &s.output_file {
                 ui.label(RichText::new("File").weak());
                 ui.add(egui::Label::new(RichText::new(f.display().to_string()).monospace()).wrap());
                 ui.end_row();

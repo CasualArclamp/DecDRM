@@ -37,8 +37,12 @@ encoding) and libopus.
   website, Journaline and EPG, every MSC mode incl. hierarchical 64-QAM and unequal
   protection, WAV/FLAC or sound-card output, plus a channel simulator (the DRM channel
   models 1–6) for testing.
-- Desktop GUI (egui): spectrum, constellations, channel, impulse response, SNR per
-  carrier, status LEDs, services, text, slideshow and Journaline browser.
+- Desktop GUI (egui): spectrum, waterfall, constellations, channel, impulse response,
+  SNR per carrier, status LEDs, services, text, slideshow, Journaline browser, EPG,
+  broadcast clock, alternative frequencies, and a transmitter tab.
+- Experimental **EnCodec** (Meta's neural codec) as a DecDRM-only audio codec: 1.5–24
+  kbit/s, CRC-protected layers and concealment — at 15 dB SNR it lost 2 % of audio
+  frames where HE-AAC lost 26 %. Standard receivers (and Dream) ignore it.
 
 ## Building
 
@@ -73,6 +77,14 @@ decdrm tx crates/decdrm-station/examples/station.toml --duration 30 --output drm
 cargo run --release -p decdrm-gui -- recording.flac
 ```
 
+EnCodec (optional, pulls in the candle ML library):
+
+```bash
+cargo build --release -p decdrm-cli --features encodec
+decdrm models download encodec          # ~93 MB weights, SHA-256 checked
+# station.toml: [service.audio] codec = "encodec"   (optional: bandwidth_kbps = 6)
+```
+
 `--log` writes one metrics row per second of signal (SNR, MER, Doppler, delay, clock
 offset, FAC/SDC/MSC/audio counters, service) as CSV, or JSON Lines (`.jsonl`) with text
 messages, data objects and log lines as events.
@@ -87,6 +99,7 @@ messages, data objects and log lines as events.
 | `decdrm-io` | WAV/FLAC, resampling, sound-card input/output, drift-compensated playback |
 | `decdrm-engine` | Receiver threads, sources, decoding pipelines, status snapshots, logging |
 | `decdrm-station` | Transmitter station: TOML configuration → multiplex → signal |
+| `decdrm-encodec` | Experimental EnCodec codec (feature `encodec`) |
 | `decdrm-cli` | The `decdrm` command-line tool |
 | `decdrm-gui` | The desktop GUI |
 

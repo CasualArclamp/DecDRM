@@ -60,7 +60,7 @@ impl StationConfig {
     /// Parse a configuration from TOML text. Relative paths are resolved against the
     /// current directory unless [`Self::base_dir`] is set afterwards.
     pub fn from_toml_str(text: &str) -> Result<Self> {
-        toml::from_str(text).map_err(|e| StationError::Parse { path: PathBuf::from("<station config>"), message: e.to_string() })
+        toml::from_str(text).map_err(|e| parse_error(PathBuf::from("<station config>"), text, &e))
     }
 
     /// Load a configuration file; relative paths in it are resolved against the file's
@@ -68,15 +68,15 @@ impl StationConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path).map_err(|source| StationError::Io { path: path.to_path_buf(), source })?;
-        let mut cfg: Self =
-            toml::from_str(&text).map_err(|e| StationError::Parse { path: path.to_path_buf(), message: e.to_string() })?;
+        let mut cfg: Self = toml::from_str(&text).map_err(|e| parse_error(path.to_path_buf(), &text, &e))?;
         cfg.base_dir = Some(path.parent().map(Path::to_path_buf).unwrap_or_default());
         Ok(cfg)
     }
 
     /// The configuration as TOML text (e.g. to save what a GUI edited).
     pub fn to_toml_string(&self) -> Result<String> {
-        toml::to_string_pretty(self).map_err(|e| StationError::Parse { path: PathBuf::from("<station config>"), message: e.to_string() })
+        toml::to_string_pretty(self)
+            .map_err(|e| StationError::Parse { path: PathBuf::from("<station config>"), message: e.to_string(), location: None })
     }
 
     /// `path` resolved against [`Self::base_dir`] (absolute paths are kept).
@@ -86,6 +86,26 @@ impl StationConfig {
             _ => path.to_path_buf(),
         }
     }
+}
+
+/// A parse error with the (line, column) where the TOML parser stopped.
+fn parse_error(path: PathBuf, text: &str, e: &toml::de::Error) -> StationError {
+    let location = e.span().map(|span| line_column(text, span.start));
+    StationError::Parse { path, message: e.to_string(), location }
+}
+
+/// Line and column (both from 1; the column counts characters) of byte `offset` in
+/// `text`.
+pub(crate) fn line_column(text: &str, offset: usize) -> (usize, usize) {
+    let mut offset = offset.min(text.len());
+    // A span may start inside a multi-byte character; count from its first byte.
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let before = &text[..offset];
+    let line = before.matches('\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    (line, before[line_start..].chars().count() + 1)
 }
 
 // ---------------------------------------------------------------------------------
@@ -311,7 +331,8 @@ impl ServiceSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AudioSettings {
-    /// aac, he-aac (AAC + SBR), he-aac-v2 (AAC + SBR + parametric stereo) or opus.
+    /// aac, he-aac (AAC + SBR), he-aac-v2 (AAC + SBR + parametric stereo), opus or
+    /// encodec (DecDRM's experimental neural codec, 24 kHz mono).
     pub codec: Codec,
     /// AAC core sampling rate: 12000 (5 frames per 400 ms) or 24000 (10 frames).
     /// Default: 24000 for AAC, 12000 for HE-AAC and HE-AAC v2. Not used by Opus
@@ -337,6 +358,11 @@ pub struct AudioSettings {
     /// only; its length is then fixed by the channel).
     #[serde(default)]
     pub hierarchical: bool,
+    /// EnCodec only: bit rate of the codes, kbit/s — 1.5, 3, 6, 12 or 24. Default: the
+    /// highest that fits the stream (spare bytes then carry a second copy of the most
+    /// important codebooks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth_kbps: Option<f64>,
 }
 
 fn default_share() -> f64 {
@@ -347,7 +373,17 @@ impl AudioSettings {
     /// Audio with `codec` from `input`, everything else at its default (default core
     /// rate, mono, no text, part B).
     pub fn new(codec: Codec, input: AudioInputSettings) -> Self {
-        Self { codec, core_rate: None, stereo: false, input, text: Vec::new(), share: 1.0, part: Part::B, hierarchical: false }
+        Self {
+            codec,
+            core_rate: None,
+            stereo: false,
+            input,
+            text: Vec::new(),
+            share: 1.0,
+            part: Part::B,
+            hierarchical: false,
+            bandwidth_kbps: None,
+        }
     }
 }
 
@@ -703,6 +739,9 @@ pub enum Codec {
     HeAacV2,
     /// Opus (Dream's extension; not part of ES 201 980).
     Opus,
+    /// EnCodec, Meta's neural codec (DecDRM's experimental extension, 24 kHz mono,
+    /// 1.5–24 kbit/s; needs the `encodec` feature and the model weights).
+    Encodec,
 }
 
 string_setting!(
@@ -712,13 +751,15 @@ string_setting!(
         "heaac" | "heaacv1" | "aacsbr" | "aacplus" => Ok(Codec::HeAac),
         "heaacv2" | "aacps" | "eaacplus" => Ok(Codec::HeAacV2),
         "opus" => Ok(Codec::Opus),
-        _ => Err(format!("unknown codec \"{s}\" (use aac, he-aac, he-aac-v2 or opus)")),
+        "encodec" => Ok(Codec::Encodec),
+        _ => Err(format!("unknown codec \"{s}\" (use aac, he-aac, he-aac-v2, opus or encodec)")),
     },
     |c: Codec| match c {
         Codec::Aac => "aac",
         Codec::HeAac => "he-aac",
         Codec::HeAacV2 => "he-aac-v2",
         Codec::Opus => "opus",
+        Codec::Encodec => "encodec",
     }
     .to_string()
 );
@@ -726,7 +767,7 @@ string_setting!(
 impl Codec {
     /// Whether the codec is one of the AAC family (FDK encoder, 5/10 frames per 400 ms).
     pub fn is_aac(self) -> bool {
-        !matches!(self, Codec::Opus)
+        matches!(self, Codec::Aac | Codec::HeAac | Codec::HeAacV2)
     }
 
     /// Whether the codec uses SBR.
@@ -913,6 +954,20 @@ code_setting_serde!(ProgrammeType, "programme type");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_errors_have_a_location() {
+        // The value of `occupancy` (line 3) is missing.
+        let e = StationConfig::from_toml_str("[channel]\nmode = \"B\"\noccupancy = \n").unwrap_err();
+        assert_eq!(e.location().map(|(line, _)| line), Some(3), "{e}");
+        assert!(matches!(e, StationError::Parse { .. }));
+        let text = "ab\ncd\u{e9}\nf"; // 'é' takes bytes 5 and 6
+        assert_eq!(line_column(text, 0), (1, 1));
+        assert_eq!(line_column(text, 3), (2, 1));
+        assert_eq!(line_column(text, 6), (2, 3), "inside a character: its start");
+        assert_eq!(line_column(text, 8), (3, 1));
+        assert_eq!(line_column("x", 99), (1, 2), "past the end: the end");
+    }
 
     #[test]
     fn lenient_names() {

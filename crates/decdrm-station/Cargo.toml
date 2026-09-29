@@ -7,10 +7,17 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Encode DecDRM's experimental EnCodec services (neural codec; pulls in candle). Without
+# it such configurations are recognised but rejected ("not built in"). The receiving
+# engine of the loopback tests gets it too.
+encodec = ["decdrm-encodec/encodec", "decdrm-engine/encodec"]
+
 [dependencies]
 decdrm-core = { path = "../decdrm-core" }
 decdrm-codecs = { path = "../decdrm-codecs" }
 decdrm-data = { path = "../decdrm-data" }
+decdrm-encodec = { path = "../decdrm-encodec" }
 decdrm-io = { path = "../decdrm-io" }
 # Station configuration files (same versions as the GUI's settings file).
 serde = { version = "1.0.228", features = ["derive"] }

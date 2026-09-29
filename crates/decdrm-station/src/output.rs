@@ -6,8 +6,13 @@
 
 use crate::config::{OutputSettings, SampleFormat, StationConfig};
 use crate::error::{Result, StationError};
+use crate::station::StopHandle;
 use decdrm_io::{AudioFormat, Container, Encoding, FileWriter, OutputOptions, OutputStream, Resampler, ResamplerQuality};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How long one wait for room on the sound card lasts before the stop flag and the
+/// stall timeout are checked again.
+const WAIT_SLICE: Duration = Duration::from_millis(50);
 
 /// The working sample rate of the transmitter.
 const RATE: u32 = decdrm_core::params::SAMPLE_RATE;
@@ -33,6 +38,9 @@ pub(crate) struct DeviceSink {
     resampler: Option<Resampler>,
     resampled: Vec<f32>,
     mapped: Vec<f32>,
+    /// A device that takes no samples for this long is considered stalled: twice its
+    /// buffer (a healthy one frees room within one buffer length) plus a second.
+    stall_timeout: Duration,
 }
 
 impl DeviceSink {
@@ -60,7 +68,14 @@ impl DeviceSink {
             .then(|| Resampler::new(RATE, fmt.sample_rate, channels, ResamplerQuality::High))
             .transpose()
             .map_err(StationError::Output)?;
-        Ok(Some(Self { stream, channels, resampler, resampled: Vec::new(), mapped: Vec::new() }))
+        Ok(Some(Self {
+            stream,
+            channels,
+            resampler,
+            resampled: Vec::new(),
+            mapped: Vec::new(),
+            stall_timeout: buffer * 2 + Duration::from_secs(1),
+        }))
     }
 
     /// Name of the device.
@@ -69,8 +84,10 @@ impl DeviceSink {
     }
 
     /// Queue interleaved 48 kHz samples, waiting while the device's buffer is full
-    /// (this paces the station to real time).
-    pub fn write(&mut self, samples: &[f32]) -> Result<()> {
+    /// (this paces the station to real time). The wait ends early when `stop` is set
+    /// (the rest is dropped), and fails if the device takes nothing for
+    /// `stall_timeout`.
+    pub fn write(&mut self, samples: &[f32], stop: &StopHandle) -> Result<()> {
         let data: &[f32] = match self.resampler.as_mut() {
             Some(r) => {
                 self.resampled.clear();
@@ -92,8 +109,32 @@ impl DeviceSink {
             }
             &self.mapped
         };
-        self.stream.write_blocking(frames, Duration::from_secs(10)).map_err(StationError::Output)?;
+        // Wait in short slices, so that a stop request or a stalled device (e.g. a
+        // virtual cable whose reader went away) is noticed within ~50 ms instead of
+        // blocking for many seconds.
+        let mut done = 0;
+        let mut progress_at = Instant::now();
+        while done < frames.len() {
+            if stop.is_stopped() {
+                return Ok(());
+            }
+            let n = self.stream.write_blocking(&frames[done..], WAIT_SLICE).map_err(StationError::Output)?;
+            if n > 0 {
+                done += n * dev_ch;
+                progress_at = Instant::now();
+            } else if progress_at.elapsed() >= self.stall_timeout {
+                return Err(StationError::DeviceStalled {
+                    device: self.stream.device_name().to_string(),
+                    seconds: progress_at.elapsed().as_secs_f64(),
+                });
+            }
+        }
         Ok(())
+    }
+
+    /// Signal queued on the device, not yet played.
+    pub fn queued(&self) -> Duration {
+        self.stream.buffered()
     }
 
     /// Underruns of the device so far.
@@ -101,8 +142,15 @@ impl DeviceSink {
         self.stream.stats().underruns
     }
 
-    /// Play out what is queued.
-    pub fn drain(&mut self) {
-        self.stream.drain(Duration::from_secs(10));
+    /// Play out what is queued: as long as that takes at the device's rate plus half a
+    /// second, not at all once `stop` is set (a stalled device therefore delays the
+    /// end by at most its buffer length and the margin).
+    pub fn drain(&mut self, stop: &StopHandle) {
+        let deadline = Instant::now() + self.queued() + Duration::from_millis(500);
+        while !stop.is_stopped() && Instant::now() < deadline {
+            if self.stream.drain(WAIT_SLICE) {
+                break;
+            }
+        }
     }
 }

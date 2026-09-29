@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+mod models;
 mod tx;
 
 #[derive(Parser)]
@@ -26,6 +27,8 @@ enum Cmd {
     Tx(tx::TxArgs),
     /// List sound-card input and output devices.
     Devices,
+    /// Neural codec model weights (EnCodec): download, show status.
+    Models(models::ModelsArgs),
 }
 
 #[derive(clap::Args)]
@@ -124,6 +127,7 @@ stopping (Ctrl-C again to quit immediately)");
         Cmd::Devices => devices(),
         Cmd::Rx(args) => rx(args),
         Cmd::Tx(args) => tx::run(args),
+        Cmd::Models(args) => models::run(args),
     }
 }
 

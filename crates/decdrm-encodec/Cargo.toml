@@ -1,0 +1,50 @@
+[package]
+name = "decdrm-encodec"
+description = "EnCodec neural audio codec as an experimental DecDRM extension: DRM framing, CRCs, concealment and SDC signalling; streaming CPU inference (candle) behind the `encodec` feature"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# The codec itself: streaming EnCodec inference with candle on the CPU, the encoder and
+# the `decdrm_codecs::DrmAudioDecoder` implementation. Off by default because candle is
+# a large dependency; without it the crate still plans, frames, deframes and signals
+# EnCodec services (so receivers can name them and transmitters can validate them).
+encodec = ["dep:candle-core", "dep:decdrm-codecs"]
+# Additionally cross-check the streaming model against candle-transformers' batch
+# EnCodec implementation (`cargo test -p decdrm-encodec --features reference`).
+reference = ["encodec", "dep:candle-nn", "dep:candle-transformers"]
+
+[dependencies]
+thiserror.workspace = true
+# 0.9 rather than 0.10/0.11: those pull in `tokenizers` (with the Oniguruma C library)
+# unconditionally, which EnCodec does not need.
+candle-core = { version = "0.9.1", optional = true }
+decdrm-codecs = { path = "../decdrm-codecs", optional = true }
+candle-nn = { version = "0.9.1", optional = true }
+candle-transformers = { version = "0.9.1", optional = true }
+
+[dev-dependencies]
+# CRC cross-check and the SDC type 9 round trip.
+decdrm-core = { path = "../decdrm-core" }
+# Spectra for the quality measurements of the model tests.
+rustfft.workspace = true
+
+[[test]]
+name = "codec"
+required-features = ["encodec"]
+
+[[test]]
+name = "reference"
+required-features = ["reference"]
+
+[[example]]
+name = "encodec_rtf"
+required-features = ["encodec"]
+
+[[example]]
+name = "encodec_errors"
+required-features = ["encodec"]

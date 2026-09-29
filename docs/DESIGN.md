@@ -103,11 +103,12 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
 - [x] **M5 Live input & logging** — sound-card input (VAC), CSV/JSON logs & metrics.
       *Done:* sound-card input (CLI `--device`, GUI); `decdrm rx --log FILE.csv|.jsonl`
       writes metrics rows (and events in JSON Lines).
-- [ ] **M6 GUI** — egui: spectrum/waterfall, constellations, SNR/MER, sync status,
+- [x] **M6 GUI** — egui: spectrum/waterfall, constellations, SNR/MER, sync status,
       service list, text, slideshow, Journaline browser, EPG, clock/AFS.
-      *Status:* receiver tab (plots, LEDs, services, text, slideshow, Journaline) and
-      transmitter tab (TOML editor, validation, transmit to file/sound card, status,
-      TX spectrum) done; waterfall, EPG and AFS views in progress.
+      *Done:* receiver tab (spectrum, waterfall, constellations, channel, impulse
+      response, SNR per carrier, LEDs, services, text, slideshow, Journaline, EPG,
+      broadcast clock, alternative frequencies) and transmitter tab (TOML editor with
+      error locations, validation, transmit to file/sound card, status, TX spectrum).
 - [x] **M7 Transmitter** — full TX chain, FDK AAC/HE-AAC encoding, all data services,
       file/sound-card output, channel simulator, loopback BER tests; GUI TX tab + CLI.
       *Status:* `decdrm-station` + `decdrm tx station.toml` + GUI tab done
@@ -120,7 +121,12 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       build-time fixes) round-trips through our framer and FDK with 0 concealment.
       To do: station integration, framer API (reservoir level per access unit, no
       silent zero-fill), MPS212 for 4:1 stereo.
-- [ ] **M9 EnCodec** — experimental neural-codec extension (TX + RX).
+- [x] **M9 EnCodec** — experimental neural-codec extension (TX + RX).
+      *Done:* `decdrm-encodec` (feature `encodec`, candle 0.9, own streaming SEANet
+      identical to candle-transformers' EnCodec), signalled as SDC type 9 audio coding
+      10 with an `ENC1` config (Dream-safe), 1.5–24 kbit/s tiers, per-region CRC-8,
+      optional repetition of the base layers, latent interpolation for lost frames.
+      At 15 dB (mode B, 64-QAM) 2.1 % of frames concealed against 26.5 % for HE-AAC.
 - [ ] **M10 Polish** — performance, Linux verification, docs.
       *Status:* manual GitHub Actions workflow (`.github/workflows/linux.yml`) builds
       and tests the workspace on Ubuntu; receiver runs ~75–100× real time.

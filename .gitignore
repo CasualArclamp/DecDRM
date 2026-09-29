@@ -6,6 +6,8 @@
 /samples/
 /reference/
 /out/
+# Neural codec weights (EnCodec), fetched with `decdrm models download encodec`
+/models/
 
 # Editor/OS noise
 .vscode/

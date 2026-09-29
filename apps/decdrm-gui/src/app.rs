@@ -9,7 +9,9 @@
 //! GUI idle. Receiver and transmitter are independent and may run at the same time.
 
 use crate::Args;
+use crate::panels::epg::EpgView;
 use crate::panels::journaline::JournalineView;
+use crate::panels::plots::WaterfallTexture;
 use crate::panels::slideshow::SlideshowView;
 use crate::panels::source::{DeviceLists, SourceAction};
 use crate::panels::tx_page::TxPage;
@@ -88,6 +90,8 @@ pub struct DecDrmApp {
     devices: DeviceLists,
     slideshow: SlideshowView,
     journaline: JournalineView,
+    epg: EpgView,
+    waterfall: WaterfallTexture,
     automation: Automation,
     /// No sound-card output in this run (`--no-audio`): no audio playback and no
     /// transmitting to a sound card, whatever the saved settings say.
@@ -140,6 +144,8 @@ impl DecDrmApp {
             devices: DeviceLists::default(),
             slideshow: SlideshowView::default(),
             journaline: JournalineView::default(),
+            epg: EpgView::default(),
+            waterfall: WaterfallTexture::default(),
             automation: Automation {
                 quit_at: exit_after.map(|s| now + Duration::from_secs_f64(s.clamp(0.0, 3600.0))),
                 screenshot: args.screenshot.clone(),
@@ -240,12 +246,20 @@ impl DecDrmApp {
             .min_size(300.0)
             .show(ui, |ui| self.side_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| {
-            panels::plots::show(ui, &mut self.settings.plot_tab, &self.rx.plots);
+            panels::plots::show(
+                ui,
+                &mut self.settings.plot_tab,
+                &self.rx.plots,
+                &self.rx.waterfall,
+                &mut self.waterfall,
+            );
         });
     }
 
     /// Services, text, audio, then the data-service views filling the rest.
     fn side_panel(&mut self, ui: &mut Ui) {
+        panels::broadcast::clock(ui, self.rx.snap.time_utc.as_deref());
+        panels::broadcast::alternative_frequencies(ui, &self.rx.snap.afs);
         if let Some(id) = panels::services::show(ui, &self.rx) {
             // An audio service is decoded (and its text shown); a data service's
             // content is brought up in the data views.
@@ -263,6 +277,27 @@ impl DecDrmApp {
         match self.settings.data_tab {
             DataTab::Slideshow => self.slideshow.show(ui, &mut self.rx.data),
             DataTab::Journaline => self.journaline.show(ui, &mut self.rx.data),
+            DataTab::Epg => {
+                // "Now" for the programme on air: the broadcast clock, else this computer's.
+                let broadcast = self
+                    .rx
+                    .snap
+                    .time_utc
+                    .as_deref()
+                    .and_then(crate::epg::parse_broadcast_time);
+                let now = broadcast.unwrap_or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs() as i64)
+                });
+                self.epg.show(
+                    ui,
+                    &self.rx.data,
+                    &self.rx.snap.services,
+                    now,
+                    broadcast.is_some(),
+                );
+            }
             DataTab::Info => panels::data_info::show(ui, &self.rx.data),
         }
     }

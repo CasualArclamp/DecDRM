@@ -5,8 +5,8 @@
 //! * [`app`] — the eframe application: pages, panels, repaint policy;
 //! * [`receiver`] — engine handle, snapshot polling and event dispatch;
 //! * [`transmitter`] — the station on a worker thread, and its snapshots;
-//! * [`indicators`], [`plots`], [`data`], [`tx_config`], [`spectrum`] — view models and
-//!   helpers (pure logic, unit-tested);
+//! * [`indicators`], [`plots`], [`waterfall`], [`data`], [`epg`], [`tx_config`],
+//!   [`spectrum`] — view models and helpers (pure logic, unit-tested);
 //! * [`panels`] — drawing code, one module per screen area;
 //! * [`settings`] — the settings remembered between runs.
 
@@ -16,6 +16,7 @@
 
 mod app;
 mod data;
+mod epg;
 mod indicators;
 mod panels;
 mod plots;
@@ -24,6 +25,7 @@ mod settings;
 mod spectrum;
 mod transmitter;
 mod tx_config;
+mod waterfall;
 
 use clap::Parser;
 use eframe::egui;

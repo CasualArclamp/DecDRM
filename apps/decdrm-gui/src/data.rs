@@ -1,9 +1,11 @@
 //! GUI-side models of the data services, fed with [`EngineEvent::Data`] events:
-//! one [`SlideShow`], [`JournalineBrowser`] and [`Website`] per data service
-//! (keyed by the service's short id), plus counters for everything else.
+//! one [`SlideShow`], [`JournalineBrowser`], [`Website`] and set of programme guides
+//! per data service (keyed by the service's short id), plus counters for everything
+//! else.
 //!
 //! [`EngineEvent::Data`]: decdrm_engine::EngineEvent::Data
 
+use crate::epg::{self, Programme, Schedule};
 use decdrm_data::journaline::{JournalineBrowser, ListItem};
 use decdrm_data::slideshow::SlideShow;
 use decdrm_data::website::Website;
@@ -16,8 +18,8 @@ pub struct DataService {
     pub slideshow: SlideShow,
     pub journaline: JournalineBrowser,
     pub website: Website,
-    /// EPG objects received (XML is not shown yet).
-    pub epg_objects: u64,
+    /// EPG objects by name, parsed (a newer version replaces the older one).
+    pub epg: BTreeMap<String, Result<Schedule, String>>,
     /// Other MOT objects (e.g. EPG logos).
     pub mot_objects: u64,
     /// Data units of applications that are not interpreted (TPEG, unknown).
@@ -50,7 +52,9 @@ impl DataServices {
             DataEvent::Journaline(update) => {
                 s.journaline.apply(update);
             }
-            DataEvent::Epg { .. } => s.epg_objects += 1,
+            DataEvent::Epg { name, xml } => {
+                s.epg.insert(name.clone(), epg::parse_schedule(xml));
+            }
             DataEvent::MotObject { .. } => s.mot_objects += 1,
             DataEvent::Raw { .. } => s.raw_units += 1,
             DataEvent::StreamData { data, .. } => s.stream_bytes += data.len() as u64,
@@ -99,6 +103,56 @@ impl DataServices {
             .filter(|(_, s)| pred(s))
             .map(|(&id, _)| id)
             .collect()
+    }
+}
+
+/// Which service a programme guide describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum GuideKey {
+    /// A service id (from the guide's `serviceScope` or the object's name).
+    Service(u32),
+    /// Unknown: the guide came with data service `short id` and says no more.
+    Carrier(u8),
+}
+
+impl DataServices {
+    /// Every programme of every guide, grouped by the service it describes, sorted by
+    /// start and without duplicates (a programme may come in several objects).
+    pub fn guides(&self) -> BTreeMap<GuideKey, Vec<Programme>> {
+        let mut out: BTreeMap<GuideKey, Vec<Programme>> = BTreeMap::new();
+        for (&short_id, s) in &self.services {
+            for (name, schedule) in &s.epg {
+                let Ok(schedule) = schedule else { continue };
+                let from_scope = schedule
+                    .service_scope
+                    .as_deref()
+                    .and_then(|id| u32::from_str_radix(id.trim(), 16).ok());
+                let key = from_scope
+                    .or_else(|| epg::scope_id_from_name(name))
+                    .map_or(GuideKey::Carrier(short_id), |id| {
+                        GuideKey::Service(id & 0xFF_FFFF)
+                    });
+                out.entry(key)
+                    .or_default()
+                    .extend(schedule.programmes.iter().cloned());
+            }
+        }
+        for list in out.values_mut() {
+            list.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| a.title.cmp(&b.title)));
+            list.dedup();
+        }
+        out
+    }
+
+    /// Number of EPG objects that could not be read, and the first error.
+    pub fn epg_errors(&self) -> (usize, Option<&str>) {
+        let mut errors = self
+            .services
+            .values()
+            .flat_map(|s| s.epg.values())
+            .filter_map(|r| r.as_ref().err());
+        let first = errors.next().map(String::as_str);
+        (first.map_or(0, |_| 1) + errors.count(), first)
     }
 }
 
@@ -218,6 +272,74 @@ mod tests {
         assert_eq!(packets(&mut d, 1), (12, 2));
         assert_eq!(packets(&mut d, 2), (5, 0));
         assert!(d.slideshow_ids().is_empty(), "statistics are not content");
+    }
+
+    #[test]
+    fn guides_group_by_service() {
+        let xml = |title: &str, start: &str, scope: Option<&str>| {
+            let scope = scope
+                .map(|s| format!(r#"<scope><serviceScope id="{s}"/></scope>"#))
+                .unwrap_or_default();
+            format!(
+                r#"<epg><schedule>{scope}<programme><mediumName>{title}</mediumName><location><time time="{start}" duration="PT1H"/></location></programme></schedule></epg>"#
+            )
+        };
+        let epg = |name: &str, xml: String| DataEvent::Epg {
+            name: name.into(),
+            xml,
+        };
+        let mut d = DataServices::default();
+        // Named after the scope id (the receiver's naming): service D0D001. The second
+        // object of the same name replaces the first.
+        d.apply(
+            2,
+            &epg(
+                "20260929d0d001P.EHB",
+                xml("B", "2026-09-29T09:00:00Z", None),
+            ),
+            None,
+        );
+        d.apply(
+            2,
+            &epg(
+                "20260929d0d001P.EHB",
+                xml("A", "2026-09-29T06:00:00Z", None),
+            ),
+            None,
+        );
+        // Another object for the same service, identified by its serviceScope.
+        d.apply(
+            3,
+            &epg("day2", xml("C", "2026-09-30T06:00:00Z", Some("d0d001"))),
+            None,
+        );
+        d.apply(
+            3,
+            &epg(
+                "day2-again",
+                xml("C", "2026-09-30T06:00:00Z", Some("d0d001")),
+            ),
+            None,
+        );
+        // No way to tell: grouped under the carrying data service.
+        d.apply(
+            3,
+            &epg("other", xml("D", "2026-09-30T07:00:00Z", None)),
+            None,
+        );
+        d.apply(3, &epg("broken", "<epg><schedule></epg>".into()), None);
+        let g = d.guides();
+        let titles = |k: GuideKey| g[&k].iter().map(|p| p.title.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            titles(GuideKey::Service(0xD0D001)),
+            ["A", "C"],
+            "sorted, duplicates removed"
+        );
+        assert_eq!(titles(GuideKey::Carrier(3)), ["D"]);
+        assert_eq!(g.len(), 2);
+        let (errors, first) = d.epg_errors();
+        assert_eq!(errors, 1);
+        assert!(first.is_some_and(|e| e.contains("EPG XML")), "{first:?}");
     }
 
     #[test]

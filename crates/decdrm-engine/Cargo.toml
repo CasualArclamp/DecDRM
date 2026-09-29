@@ -7,11 +7,17 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Decode DecDRM's experimental EnCodec services (neural codec; pulls in candle). Without
+# it they are recognised and reported as "EnCodec (not built in)".
+encodec = ["decdrm-encodec/encodec"]
+
 [dependencies]
 decdrm-core = { path = "../decdrm-core" }
 decdrm-io = { path = "../decdrm-io" }
 decdrm-data = { path = "../decdrm-data" }
 decdrm-codecs = { path = "../decdrm-codecs" }
+decdrm-encodec = { path = "../decdrm-encodec" }
 crossbeam-channel = "0.5"
 anyhow.workspace = true
 tracing.workspace = true
