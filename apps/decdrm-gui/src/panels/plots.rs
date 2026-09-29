@@ -4,7 +4,7 @@
 //! zooming/dragging is disabled; hovering shows the value under the cursor.
 
 use super::{Palette, placeholder};
-use crate::plots::{DB_FLOOR, PlotData, Points};
+use crate::plots::{DB_FLOOR, PlotData, Points, SpectrumPlot};
 use crate::settings::PlotTab;
 use eframe::egui::{Color32, Ui};
 use egui_plot::{
@@ -24,7 +24,14 @@ pub fn show(ui: &mut Ui, tab: &mut PlotTab, data: &PlotData) {
     let avail = ui.available_size();
     match tab {
         PlotTab::Overview => overview(ui, data, &pal),
-        PlotTab::Spectrum => spectrum(ui, data, &pal, avail.y),
+        PlotTab::Spectrum => spectrum_plot(
+            ui,
+            "spectrum",
+            "input spectrum",
+            &data.spectrum,
+            &pal,
+            avail.y,
+        ),
         PlotTab::Constellations => {
             let side = (avail.x / 3.0 - 8.0).min(avail.y - 24.0).max(80.0);
             constellation_row(ui, data, &pal, side);
@@ -40,7 +47,14 @@ fn overview(ui: &mut Ui, data: &PlotData, pal: &Palette) {
     let avail = ui.available_size();
     let side = (avail.x / 3.0 - 8.0).min(avail.y * 0.5).max(80.0);
     let spectrum_height = (avail.y - side - 30.0).max(120.0);
-    spectrum(ui, data, pal, spectrum_height);
+    spectrum_plot(
+        ui,
+        "spectrum",
+        "input spectrum",
+        &data.spectrum,
+        pal,
+        spectrum_height,
+    );
     constellation_row(ui, data, pal, side);
 }
 
@@ -77,32 +91,41 @@ fn line(name: &str, points: &Points, color: Color32) -> Line<'static> {
         .width(1.2)
 }
 
-fn spectrum(ui: &mut Ui, data: &PlotData, pal: &Palette, height: f32) {
-    let (x0, x1) = data.spectrum_khz;
-    let (y0, y1) = data.spectrum_db;
-    base_plot("spectrum")
+/// A spectrum with the DRM band shaded and the DC carrier marked; `id` keeps the
+/// receiver's and the transmitter's plots apart.
+pub fn spectrum_plot(
+    ui: &mut Ui,
+    id: &str,
+    name: &str,
+    s: &SpectrumPlot,
+    pal: &Palette,
+    height: f32,
+) {
+    let (x0, x1) = s.span_khz;
+    let (y0, y1) = s.db_range;
+    base_plot(id)
         .height(height)
         .x_axis_label("frequency (kHz)")
         .y_axis_label("power (dB)")
         .label_formatter(hover_label("kHz", 2, "dB", 1))
         .show(ui, |p| {
             p.set_plot_bounds(PlotBounds::from_min_max([x0, y0], [x1, y1]));
-            if let Some((lo, hi)) = data.band_khz {
+            if let Some((lo, hi)) = s.band_khz {
                 p.span(
                     Span::new("DRM signal", lo..=hi)
                         .fill(pal.band)
                         .border_width(0.0),
                 );
             }
-            if let Some(dc) = data.dc_khz {
+            if let Some(dc) = s.dc_khz {
                 p.vline(
                     VLine::new("DC carrier", dc)
                         .color(pal.marker)
                         .style(LineStyle::dashed_dense()),
                 );
             }
-            if !data.spectrum.is_empty() {
-                p.line(line("input spectrum", &data.spectrum, pal.spectrum).width(1.0));
+            if !s.points.is_empty() {
+                p.line(line(name, &s.points, pal.spectrum).width(1.0));
             }
         });
 }

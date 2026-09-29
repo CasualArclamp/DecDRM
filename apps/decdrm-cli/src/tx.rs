@@ -43,10 +43,11 @@ pub fn run(a: TxArgs) -> Result<()> {
     }
     let frames = a.duration.map(|d| (d / 0.4).ceil() as u64);
 
-    let mut station = Station::new(cfg)?;
-    if frames.is_none() && station.config().output.device.is_none() && !station.inputs_finite() {
+    // Checked before the station creates its output file.
+    if frames.is_none() && cfg.output.device.is_none() && !cfg.inputs_finite() {
         bail!("the signal goes to a file but has no end: give --duration SECS (or set `loop = false` on every audio input file)");
     }
+    let mut station = Station::new(cfg)?;
     if let Some(dev) = &station.status().device {
         println!("sound card: {dev}");
     }

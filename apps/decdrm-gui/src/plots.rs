@@ -22,19 +22,70 @@ pub const MAX_CONSTELLATION_POINTS: usize = 8000;
 /// Floor of the dB plots relative to their peak.
 pub const DB_FLOOR: f64 = -60.0;
 
+/// A spectrum ready to draw: the receiver's input or the transmitter's output.
+#[derive(Debug, Clone, Default)]
+pub struct SpectrumPlot {
+    /// (kHz, dB).
+    pub points: Points,
+    /// Frequency span to show, kHz.
+    pub span_khz: (f64, f64),
+    /// Level span to show, dB.
+    pub db_range: (f64, f64),
+    /// Occupied band of the DRM signal, kHz.
+    pub band_khz: Option<(f64, f64)>,
+    /// DRM DC carrier, kHz.
+    pub dc_khz: Option<f64>,
+}
+
+impl SpectrumPlot {
+    /// `db` holds bins from `centre − span/2` to `centre + span/2` (Hz); for a real
+    /// signal only the upper half is shown. `dc_hz` and `band_hz` mark the DRM signal.
+    pub fn new(
+        db: &[f64],
+        centre_hz: f64,
+        span_hz: f64,
+        real: bool,
+        dc_hz: Option<f64>,
+        band_hz: Option<(f64, f64)>,
+    ) -> Self {
+        let span = if span_hz > 0.0 {
+            span_hz
+        } else {
+            f64::from(SAMPLE_RATE)
+        };
+        let points = spectrum_points(db, centre_hz, span, real);
+        let lo = if real {
+            centre_hz
+        } else {
+            centre_hz - span / 2.0
+        };
+        Self {
+            span_khz: (lo / 1e3, (centre_hz + span / 2.0) / 1e3),
+            db_range: level_range(points.iter().map(|p| p[1])),
+            points,
+            band_khz: band_hz.map(|(a, b)| (a / 1e3, b / 1e3)),
+            dc_khz: dc_hz.map(|f| f / 1e3),
+        }
+    }
+
+    /// The receiver's input spectrum.
+    pub fn from_visuals(v: &Visuals) -> Self {
+        Self::new(
+            &v.spectrum_db,
+            v.spectrum_centre_hz,
+            v.spectrum_span_hz,
+            v.real_input,
+            v.dc_hz,
+            v.signal_band_hz,
+        )
+    }
+}
+
 /// Everything the plot tabs draw, derived from one snapshot.
 #[derive(Debug, Clone, Default)]
 pub struct PlotData {
-    /// Input spectrum: (kHz, dB).
-    pub spectrum: Points,
-    /// Frequency span to show, kHz.
-    pub spectrum_khz: (f64, f64),
-    /// Level span to show, dB.
-    pub spectrum_db: (f64, f64),
-    /// Occupied band of the DRM signal in the displayed spectrum, kHz.
-    pub band_khz: Option<(f64, f64)>,
-    /// DRM DC carrier in the displayed spectrum, kHz.
-    pub dc_khz: Option<f64>,
+    /// Input spectrum.
+    pub spectrum: SpectrumPlot,
     /// Equalised cells of the latest complete frame / SDC block / multiplex frame: (I, Q).
     pub fac: Points,
     pub sdc: Points,
@@ -67,7 +118,6 @@ impl PlotData {
     pub fn from_snapshot(snap: &Snapshot) -> Self {
         let v = &snap.visuals;
         let rx = &snap.rx;
-        let spectrum = spectrum_points(v);
         let chain = &v.chain;
         let (chan_db, group_delay_ms) = channel_curves(chain, rx.mode);
         let pds = pds_plot(&chain.pds, chain.pds_axis.as_ref());
@@ -77,11 +127,7 @@ impl PlotData {
         };
         let ideal = IdealPoints::new(snap.channel.as_ref());
         Self {
-            spectrum_khz: spectrum_span_khz(v),
-            spectrum_db: level_range(spectrum.iter().map(|p| p[1])),
-            spectrum,
-            band_khz: v.signal_band_hz.map(|(a, b)| (a / 1e3, b / 1e3)),
-            dc_khz: v.dc_hz.map(|f| f / 1e3),
+            spectrum: SpectrumPlot::from_visuals(v),
             fac: constellation_points(&chain.fac),
             sdc: constellation_points(&chain.sdc),
             msc: constellation_points(&chain.msc),
@@ -105,42 +151,20 @@ impl PlotData {
     }
 }
 
-/// The spectrum as (kHz, dB). Bin `j` of `spectrum_db` lies at
-/// `centre − span/2 + j·span/N`; for a real input only the upper (non-negative)
-/// half is meaningful and returned.
-pub fn spectrum_points(v: &Visuals) -> Points {
-    let n = v.spectrum_db.len();
+/// A spectrum as (kHz, dB). Bin `j` of `db` lies at `centre − span/2 + j·span/N`;
+/// for a real signal only the upper (non-negative) half is meaningful and returned.
+pub fn spectrum_points(db: &[f64], centre_hz: f64, span_hz: f64, real: bool) -> Points {
+    let n = db.len();
     if n == 0 {
         return Vec::new();
     }
-    let span = if v.spectrum_span_hz > 0.0 {
-        v.spectrum_span_hz
-    } else {
-        f64::from(SAMPLE_RATE)
-    };
-    let df = span / n as f64;
-    let f0 = v.spectrum_centre_hz - span / 2.0;
-    v.spectrum_db
-        .iter()
+    let df = span_hz / n as f64;
+    let f0 = centre_hz - span_hz / 2.0;
+    db.iter()
         .enumerate()
-        .map(|(j, &db)| [(f0 + j as f64 * df) / 1e3, db])
-        .filter(|p| !v.real_input || p[0] >= v.spectrum_centre_hz / 1e3)
+        .map(|(j, &v)| [(f0 + j as f64 * df) / 1e3, v])
+        .filter(|p| !real || p[0] >= centre_hz / 1e3)
         .collect()
-}
-
-/// Frequency span of the spectrum plot, kHz.
-pub fn spectrum_span_khz(v: &Visuals) -> (f64, f64) {
-    let span = if v.spectrum_span_hz > 0.0 {
-        v.spectrum_span_hz
-    } else {
-        f64::from(SAMPLE_RATE)
-    };
-    let lo = if v.real_input {
-        v.spectrum_centre_hz
-    } else {
-        v.spectrum_centre_hz - span / 2.0
-    };
-    (lo / 1e3, (v.spectrum_centre_hz + span / 2.0) / 1e3)
 }
 
 /// Display range for a dB trace: the top at the next 10 dB above the peak (+3 dB
@@ -326,20 +350,34 @@ mod tests {
 
     #[test]
     fn spectrum_axis() {
-        let v = visuals(8, false);
-        let p = spectrum_points(&v);
+        let s = SpectrumPlot::from_visuals(&visuals(8, false));
+        let p = &s.points;
         assert_eq!(p.len(), 8);
         assert_eq!(p[0], [-24.0, 0.0]);
         assert_eq!(p[4], [0.0, -4.0], "bin N/2 is 0 Hz");
         assert_eq!(p[7][0], 18.0);
-        assert_eq!(spectrum_span_khz(&v), (-24.0, 24.0));
+        assert_eq!(s.span_khz, (-24.0, 24.0));
 
-        let v = visuals(8, true);
-        let p = spectrum_points(&v);
-        assert_eq!(p.len(), 4, "real input: upper half only");
-        assert_eq!(p[0][0], 0.0);
-        assert_eq!(spectrum_span_khz(&v), (0.0, 24.0));
-        assert!(spectrum_points(&Visuals::default()).is_empty());
+        let s = SpectrumPlot::from_visuals(&visuals(8, true));
+        assert_eq!(s.points.len(), 4, "real input: upper half only");
+        assert_eq!(s.points[0][0], 0.0);
+        assert_eq!(s.span_khz, (0.0, 24.0));
+        let empty = SpectrumPlot::from_visuals(&Visuals::default());
+        assert!(empty.points.is_empty());
+        assert_eq!(empty.span_khz, (-24.0, 24.0), "an unset span means 48 kHz");
+
+        // The transmitter's spectrum with its markers.
+        let tx = SpectrumPlot::new(
+            &[-50.0; 16],
+            0.0,
+            48_000.0,
+            true,
+            Some(12_000.0),
+            Some((7_000.0, 17_000.0)),
+        );
+        assert_eq!(tx.points.len(), 8);
+        assert_eq!((tx.dc_khz, tx.band_khz), (Some(12.0), Some((7.0, 17.0))));
+        assert_eq!(tx.db_range, (-80.0, -40.0), "at least 40 dB shown");
     }
 
     #[test]
@@ -512,9 +550,9 @@ mod tests {
         snap.visuals.chain.pds_axis = Some(axis());
         let d = PlotData::from_snapshot(&snap);
         let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
-        assert_eq!(d.spectrum.len(), 8);
-        assert_eq!(d.dc_khz, Some(12.0));
-        let (lo, hi) = d.band_khz.unwrap();
+        assert_eq!(d.spectrum.points.len(), 8);
+        assert_eq!(d.spectrum.dc_khz, Some(12.0));
+        let (lo, hi) = d.spectrum.band_khz.unwrap();
         assert!(close(lo, 7.1484) && close(hi, 16.8516), "{lo} {hi}");
         assert_eq!(d.carriers, Some((-103.0, 103.0)));
         assert_eq!(d.snr, vec![[-103.0, 20.0], [103.0, 18.0]]);

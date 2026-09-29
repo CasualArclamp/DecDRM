@@ -5,25 +5,22 @@
 //! the whole window is described again from the application state, and a widget's
 //! return value (e.g. `button(..).clicked()`) reports the interaction. Frames are only
 //! produced when something happens (input, or a repaint request), so while the
-//! receiver runs we ask for one every 100 ms and otherwise let the GUI idle.
+//! receiver or the transmitter runs we ask for one every 100 ms and otherwise let the
+//! GUI idle. Receiver and transmitter are independent and may run at the same time.
 
 use crate::Args;
 use crate::panels::journaline::JournalineView;
 use crate::panels::slideshow::SlideshowView;
 use crate::panels::source::{DeviceLists, SourceAction};
+use crate::panels::tx_page::TxPage;
 use crate::panels::{self, heading};
 use crate::receiver::{FETCH_INTERVAL, RxSession};
-use crate::settings::{DataTab, Settings, SettingsStore, SignalFormat, ThemeChoice};
+use crate::settings::{DataTab, Page, Settings, SettingsStore, SignalFormat, ThemeChoice};
+use crate::transmitter::TxSession;
+use crate::tx_config;
 use eframe::egui::{self, RichText, Ui};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-
-/// Top-level page.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Page {
-    Receiver,
-    Transmitter,
-}
 
 /// Unattended runs (`--exit-after`, `--screenshot`): used for documentation
 /// screenshots and smoke tests.
@@ -86,12 +83,14 @@ pub struct DecDrmApp {
     settings: Settings,
     store: SettingsStore,
     rx: RxSession,
+    tx: TxSession,
+    tx_page: TxPage,
     devices: DeviceLists,
-    page: Page,
     slideshow: SlideshowView,
     journaline: JournalineView,
     automation: Automation,
-    /// Never play audio in this run (`--no-audio`), whatever the saved setting says.
+    /// No sound-card output in this run (`--no-audio`): no audio playback and no
+    /// transmitting to a sound card, whatever the saved settings say.
     mute: bool,
     applied_theme: Option<ThemeChoice>,
     last_save: Instant,
@@ -119,6 +118,15 @@ impl DecDrmApp {
         if args.iq_swapped {
             settings.format = SignalFormat::IqSwapped;
         }
+        let mut tx_page = TxPage::new(&mut settings, tx_config::example_dir(store.path()));
+        if let Some(station) = &args.station {
+            tx_page.open_file(&mut settings, station);
+        }
+        // Show the Transmitter tab for a station given on the command line, unless the
+        // receiver is started as well (then the saved page is kept).
+        if (args.station.is_some() || args.transmit) && !args.start {
+            settings.page = Page::Transmitter;
+        }
         cc.egui_ctx.set_theme(settings.theme.preference());
         let applied_theme = Some(settings.theme);
         let now = Instant::now();
@@ -127,8 +135,9 @@ impl DecDrmApp {
             settings,
             store,
             rx,
+            tx: TxSession::default(),
+            tx_page,
             devices: DeviceLists::default(),
-            page: Page::Receiver,
             slideshow: SlideshowView::default(),
             journaline: JournalineView::default(),
             automation: Automation {
@@ -143,6 +152,9 @@ impl DecDrmApp {
         };
         if args.start {
             app.start();
+        }
+        if args.transmit {
+            app.tx_page.transmit(&app.settings, &mut app.tx, !app.mute);
         }
         app
     }
@@ -176,8 +188,13 @@ impl DecDrmApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("DecDRM").strong().size(16.0));
             ui.separator();
-            ui.selectable_value(&mut self.page, Page::Receiver, "Receiver");
-            ui.selectable_value(&mut self.page, Page::Transmitter, "Transmitter");
+            // A marker for a page whose engine is running (both may run at once). "▶" is
+            // in egui's default fonts; "●" is not.
+            let running = |on: bool| if on { " ▶" } else { "" };
+            let rx_label = format!("Receiver{}", running(self.rx.is_running()));
+            let tx_label = format!("Transmitter{}", running(self.tx.is_running()));
+            ui.selectable_value(&mut self.settings.page, Page::Receiver, rx_label);
+            ui.selectable_value(&mut self.settings.page, Page::Transmitter, tx_label);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 egui::ComboBox::from_id_salt("theme")
                     .selected_text(self.settings.theme.label())
@@ -186,7 +203,7 @@ impl DecDrmApp {
                             ui.selectable_value(&mut self.settings.theme, t, t.label());
                         }
                     });
-                if self.page == Page::Receiver {
+                if self.settings.page == Page::Receiver {
                     ui.toggle_value(&mut self.settings.show_log, "Log");
                 }
             });
@@ -255,6 +272,7 @@ impl eframe::App for DecDrmApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now = Instant::now();
         self.rx.poll(now);
+        self.tx.poll(now);
 
         if self.applied_theme != Some(self.settings.theme) {
             ctx.set_theme(self.settings.theme.preference());
@@ -273,7 +291,7 @@ impl eframe::App for DecDrmApp {
 
         // Repaint policy: ~10 Hz while the engine runs (or an unattended run waits),
         // otherwise only on user input.
-        if self.rx.is_running() || self.automation.active() {
+        if self.rx.is_running() || self.tx.is_running() || self.automation.active() {
             ctx.request_repaint_after(FETCH_INTERVAL);
         }
     }
@@ -281,11 +299,15 @@ impl eframe::App for DecDrmApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.automation.handle_screenshot(ui.ctx());
         egui::Panel::top("top_bar").show(ui, |ui| self.top_bar(ui));
-        match self.page {
+        match self.settings.page {
             Page::Receiver => self.receiver_page(ui),
-            Page::Transmitter => {
-                egui::CentralPanel::default().show(ui, panels::transmitter::show);
-            }
+            Page::Transmitter => self.tx_page.show(
+                ui,
+                &mut self.settings,
+                &mut self.devices,
+                &mut self.tx,
+                !self.mute,
+            ),
         }
     }
 
@@ -294,5 +316,6 @@ impl eframe::App for DecDrmApp {
             eprintln!("cannot save settings: {e}");
         }
         self.rx.shutdown();
+        self.tx.shutdown();
     }
 }

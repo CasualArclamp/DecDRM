@@ -79,6 +79,9 @@ struct RxArgs {
     /// Seconds of signal between log rows.
     #[arg(long, default_value_t = 1.0, value_name = "SECS")]
     log_interval: f64,
+    /// Stop after this many seconds of signal (e.g. for scripted sound-card captures).
+    #[arg(long, value_name = "SECS")]
+    duration: Option<f64>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -191,6 +194,10 @@ fn rx(a: RxArgs) -> Result<()> {
             None => {}
         }
         let s = engine.snapshot();
+        if !stop_sent && a.duration.is_some_and(|d| s.input.position_s >= d) {
+            engine.command(Command::Stop);
+            stop_sent = true;
+        }
         if s.afs != afs_shown {
             for line in &s.afs {
                 println!("AFS: {line}");

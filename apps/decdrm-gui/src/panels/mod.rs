@@ -10,7 +10,7 @@ pub mod services;
 pub mod slideshow;
 pub mod source;
 pub mod status_strip;
-pub mod transmitter;
+pub mod tx_page;
 
 use crate::indicators::Led;
 use eframe::egui::{self, Color32, RichText, Sense, Stroke, Ui, vec2};

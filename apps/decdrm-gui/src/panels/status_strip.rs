@@ -169,13 +169,13 @@ fn position(ui: &mut Ui, snap: &decdrm_engine::Snapshot) {
         }
         None => {
             value(ui, "Elapsed", fmt_time(pos));
-            ui.label(
-                RichText::new(format!(
-                    "{} ({} Hz, {} ch)",
-                    info.name, info.sample_rate, info.channels
-                ))
-                .weak(),
+            // Device names can be long: cut to the rest of the row, full text on hover.
+            let text = format!(
+                "{} ({} Hz, {} ch)",
+                info.name, info.sample_rate, info.channels
             );
+            ui.add(egui::Label::new(RichText::new(&text).weak()).truncate())
+                .on_hover_text(text);
         }
     }
 }

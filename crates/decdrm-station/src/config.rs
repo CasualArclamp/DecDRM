@@ -48,6 +48,15 @@ pub struct StationConfig {
 }
 
 impl StationConfig {
+    /// Whether the programme ends by itself: every audio service reads a non-looping
+    /// file (false for data-only stations and for tone or sound-card inputs). The same
+    /// rule as [`crate::Station::inputs_finite`], available before a station (and its
+    /// output file) is created.
+    pub fn inputs_finite(&self) -> bool {
+        let mut inputs = self.services.iter().filter_map(|s| s.audio.as_ref()).map(|a| &a.input).peekable();
+        inputs.peek().is_some() && inputs.all(|i| i.file.is_some() && !i.looped)
+    }
+
     /// Parse a configuration from TOML text. Relative paths are resolved against the
     /// current directory unless [`Self::base_dir`] is set afterwards.
     pub fn from_toml_str(text: &str) -> Result<Self> {

@@ -1,9 +1,12 @@
-//! `decdrm-gui` — desktop front end of the DecDRM Digital Radio Mondiale receiver.
+//! `decdrm-gui` — desktop front end of the DecDRM Digital Radio Mondiale receiver and
+//! transmitter.
 //!
 //! Layout of the crate:
 //! * [`app`] — the eframe application: pages, panels, repaint policy;
 //! * [`receiver`] — engine handle, snapshot polling and event dispatch;
-//! * [`indicators`], [`plots`], [`data`] — view models (pure logic, unit-tested);
+//! * [`transmitter`] — the station on a worker thread, and its snapshots;
+//! * [`indicators`], [`plots`], [`data`], [`tx_config`], [`spectrum`] — view models and
+//!   helpers (pure logic, unit-tested);
 //! * [`panels`] — drawing code, one module per screen area;
 //! * [`settings`] — the settings remembered between runs.
 
@@ -18,6 +21,9 @@ mod panels;
 mod plots;
 mod receiver;
 mod settings;
+mod spectrum;
+mod transmitter;
+mod tx_config;
 
 use clap::Parser;
 use eframe::egui;
@@ -29,7 +35,7 @@ use std::path::PathBuf;
 #[command(
     name = "decdrm-gui",
     version,
-    about = "DecDRM — Digital Radio Mondiale (DRM30) receiver"
+    about = "DecDRM — Digital Radio Mondiale (DRM30) receiver and transmitter"
 )]
 pub struct Args {
     /// Recording to open (WAV/FLAC). Files with an `IQ` token in the name open as I/Q.
@@ -43,9 +49,17 @@ pub struct Args {
     /// Start receiving right away.
     #[arg(long)]
     pub start: bool,
-    /// Do not play audio in this run (the saved setting is left unchanged).
+    /// Do not use any sound-card output in this run: no audio playback, and no
+    /// transmitting to a sound card (the saved settings are left unchanged).
     #[arg(long)]
     pub no_audio: bool,
+    /// Station configuration (TOML) to open in the Transmitter tab.
+    #[arg(long, value_name = "PATH")]
+    pub station: Option<PathBuf>,
+    /// Start transmitting right away (with the Transmitter tab's settings). Opens the
+    /// Transmitter tab unless `--start` is given too.
+    #[arg(long)]
+    pub transmit: bool,
     /// Settings file to use instead of the per-user default.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,

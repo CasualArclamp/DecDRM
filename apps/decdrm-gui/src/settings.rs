@@ -178,6 +178,41 @@ impl DataTab {
     }
 }
 
+/// Top-level page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Page {
+    #[default]
+    Receiver,
+    Transmitter,
+}
+
+/// Where the transmitter's signal goes, overriding the station file's `[output]`
+/// without editing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TxOutput {
+    /// As the station file says.
+    #[default]
+    Config,
+    /// Only to [`Settings::tx_output_file`].
+    File,
+    /// Only to the sound card [`Settings::tx_output_device`].
+    Device,
+}
+
+impl TxOutput {
+    pub const ALL: [TxOutput; 3] = [Self::Config, Self::File, Self::Device];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Config => "As configured",
+            Self::File => "File",
+            Self::Device => "Sound card",
+        }
+    }
+}
+
 /// Everything the GUI remembers between runs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -202,6 +237,17 @@ pub struct Settings {
     pub plot_tab: PlotTab,
     pub data_tab: DataTab,
     pub show_log: bool,
+    pub page: Page,
+    /// Last station configuration file of the Transmitter tab (`None`: the example).
+    pub station_config: Option<PathBuf>,
+    pub tx_output: TxOutput,
+    /// Output file for [`TxOutput::File`].
+    pub tx_output_file: Option<PathBuf>,
+    /// Sound card for [`TxOutput::Device`] (`None` = system default).
+    pub tx_output_device: Option<String>,
+    /// Stop transmitting after [`Settings::tx_duration_s`] seconds of signal.
+    pub tx_duration_enabled: bool,
+    pub tx_duration_s: f64,
 }
 
 impl Default for Settings {
@@ -221,6 +267,13 @@ impl Default for Settings {
             plot_tab: PlotTab::Overview,
             data_tab: DataTab::Slideshow,
             show_log: true,
+            page: Page::Receiver,
+            station_config: None,
+            tx_output: TxOutput::Config,
+            tx_output_file: None,
+            tx_output_device: None,
+            tx_duration_enabled: true,
+            tx_duration_s: 60.0,
         }
     }
 }
@@ -242,7 +295,7 @@ impl Settings {
                 let path = self
                     .file
                     .clone()
-                    .ok_or("no recording selected — use “Open…” first")?;
+                    .ok_or("no recording selected — use \"Open…\" first")?;
                 InputSpec::File {
                     path,
                     realtime: self.realtime,
@@ -447,9 +500,17 @@ mod tests {
             plot_tab: PlotTab::Impulse,
             data_tab: DataTab::Journaline,
             show_log: false,
+            page: Page::Transmitter,
+            station_config: Some(PathBuf::from("stations/test.toml")),
+            tx_output: TxOutput::Device,
+            tx_output_file: Some(PathBuf::from("out.wav")),
+            tx_output_device: Some("CABLE-A Input".into()),
+            tx_duration_enabled: false,
+            tx_duration_s: 12.5,
         };
         let text = to_toml(&s).unwrap();
         assert!(text.contains("format = \"iq-swapped\""), "{text}");
+        assert!(text.contains("tx_output = \"device\""), "{text}");
         assert_eq!(parse(&text).unwrap(), s);
     }
 
