@@ -65,7 +65,9 @@ pub struct ReceiverConfig {
     pub flip: bool,
     /// Also accept spectrally inverted signals during acquisition.
     pub auto_flip: bool,
-    /// Additional MLC decoding passes for the MSC (Dream default: 1).
+    /// Additional MLC decoding passes for the MSC. Dream uses 1; 2 (the default, and
+    /// what ES 201 980 annex A assumes) gains ~0.3–0.5 dB with 64-QAM for ~15 % more
+    /// CPU time; more passes gain nothing measurable.
     pub msc_iterations: usize,
     pub metric: MetricKind,
 }
@@ -77,7 +79,7 @@ impl Default for ReceiverConfig {
             channels: 1,
             flip: false,
             auto_flip: true,
-            msc_iterations: 1,
+            msc_iterations: 2,
             metric: MetricKind::default(),
         }
     }

@@ -46,7 +46,7 @@ fn parse() -> Args {
         Some("D") => RobustnessMode::D,
         other => panic!("mode A..D, got {other:?}"),
     };
-    let mut args = Args { channel, mode, snrs: Vec::new(), secs: 30.0, so: 3, qam: 64, prot: 1, iter: 1, seed: 1, short: false };
+    let mut args = Args { channel, mode, snrs: Vec::new(), secs: 30.0, so: 3, qam: 64, prot: 1, iter: 2, seed: 1, short: false };
     while let Some(s) = it.next() {
         let mut val = || it.next().expect("value").clone();
         match s.as_str() {
