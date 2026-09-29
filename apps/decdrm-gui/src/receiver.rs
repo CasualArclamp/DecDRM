@@ -18,11 +18,15 @@
 //! holds the latest state and would lose items that came and went between two polls.
 
 use crate::data::DataServices;
+use crate::history::History;
 use crate::indicators::Indicators;
 use crate::plots::PlotData;
 use crate::waterfall::Waterfall;
+use crate::website::{SiteFiles, SiteStore, default_sites_dir};
+use decdrm_data::DataEvent;
 use decdrm_engine::{Command, Engine, EngineConfig, EngineEvent, InputSpec, ServiceView, Snapshot};
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How often a new snapshot is fetched (the engine publishes at ~10 Hz).
@@ -114,8 +118,15 @@ pub struct RxSession {
     pub plots: PlotData,
     /// History of the input spectrum.
     pub waterfall: Waterfall,
+    /// Reception figures and error rates of the last minutes.
+    pub history: History,
     pub indicators: Indicators,
     pub data: DataServices,
+    /// Broadcast website files on disk (for the browser).
+    pub sites: SiteFiles,
+    /// Where the GUI writes website files when the engine saves none (no data
+    /// directory); set by the application.
+    pub sites_dir: PathBuf,
     pub log: LogBuffer,
     /// Recent text messages of the selected audio service, oldest first.
     pub texts: VecDeque<String>,
@@ -129,14 +140,18 @@ pub struct RxSession {
 
 impl Default for RxSession {
     fn default() -> Self {
+        let sites_dir = default_sites_dir(None);
         Self {
             engine: None,
             stopping: false,
             snap: Snapshot::default(),
             plots: PlotData::default(),
             waterfall: Waterfall::default(),
+            history: History::default(),
             indicators: Indicators::default(),
             data: DataServices::default(),
+            sites: SiteFiles::new(SiteStore::Own(sites_dir.clone())),
+            sites_dir,
             log: LogBuffer::default(),
             texts: VecDeque::new(),
             source_label: String::new(),
@@ -164,8 +179,13 @@ impl RxSession {
         self.snap = Snapshot::default();
         self.plots = PlotData::default();
         self.waterfall.clear();
+        self.history.clear();
         self.indicators.clear();
         self.data.clear();
+        self.sites = SiteFiles::new(match &cfg.data_dir {
+            Some(dir) => SiteStore::Engine(dir.clone()),
+            None => SiteStore::Own(self.sites_dir.clone()),
+        });
         self.texts.clear();
         self.log.push(format!("── start: {label}"));
         self.source_label = label;
@@ -227,7 +247,10 @@ impl RxSession {
                 EngineEvent::Log(line) => self.log.push(line),
                 EngineEvent::Text(text) => push_text(&mut self.texts, text),
                 EngineEvent::Data { short_id, event } => {
-                    self.data.apply(short_id, &event, now_unix)
+                    if let DataEvent::WebsiteFile { path, .. } = &event {
+                        self.sites.received(short_id, path);
+                    }
+                    self.data.apply(short_id, &event, now_unix);
                 }
                 EngineEvent::Stopped { error } => {
                     if let Some(e) = error {
@@ -253,6 +276,7 @@ impl RxSession {
                 self.plots = PlotData::from_snapshot(&snap);
                 self.waterfall
                     .push(&snap.visuals.spectrum_db, snap.visuals.real_input);
+                self.history.push(&snap);
             }
             self.snap = snap;
             self.last_fetch = Some(now);
@@ -263,6 +287,8 @@ impl RxSession {
             let running = !finished && !self.snap.stopped;
             self.indicators.update(t, &self.snap, running);
         }
+        // Website files are written once the snapshot names their service.
+        self.sites.flush(&self.data, &self.snap.services);
         if finished {
             // The worker has exited, so dropping the handle joins it immediately. The
             // final snapshot (plots, counters, error) stays on screen.

@@ -130,20 +130,26 @@ pub enum PlotTab {
     Spectrum,
     Waterfall,
     Constellations,
+    /// Spectrum of the decoded audio.
+    Audio,
     Channel,
     Impulse,
     Snr,
+    /// Reception figures and error rates of the last minutes.
+    History,
 }
 
 impl PlotTab {
-    pub const ALL: [PlotTab; 7] = [
+    pub const ALL: [PlotTab; 9] = [
         Self::Overview,
         Self::Spectrum,
         Self::Waterfall,
         Self::Constellations,
+        Self::Audio,
         Self::Channel,
         Self::Impulse,
         Self::Snr,
+        Self::History,
     ];
 
     pub fn label(self) -> &'static str {
@@ -152,9 +158,11 @@ impl PlotTab {
             Self::Spectrum => "Spectrum",
             Self::Waterfall => "Waterfall",
             Self::Constellations => "Constellations",
+            Self::Audio => "Audio",
             Self::Channel => "Channel",
             Self::Impulse => "Impulse response",
             Self::Snr => "SNR per carrier",
+            Self::History => "History",
         }
     }
 }
@@ -166,17 +174,26 @@ pub enum DataTab {
     #[default]
     Slideshow,
     Journaline,
+    /// MOT Broadcast Website files.
+    Website,
     Epg,
     Info,
 }
 
 impl DataTab {
-    pub const ALL: [DataTab; 4] = [Self::Slideshow, Self::Journaline, Self::Epg, Self::Info];
+    pub const ALL: [DataTab; 5] = [
+        Self::Slideshow,
+        Self::Journaline,
+        Self::Website,
+        Self::Epg,
+        Self::Info,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Slideshow => "Slideshow",
             Self::Journaline => "Journaline",
+            Self::Website => "Website",
             Self::Epg => "EPG",
             Self::Info => "Data info",
         }
@@ -238,6 +255,10 @@ pub struct Settings {
     pub play_audio: bool,
     /// Sound-card output by name (`None` = system default).
     pub output_device: Option<String>,
+    /// Save received data objects (slides, website files, programme guides) below this
+    /// directory (the engine's `data_dir`); `None` saves nothing but the website files
+    /// the browser needs (see `website`).
+    pub data_dir: Option<PathBuf>,
     pub theme: ThemeChoice,
     pub plot_tab: PlotTab,
     pub data_tab: DataTab,
@@ -268,6 +289,7 @@ impl Default for Settings {
             realtime: true,
             play_audio: true,
             output_device: None,
+            data_dir: None,
             theme: ThemeChoice::System,
             plot_tab: PlotTab::Overview,
             data_tab: DataTab::Slideshow,
@@ -325,6 +347,7 @@ impl Settings {
             },
             play_audio: self.play_audio,
             output_device: self.output_device.clone(),
+            data_dir: self.data_dir.clone(),
             ..EngineConfig::default()
         })
     }
@@ -501,9 +524,10 @@ mod tests {
             realtime: false,
             play_audio: false,
             output_device: Some("Speakers".into()),
+            data_dir: Some(PathBuf::from("received")),
             theme: ThemeChoice::Light,
-            plot_tab: PlotTab::Impulse,
-            data_tab: DataTab::Journaline,
+            plot_tab: PlotTab::History,
+            data_tab: DataTab::Website,
             show_log: false,
             page: Page::Transmitter,
             station_config: Some(PathBuf::from("stations/test.toml")),
@@ -516,6 +540,7 @@ mod tests {
         let text = to_toml(&s).unwrap();
         assert!(text.contains("format = \"iq-swapped\""), "{text}");
         assert!(text.contains("tx_output = \"device\""), "{text}");
+        assert!(text.contains("plot_tab = \"history\""), "{text}");
         assert_eq!(parse(&text).unwrap(), s);
     }
 
@@ -538,6 +563,12 @@ mod tests {
         assert!(matches!(cfg.input, InputSpec::File { realtime: true, .. }));
         assert_eq!(cfg.receiver.input, InputFormat::Real(RealChannel::Mix));
         assert!(cfg.receiver.auto_flip && !cfg.receiver.flip);
+        assert_eq!(cfg.data_dir, None);
+        s.data_dir = Some("received".into());
+        assert_eq!(
+            s.engine_config().unwrap().data_dir,
+            Some(PathBuf::from("received"))
+        );
 
         s.source = SourceKind::Device;
         s.format = SignalFormat::IqSwapped;

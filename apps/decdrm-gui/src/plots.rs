@@ -9,7 +9,7 @@ use decdrm_core::fac::{ChannelParams, MscMode, SdcMode};
 use decdrm_core::params::{RobustnessMode, SAMPLE_RATE, carrier_range};
 use decdrm_core::rx::{ChainVisuals, PdsAxis, Visuals};
 use decdrm_core::tables;
-use decdrm_engine::Snapshot;
+use decdrm_engine::{AudioSpectrum, Snapshot};
 use std::f64::consts::PI;
 
 /// Points of a line or scatter plot, `[x, y]`.
@@ -81,11 +81,48 @@ impl SpectrumPlot {
     }
 }
 
+/// Lowest level of the audio spectrum plot, dBFS.
+pub const AUDIO_FLOOR_DB: f64 = -120.0;
+
+/// The decoded audio's spectrum ready to draw.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AudioPlot {
+    /// (kHz, dBFS), from 0 Hz to half the sample rate, floored at [`AUDIO_FLOOR_DB`].
+    pub points: Points,
+    /// Half the sample rate, kHz (the right edge of the plot).
+    pub top_khz: f64,
+    pub bin_hz: f64,
+    pub sample_rate: u32,
+    pub channels: u8,
+    /// Decoder description (e.g. "HE-AAC v2 …").
+    pub codec: String,
+}
+
+impl AudioPlot {
+    pub fn new(s: &AudioSpectrum, codec: &str) -> Self {
+        Self {
+            points: s
+                .db
+                .iter()
+                .enumerate()
+                .map(|(j, &db)| [j as f64 * s.bin_hz / 1e3, db.max(AUDIO_FLOOR_DB)])
+                .collect(),
+            top_khz: f64::from(s.sample_rate) / 2e3,
+            bin_hz: s.bin_hz,
+            sample_rate: s.sample_rate,
+            channels: s.channels,
+            codec: codec.to_string(),
+        }
+    }
+}
+
 /// Everything the plot tabs draw, derived from one snapshot.
 #[derive(Debug, Clone, Default)]
 pub struct PlotData {
     /// Input spectrum.
     pub spectrum: SpectrumPlot,
+    /// Spectrum of the decoded audio.
+    pub audio: AudioPlot,
     /// Equalised cells of the latest complete frame / SDC block / multiplex frame: (I, Q).
     pub fac: Points,
     pub sdc: Points,
@@ -128,6 +165,7 @@ impl PlotData {
         let ideal = IdealPoints::new(snap.channel.as_ref());
         Self {
             spectrum: SpectrumPlot::from_visuals(v),
+            audio: AudioPlot::new(&snap.audio_spectrum, &snap.audio.codec),
             fac: constellation_points(&chain.fac),
             sdc: constellation_points(&chain.sdc),
             msc: constellation_points(&chain.msc),
@@ -378,6 +416,32 @@ mod tests {
         assert_eq!(tx.points.len(), 8);
         assert_eq!((tx.dc_khz, tx.band_khz), (Some(12.0), Some((7.0, 17.0))));
         assert_eq!(tx.db_range, (-80.0, -40.0), "at least 40 dB shown");
+    }
+
+    #[test]
+    fn audio_axis() {
+        let s = AudioSpectrum {
+            db: vec![-10.0, -200.0, -30.0],
+            bin_hz: 11.71875,
+            sample_rate: 24_000,
+            channels: 2,
+        };
+        let a = AudioPlot::new(&s, "HE-AAC");
+        assert_eq!(
+            a.points,
+            vec![
+                [0.0, -10.0],
+                [0.01171875, AUDIO_FLOOR_DB],
+                [0.0234375, -30.0]
+            ]
+        );
+        assert_eq!((a.top_khz, a.channels), (12.0, 2));
+        assert_eq!(a.codec, "HE-AAC");
+        assert!(
+            AudioPlot::new(&AudioSpectrum::default(), "")
+                .points
+                .is_empty()
+        );
     }
 
     #[test]

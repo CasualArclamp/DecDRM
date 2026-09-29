@@ -249,14 +249,6 @@ pub fn scope_id_from_name(name: &str) -> Option<u32> {
     u32::from_str_radix(id, 16).ok()
 }
 
-/// Seconds since 1970 of the engine's formatted broadcast time
-/// (`YYYY-MM-DD HH:MM UTC`, `Snapshot::time_utc`).
-pub fn parse_broadcast_time(text: &str) -> Option<i64> {
-    let (date, rest) = text.trim().split_once(' ')?;
-    let clock = rest.trim().strip_suffix("UTC")?.trim();
-    MotTime::parse_iso8601(&format!("{date}T{clock}:00Z")).map(|t| t.to_unix())
-}
-
 /// `(year, month, day, hour, minute, weekday 0 = Monday)` of a Unix time (UTC).
 pub fn civil(unix: i64) -> (i32, u8, u8, u8, u8, u8) {
     let t = MotTime::from_unix(unix);
@@ -460,10 +452,11 @@ mod tests {
 
     #[test]
     fn times_and_dates() {
-        let t = parse_broadcast_time("2026-09-29 12:44 UTC").unwrap();
+        let t = MotTime::parse_iso8601("2026-09-29T12:44:00Z")
+            .unwrap()
+            .to_unix();
         assert_eq!(fmt_date(t), "Tue 29 Sep 2026");
         assert_eq!(fmt_clock(t), "12:44");
-        assert_eq!(parse_broadcast_time("12:44"), None);
         assert_eq!(fmt_date(0), "Thu 1 Jan 1970");
     }
 }

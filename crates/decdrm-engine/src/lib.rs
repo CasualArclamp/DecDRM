@@ -19,7 +19,10 @@ pub use decdrm_core::rx::{InputFormat, RealChannel, ReceiverConfig};
 pub use decdrm_data;
 pub use logger::{LogConfig, LogFormat};
 pub use session::{MscStats, Session, SessionEvent};
-pub use snapshot::{AudioStatus, BroadcastTime, InputStatus, ServiceView, Snapshot};
+pub use snapshot::{
+    AudioSpectrum, AudioStatus, BroadcastTime, InputStatus, METRICS_INTERVAL_S, MetricsSample, RECENT_METRICS, ServiceView,
+    Snapshot,
+};
 pub use source::{InputSpec, Source, SourceInfo};
 
 use anyhow::Result;
@@ -27,6 +30,11 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+/// Seconds of input without decoded audio after which the published audio spectrum is
+/// blanked (signal lost, or a data service chosen), so a stale spectrum is not shown.
+/// Audio arrives in bursts, one per 400 ms multiplex frame.
+pub const AUDIO_SPECTRUM_HOLD_S: f64 = 2.0;
 
 /// Engine configuration.
 #[derive(Debug, Clone)]
@@ -185,6 +193,8 @@ fn worker(
 
     let started = Instant::now();
     let mut last_publish = Instant::now() - Duration::from_secs(1);
+    // Input position of the latest decoded audio (for blanking a stale audio spectrum).
+    let mut last_audio_s: Option<f64> = None;
     let chunk_frames = (info.sample_rate as usize / 20).max(256); // 50 ms
     loop {
         for c in cmd_rx.try_iter() {
@@ -194,6 +204,7 @@ fn worker(
                     if let Some(l) = logger.as_mut() {
                         l.finish(source.position_s(), &session, &snap)?;
                     }
+                    snap.audio_spectrum = fresh_audio_spectrum(&audio, last_audio_s, source.position_s());
                     publish(shared, &mut snap, &session, &source, &audio, true);
                     return Ok(());
                 }
@@ -214,6 +225,7 @@ fn worker(
                 l.finish(source.position_s(), &session, &snap)?;
             }
             log(format!("end of input after {:.1} s", source.position_s()), &mut snap);
+            snap.audio_spectrum = fresh_audio_spectrum(&audio, last_audio_s, source.position_s());
             publish(shared, &mut snap, &session, &source, &audio, true);
             return Ok(());
         };
@@ -229,6 +241,7 @@ fn worker(
             match ev {
                 SessionEvent::Log(l) => log(l, &mut snap),
                 SessionEvent::Audio(pcm) => {
+                    last_audio_s = Some(t);
                     if let Err(e) = audio.push(&pcm.samples, pcm.sample_rate, usize::from(pcm.channels)) {
                         log(format!("audio output error: {e:#}"), &mut snap);
                     }
@@ -254,10 +267,13 @@ fn worker(
             }
         }
 
+        let st = &session.audio_stats;
+        snap.push_metrics(MetricsSample::new(t, session.status(), &session.msc_stats, st.frames_ok, st.frames_concealed));
         if let Some(l) = logger.as_mut() {
             l.tick(t, &session, &snap)?;
         }
         if last_publish.elapsed() >= Duration::from_millis(100) {
+            snap.audio_spectrum = fresh_audio_spectrum(&audio, last_audio_s, t);
             publish(shared, &mut snap, &session, &source, &audio, false);
             last_publish = Instant::now();
         }
@@ -268,6 +284,16 @@ fn worker(
                 std::thread::sleep(Duration::from_secs_f64(ahead.min(0.2)));
             }
         }
+    }
+}
+
+/// The audio spectrum to publish at input position `now_s`: blank unless audio was
+/// decoded within the last [`AUDIO_SPECTRUM_HOLD_S`] seconds of input.
+fn fresh_audio_spectrum(audio: &audio_out::AudioOut, last_audio_s: Option<f64>, now_s: f64) -> AudioSpectrum {
+    if last_audio_s.is_some_and(|t| now_s - t <= AUDIO_SPECTRUM_HOLD_S) {
+        audio.spectrum()
+    } else {
+        AudioSpectrum::default()
     }
 }
 
@@ -324,5 +350,20 @@ fn publish(
     });
     if let Ok(mut s) = shared.lock() {
         *s = snap.clone();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_audio_spectrum_is_blanked() {
+        let mut audio = audio_out::AudioOut::new(false, None, false, None).unwrap();
+        audio.push(&vec![0.25; audio_out::AUDIO_FFT_LEN], 48_000, 1).unwrap();
+        assert!(fresh_audio_spectrum(&audio, None, 1.0).db.is_empty(), "no audio decoded yet");
+        let fresh = fresh_audio_spectrum(&audio, Some(10.0), 10.0 + AUDIO_SPECTRUM_HOLD_S);
+        assert_eq!(fresh.db.len(), audio_out::AUDIO_FFT_LEN / 2 + 1);
+        assert!(fresh_audio_spectrum(&audio, Some(10.0), 10.1 + AUDIO_SPECTRUM_HOLD_S).db.is_empty(), "stale");
     }
 }

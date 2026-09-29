@@ -5,6 +5,7 @@
 pub mod broadcast;
 pub mod data_info;
 pub mod epg;
+pub mod history;
 pub mod journaline;
 pub mod log;
 pub mod plots;
@@ -13,6 +14,7 @@ pub mod slideshow;
 pub mod source;
 pub mod status_strip;
 pub mod tx_page;
+pub mod website;
 
 use crate::indicators::Led;
 use eframe::egui::{self, Color32, RichText, Sense, Stroke, Ui, vec2};

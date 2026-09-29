@@ -1,11 +1,12 @@
-//! Plot tabs: input spectrum and its waterfall, constellations, channel, impulse
-//! response and SNR.
+//! Plot tabs: input spectrum and its waterfall, constellations, decoded audio, channel,
+//! impulse response, SNR and the reception history.
 //!
 //! The plots are monitoring displays: their axes are set from the data every frame and
 //! zooming/dragging is disabled; hovering shows the value under the cursor.
 
 use super::{Palette, placeholder};
-use crate::plots::{DB_FLOOR, PlotData, Points, SpectrumPlot};
+use crate::history::History;
+use crate::plots::{AUDIO_FLOOR_DB, AudioPlot, DB_FLOOR, PlotData, Points, SpectrumPlot};
 use crate::settings::PlotTab;
 use crate::waterfall::{ROW_SECONDS, WATERFALL_ROWS, Waterfall};
 use eframe::egui::{Color32, RichText, TextureHandle, TextureOptions, Ui};
@@ -29,8 +30,9 @@ pub fn show(
     data: &PlotData,
     waterfall: &Waterfall,
     texture: &mut WaterfallTexture,
+    history: &History,
 ) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for t in PlotTab::ALL {
             ui.selectable_value(tab, t, t.label());
         }
@@ -53,10 +55,60 @@ pub fn show(
             let side = (avail.x / 3.0 - 8.0).min(avail.y - 24.0).max(80.0);
             constellation_row(ui, data, &pal, side);
         }
+        PlotTab::Audio => audio_plot(ui, &data.audio, &pal, avail.y - 22.0),
         PlotTab::Channel => channel(ui, data, &pal),
         PlotTab::Impulse => impulse(ui, data, &pal, avail.y),
         PlotTab::Snr => snr(ui, data, &pal, avail.y),
+        PlotTab::History => super::history::show(ui, history, &pal),
     }
+}
+
+/// Spectrum of the decoded audio, 0 Hz … half its sample rate, in dB relative to full
+/// scale.
+fn audio_plot(ui: &mut Ui, a: &AudioPlot, pal: &Palette, height: f32) {
+    if a.points.is_empty() {
+        placeholder(
+            ui,
+            "No decoded audio: the spectrum appears while an audio service is decoded.",
+        );
+        return;
+    }
+    base_plot("audio_spectrum")
+        .height(height.max(120.0))
+        .x_axis_label("frequency (kHz)")
+        .y_axis_label("level (dBFS)")
+        .label_formatter(hover_label("kHz", 2, "dBFS", 1))
+        .show(ui, |p| {
+            p.set_plot_bounds(PlotBounds::from_min_max(
+                [0.0, AUDIO_FLOOR_DB],
+                [a.top_khz.max(1.0), 0.0],
+            ));
+            p.line(
+                line("decoded audio", &a.points, pal.msc)
+                    .width(1.0)
+                    .fill(AUDIO_FLOOR_DB as f32),
+            );
+        });
+    let channels = match a.channels {
+        1 => "1 channel".to_string(),
+        n => format!("mean of {n} channels"),
+    };
+    let codec = if a.codec.is_empty() {
+        String::new()
+    } else {
+        format!("{} — ", a.codec)
+    };
+    ui.label(
+        RichText::new(format!(
+            "{codec}decoded audio at {:.1} kHz ({channels}); {}-point FFT ({:.1} Hz bins), averaged over ~{:.1} s; a full-scale sine reads 0 dB",
+            f64::from(a.sample_rate) / 1e3,
+            decdrm_engine::audio_out::AUDIO_FFT_LEN,
+            a.bin_hz,
+            decdrm_engine::audio_out::AUDIO_AVERAGE_S,
+        ))
+        .weak()
+        .small(),
+    );
 }
 
 /// Spectrum on top, the three constellations below.

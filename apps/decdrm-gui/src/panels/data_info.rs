@@ -1,7 +1,9 @@
-//! Overview of every data service: what was received and the packet statistics.
+//! Overview of every data service: what was received and the packet statistics, and
+//! where received objects are saved.
 
 use super::placeholder;
 use crate::data::DataServices;
+use crate::settings::Settings;
 use eframe::egui::{self, RichText, Ui};
 
 /// Human-readable byte count.
@@ -13,7 +15,43 @@ pub fn fmt_bytes(n: u64) -> String {
     }
 }
 
-pub fn show(ui: &mut Ui, data: &DataServices) {
+/// The data-directory choice: where the receiver saves slides, website files and
+/// programme guides (takes effect at the next Start, like the source settings).
+fn save_folder(ui: &mut Ui, settings: &mut Settings, running: bool) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Save received objects").weak());
+        match &settings.data_dir {
+            Some(dir) => {
+                ui.add(egui::Label::new(RichText::new(dir.display().to_string()).monospace()).truncate());
+            }
+            None => {
+                ui.label("off");
+            }
+        }
+        ui.add_enabled_ui(!running, |ui| {
+            if ui
+                .button("Folder…")
+                .on_hover_text("Save slides, website files and programme guides below a folder (from the next Start).")
+                .clicked()
+            {
+                let mut dialog = rfd::FileDialog::new().set_title("Folder for received data objects");
+                if let Some(dir) = settings.data_dir.as_deref().filter(|d| d.is_dir()) {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(dir) = dialog.pick_folder() {
+                    settings.data_dir = Some(dir);
+                }
+            }
+            if settings.data_dir.is_some() && ui.button("Off").clicked() {
+                settings.data_dir = None;
+            }
+        });
+    });
+}
+
+pub fn show(ui: &mut Ui, data: &DataServices, settings: &mut Settings, running: bool) {
+    save_folder(ui, settings, running);
+    ui.separator();
     if data.is_empty() {
         placeholder(ui, "No data service output yet.");
         return;

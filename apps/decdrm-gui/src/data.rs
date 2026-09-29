@@ -77,6 +77,10 @@ impl DataServices {
         self.services.is_empty()
     }
 
+    pub fn get(&self, short_id: u8) -> Option<&DataService> {
+        self.services.get(&short_id)
+    }
+
     pub fn get_mut(&mut self, short_id: u8) -> Option<&mut DataService> {
         self.services.get_mut(&short_id)
     }
@@ -95,6 +99,11 @@ impl DataServices {
     /// Short ids of the services that delivered Journaline pages.
     pub fn journaline_ids(&self) -> Vec<u8> {
         self.ids_where(|s| !s.journaline.is_empty())
+    }
+
+    /// Short ids of the services that delivered broadcast website files.
+    pub fn website_ids(&self) -> Vec<u8> {
+        self.ids_where(|s| !s.website.is_empty())
     }
 
     fn ids_where(&self, pred: impl Fn(&DataService) -> bool) -> Vec<u8> {
@@ -235,8 +244,23 @@ mod tests {
             None,
         );
 
+        d.apply(
+            3,
+            &DataEvent::WebsiteFile {
+                path: "index.html".into(),
+                mime: "text/html".into(),
+                data: b"<html>".to_vec(),
+            },
+            None,
+        );
+
         assert_eq!(d.slideshow_ids(), vec![1]);
         assert_eq!(d.journaline_ids(), vec![2]);
+        assert_eq!(d.website_ids(), vec![3]);
+        assert_eq!(
+            d.get(3).unwrap().website.start_page().map(|(p, _)| p),
+            Some("index.html")
+        );
         assert_eq!(
             d.get_mut(1).unwrap().slideshow.current().unwrap().name,
             "a.png"

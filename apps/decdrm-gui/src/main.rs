@@ -5,8 +5,9 @@
 //! * [`app`] — the eframe application: pages, panels, repaint policy;
 //! * [`receiver`] — engine handle, snapshot polling and event dispatch;
 //! * [`transmitter`] — the station on a worker thread, and its snapshots;
-//! * [`indicators`], [`plots`], [`waterfall`], [`data`], [`epg`], [`tx_config`],
-//!   [`spectrum`] — view models and helpers (pure logic, unit-tested);
+//! * [`indicators`], [`plots`], [`waterfall`], [`history`], [`data`], [`epg`],
+//!   [`website`], [`tx_config`], [`spectrum`] — view models and helpers (pure logic,
+//!   unit-tested);
 //! * [`panels`] — drawing code, one module per screen area;
 //! * [`settings`] — the settings remembered between runs.
 
@@ -17,6 +18,7 @@
 mod app;
 mod data;
 mod epg;
+mod history;
 mod indicators;
 mod panels;
 mod plots;
@@ -26,6 +28,7 @@ mod spectrum;
 mod transmitter;
 mod tx_config;
 mod waterfall;
+mod website;
 
 use clap::Parser;
 use eframe::egui;
@@ -65,6 +68,10 @@ pub struct Args {
     /// Settings file to use instead of the per-user default.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
+    /// Save received data objects (slides, website files, programme guides) below this
+    /// directory (remembered like the other settings).
+    #[arg(long, value_name = "DIR")]
+    pub data_dir: Option<PathBuf>,
     /// Quit after this many seconds.
     #[arg(long, value_name = "SECONDS")]
     pub exit_after: Option<f64>,

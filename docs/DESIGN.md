@@ -98,17 +98,20 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       live playback. *Done* (xHE-AAC on FMGold, Opus in all three signalling variants).
 - [ ] **M4 Data services** — Journaline, MOT Slideshow, BWS, EPG, TPEG/raw; clock & AFS.
       *Status:* decoders done and verified on recordings (slideshow, Journaline, BWS);
-      EPG/TPEG untested for lack of samples; clock and AFS shown in the CLI
-      (`Snapshot::afs`, `time_utc`), not yet in the GUI.
+      EPG verified with our transmitter, TPEG untested for lack of samples; clock and
+      AFS shown in the CLI and the GUI (`Snapshot::afs`, `time`).
 - [x] **M5 Live input & logging** — sound-card input (VAC), CSV/JSON logs & metrics.
       *Done:* sound-card input (CLI `--device`, GUI); `decdrm rx --log FILE.csv|.jsonl`
       writes metrics rows (and events in JSON Lines).
 - [x] **M6 GUI** — egui: spectrum/waterfall, constellations, SNR/MER, sync status,
       service list, text, slideshow, Journaline browser, EPG, clock/AFS.
-      *Done:* receiver tab (spectrum, waterfall, constellations, channel, impulse
-      response, SNR per carrier, LEDs, services, text, slideshow, Journaline, EPG,
-      broadcast clock, alternative frequencies) and transmitter tab (TOML editor with
-      error locations, validation, transmit to file/sound card, status, TX spectrum).
+      *Done:* receiver tab (spectrum, waterfall, constellations, decoded-audio
+      spectrum, channel, impulse response, SNR per carrier, history of the last five
+      minutes of signal with error rates per 10 s, LEDs, services, text, slideshow,
+      Journaline, broadcast website (opens the HTML start page in the system browser on
+      a click), EPG, broadcast clock with local time, alternative frequencies, data
+      directory) and transmitter tab (TOML editor with error locations, validation,
+      transmit to file/sound card, status, TX spectrum).
 - [x] **M7 Transmitter** — full TX chain, FDK AAC/HE-AAC encoding, all data services,
       file/sound-card output, channel simulator, loopback BER tests; GUI TX tab + CLI.
       *Status:* `decdrm-station` + `decdrm tx station.toml` + GUI tab done

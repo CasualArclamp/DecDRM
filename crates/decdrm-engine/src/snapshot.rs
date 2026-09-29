@@ -3,11 +3,38 @@
 use crate::session::MscStats;
 use crate::source::SourceInfo;
 use decdrm_core::fac::ChannelParams;
-use decdrm_core::rx::{RxStatus, Visuals};
+use decdrm_core::rx::{RxState, RxStatus, Visuals};
 use std::collections::VecDeque;
 
 /// Maximum number of log lines kept in the snapshot.
 pub const LOG_LINES: usize = 200;
+/// Input seconds between two [`MetricsSample`]s.
+pub const METRICS_INTERVAL_S: f64 = 0.5;
+/// Samples kept in [`Snapshot::recent_metrics`]: 128 s of input, so a UI that fetches a
+/// snapshot every 100 ms misses none even while a recording is decoded at 1000× real
+/// time.
+pub const RECENT_METRICS: usize = 256;
+
+/// The reception figures at one moment of the input, for history plots.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MetricsSample {
+    /// Input position, seconds.
+    pub t: f64,
+    pub state: RxState,
+    pub snr_db: Option<f64>,
+    pub mer_db: Option<f64>,
+    pub wmer_db: Option<f64>,
+    pub doppler_hz: f64,
+    pub delay_ms: f64,
+    /// Sample-rate offset being corrected (Hz at 48 kHz).
+    pub sro_hz: f64,
+    /// Cumulative (good, bad) counts: FAC blocks, SDC blocks, multiplex frames (see
+    /// [`MscStats`]) and audio frames (bad = concealed).
+    pub fac: (u64, u64),
+    pub sdc: (u64, u64),
+    pub msc: (u64, u64),
+    pub audio: (u64, u64),
+}
 
 /// Input side status.
 #[derive(Debug, Clone, Default)]
@@ -40,6 +67,21 @@ pub struct AudioStatus {
     pub playing: bool,
     pub buffer_ms: f32,
     pub drift_ppm: f64,
+}
+
+/// Smoothed power spectrum of the decoded audio (see `audio_out::AudioAnalyser`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AudioSpectrum {
+    /// Power per bin in dB relative to full scale (a full-scale sine reads 0 dB), from
+    /// 0 Hz up to half the sample rate: bin `j` lies at `j · bin_hz`. Empty before the
+    /// first analysed block and when no audio was decoded for a while.
+    pub db: Vec<f64>,
+    /// Bin spacing, Hz (sample rate / FFT length).
+    pub bin_hz: f64,
+    /// Sample rate of the decoded audio, Hz.
+    pub sample_rate: u32,
+    /// Channels of the decoded audio (the spectrum is that of their mean).
+    pub channels: u8,
 }
 
 /// Broadcast time and date from the SDC (type 8), minute resolution. Per ES 201 980
@@ -83,12 +125,18 @@ pub struct Snapshot {
     /// Latest complete text message of the selected audio service.
     pub text: Option<String>,
     pub audio: AudioStatus,
+    /// Spectrum of the decoded audio (empty while none is decoded).
+    pub audio_spectrum: AudioSpectrum,
     /// Broadcast time and date from the SDC (type 8), formatted.
     pub time_utc: Option<String>,
     /// The same as a number.
     pub time: Option<BroadcastTime>,
     /// Alternative frequencies, schedules and regions from the SDC, one line each.
     pub afs: Vec<String>,
+    /// The figures every [`METRICS_INTERVAL_S`] of input, the last [`RECENT_METRICS`]
+    /// of them, oldest first. A UI keeping a longer history appends the samples newer
+    /// than the last one it has, so it gets every sample whatever the decoding speed.
+    pub recent_metrics: VecDeque<MetricsSample>,
     pub log: VecDeque<String>,
     /// The worker stopped (end of file, error or stop command).
     pub stopped: bool,
@@ -102,12 +150,63 @@ impl Snapshot {
             self.log.pop_front();
         }
     }
+
+    /// Record `sample` if [`METRICS_INTERVAL_S`] of input has passed since the last one
+    /// (the first is always taken); keeps the last [`RECENT_METRICS`].
+    pub fn push_metrics(&mut self, sample: MetricsSample) {
+        // A little tolerance: positions are sums of chunk durations.
+        if self.recent_metrics.back().is_some_and(|last| sample.t - last.t < METRICS_INTERVAL_S - 1e-6) {
+            return;
+        }
+        self.recent_metrics.push_back(sample);
+        while self.recent_metrics.len() > RECENT_METRICS {
+            self.recent_metrics.pop_front();
+        }
+    }
+}
+
+impl MetricsSample {
+    /// The figures of `rx` and the counters, at input position `t`.
+    pub fn new(t: f64, rx: &RxStatus, msc: &MscStats, audio_ok: u64, audio_bad: u64) -> Self {
+        Self {
+            t,
+            state: rx.state,
+            snr_db: rx.snr_db,
+            mer_db: rx.mer_db,
+            wmer_db: rx.wmer_db,
+            doppler_hz: rx.doppler_hz,
+            delay_ms: rx.delay_ms,
+            sro_hz: rx.sro_hz,
+            fac: (rx.fac_ok, rx.fac_bad),
+            sdc: (rx.sdc_ok, rx.sdc_bad),
+            msc: (msc.ok, msc.bad),
+            audio: (audio_ok, audio_bad),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use decdrm_core::mux::sdc::{LocalTimeOffset, TimeAndDate};
+
+    #[test]
+    fn metrics_are_sampled_and_bounded() {
+        let mut snap = Snapshot::default();
+        let sample = |t: f64| MetricsSample { t, ..Default::default() };
+        // A chunk every 50 ms of input: one sample per half second is kept.
+        for i in 0..=20 {
+            snap.push_metrics(sample(f64::from(i) * 0.05));
+        }
+        let times: Vec<f64> = snap.recent_metrics.iter().map(|s| s.t).collect();
+        assert_eq!(times.len(), 3, "{times:?}");
+        assert!((times[1] - 0.5).abs() < 1e-9 && (times[2] - 1.0).abs() < 1e-9, "{times:?}");
+        for i in 0..1000 {
+            snap.push_metrics(sample(2.0 + f64::from(i) * METRICS_INTERVAL_S));
+        }
+        assert_eq!(snap.recent_metrics.len(), RECENT_METRICS);
+        assert_eq!(snap.recent_metrics.back().unwrap().t, 2.0 + 999.0 * METRICS_INTERVAL_S);
+    }
 
     #[test]
     fn broadcast_time_from_sdc() {

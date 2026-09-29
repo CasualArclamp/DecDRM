@@ -37,9 +37,10 @@ encoding) and libopus.
   website, Journaline and EPG, every MSC mode incl. hierarchical 64-QAM and unequal
   protection, WAV/FLAC or sound-card output, plus a channel simulator (the DRM channel
   models 1–6) for testing.
-- Desktop GUI (egui): spectrum, waterfall, constellations, channel, impulse response,
-  SNR per carrier, status LEDs, services, text, slideshow, Journaline browser, EPG,
-  broadcast clock, alternative frequencies, and a transmitter tab.
+- Desktop GUI (egui): spectrum, waterfall, constellations, audio spectrum, channel,
+  impulse response, SNR per carrier, reception history, status LEDs, services, text,
+  slideshow, Journaline browser, broadcast website, EPG, broadcast clock, alternative
+  frequencies, and a transmitter tab.
 - Experimental **EnCodec** (Meta's neural codec) as a DecDRM-only audio codec: 1.5–24
   kbit/s, CRC-protected layers and concealment — at 15 dB SNR it lost 2 % of audio
   frames where HE-AAC lost 26 %. Standard receivers (and Dream) ignore it.

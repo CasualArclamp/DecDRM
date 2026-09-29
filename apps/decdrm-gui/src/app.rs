@@ -15,6 +15,7 @@ use crate::panels::plots::WaterfallTexture;
 use crate::panels::slideshow::SlideshowView;
 use crate::panels::source::{DeviceLists, SourceAction};
 use crate::panels::tx_page::TxPage;
+use crate::panels::website::WebsiteView;
 use crate::panels::{self, heading};
 use crate::receiver::{FETCH_INTERVAL, RxSession};
 use crate::settings::{DataTab, Page, Settings, SettingsStore, SignalFormat, ThemeChoice};
@@ -90,6 +91,7 @@ pub struct DecDrmApp {
     devices: DeviceLists,
     slideshow: SlideshowView,
     journaline: JournalineView,
+    website: WebsiteView,
     epg: EpgView,
     waterfall: WaterfallTexture,
     automation: Automation,
@@ -106,6 +108,7 @@ impl DecDrmApp {
     pub fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Self {
         let (store, mut settings, warning) = SettingsStore::load(args.config.clone());
         let mut rx = RxSession::default();
+        rx.sites_dir = crate::website::default_sites_dir(store.path());
         if let Some(w) = warning {
             rx.log.push(w);
         }
@@ -115,6 +118,9 @@ impl DecDrmApp {
         // Command-line overrides.
         if let Some(file) = args.file.clone() {
             settings.open_file(file);
+        }
+        if let Some(dir) = args.data_dir.clone() {
+            settings.data_dir = Some(dir);
         }
         if args.iq {
             settings.format = SignalFormat::Iq;
@@ -144,6 +150,7 @@ impl DecDrmApp {
             devices: DeviceLists::default(),
             slideshow: SlideshowView::default(),
             journaline: JournalineView::default(),
+            website: WebsiteView::default(),
             epg: EpgView::default(),
             waterfall: WaterfallTexture::default(),
             automation: Automation {
@@ -252,13 +259,14 @@ impl DecDrmApp {
                 &self.rx.plots,
                 &self.rx.waterfall,
                 &mut self.waterfall,
+                &self.rx.history,
             );
         });
     }
 
     /// Services, text, audio, then the data-service views filling the rest.
     fn side_panel(&mut self, ui: &mut Ui) {
-        panels::broadcast::clock(ui, self.rx.snap.time_utc.as_deref());
+        panels::broadcast::clock(ui, self.rx.snap.time.as_ref());
         panels::broadcast::alternative_frequencies(ui, &self.rx.snap.afs);
         if let Some(id) = panels::services::show(ui, &self.rx) {
             // An audio service is decoded (and its text shown); a data service's
@@ -266,6 +274,7 @@ impl DecDrmApp {
             self.rx.select_service(id);
             self.slideshow.focus(id);
             self.journaline.focus(id);
+            self.website.focus(id);
         }
         ui.separator();
         ui.horizontal(|ui| {
@@ -277,14 +286,13 @@ impl DecDrmApp {
         match self.settings.data_tab {
             DataTab::Slideshow => self.slideshow.show(ui, &mut self.rx.data),
             DataTab::Journaline => self.journaline.show(ui, &mut self.rx.data),
+            DataTab::Website => {
+                self.website
+                    .show(ui, &self.rx.data, &self.rx.sites, &self.rx.snap.services)
+            }
             DataTab::Epg => {
                 // "Now" for the programme on air: the broadcast clock, else this computer's.
-                let broadcast = self
-                    .rx
-                    .snap
-                    .time_utc
-                    .as_deref()
-                    .and_then(crate::epg::parse_broadcast_time);
+                let broadcast = self.rx.snap.time.map(|t| t.unix_s);
                 let now = broadcast.unwrap_or_else(|| {
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -298,7 +306,9 @@ impl DecDrmApp {
                     broadcast.is_some(),
                 );
             }
-            DataTab::Info => panels::data_info::show(ui, &self.rx.data),
+            DataTab::Info => {
+                panels::data_info::show(ui, &self.rx.data, &mut self.settings, self.rx.is_running())
+            }
         }
     }
 }
