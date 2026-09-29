@@ -194,6 +194,14 @@ unsafe extern "C" {
     ) -> c_int;
 
     // --- misc ---
+    /// Soft-clips interleaved float PCM into [-1, 1] in place (the int16 decode API does
+    /// this internally). `softclip_mem` holds one float of state per channel, zero-initialised.
+    pub fn opus_pcm_soft_clip(
+        pcm: *mut f32,
+        frame_size: c_int,
+        channels: c_int,
+        softclip_mem: *mut f32,
+    );
     pub fn opus_strerror(error: c_int) -> *const c_char;
     pub fn opus_get_version_string() -> *const c_char;
 }

@@ -1,0 +1,16 @@
+[package]
+name = "decdrm-engine"
+description = "Runtime wiring of the DecDRM receiver: input sources, decoding pipelines, status snapshots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decdrm-core = { path = "../decdrm-core" }
+decdrm-io = { path = "../decdrm-io" }
+decdrm-data = { path = "../decdrm-data" }
+crossbeam-channel = "0.5"
+anyhow.workspace = true
+tracing.workspace = true

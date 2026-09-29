@@ -1,7 +1,7 @@
 //! Off-air data is untrusted: no input may make a parser or decoder panic.
 
 use decdrm_data::crc::append_crc16;
-use decdrm_data::datagroup::DataGroup;
+use decdrm_data::datagroup::{DataGroup, SegmentField, UserAccess};
 use decdrm_data::journaline::NmlObject;
 use decdrm_data::mot::{MotDecoder, MotDirectory, MotHeader};
 use decdrm_data::packet::{Packet, PacketDemux};
@@ -43,7 +43,11 @@ fn parsers_survive_garbage() {
     let mut rng = Rng(0xDEC0DE);
     for i in 0..20_000 {
         let n = rng.below(300);
-        let data = if i % 2 == 0 { rng.bytes(n) } else { rng.structured(n) };
+        let data = if i % 2 == 0 {
+            rng.bytes(n)
+        } else {
+            rng.structured(n)
+        };
         let _ = MotHeader::parse(&data);
         let _ = MotDirectory::parse(&data);
         let _ = NmlObject::parse(&data, rng.below(3));
@@ -83,7 +87,8 @@ fn decoders_survive_garbage() {
             }
             let _ = dec.push_frame(&frame);
             // Random data units with valid data group CRCs.
-            let mut unit = rng.structured(rng.below(120));
+            let len = rng.below(120);
+            let mut unit = rng.structured(len);
             if !unit.is_empty() {
                 unit[0] = (unit[0] & 0xB0) | 0x40 | (rng.below(8) as u8);
             }
@@ -93,6 +98,29 @@ fn decoders_survive_garbage() {
         }
         assert_eq!(dec.stats().frames, 3000);
     }
+    // Well-formed MOT data groups whose segments carry garbage: reassembly completes and
+    // the header/directory parsers see random entities.
+    let mut mot = MotDecoder::new();
+    for _ in 0..20_000 {
+        let len = rng.below(40);
+        let seg = rng.structured(len);
+        let mut data = vec![(len >> 8) as u8, len as u8];
+        data.extend(seg);
+        let dg = DataGroup {
+            segment: Some(SegmentField {
+                last: rng.below(3) == 0,
+                number: rng.below(4) as u16,
+            }),
+            user_access: Some(UserAccess {
+                transport_id: Some(rng.below(4) as u16),
+                end_user_address: vec![],
+            }),
+            ..DataGroup::new([3, 4, 6, 7][rng.below(4)], data)
+        };
+        let _ = mot.push_data_unit(&dg.to_bytes());
+    }
+    assert!(mot.stats().malformed > 0);
+
     let mut odd = DataDecoder::new(DataServiceConfig {
         app_domain: AppDomain::Other(7),
         ..DataServiceConfig::packet(UserApplication::SlideShow, 3, 0)

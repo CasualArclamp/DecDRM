@@ -68,9 +68,17 @@ fn ebu_latin_char(b: u8) -> Option<char> {
 /// Decode `bytes` written in character set `charset` into a Rust `String`.
 ///
 /// Unknown indicators fall back to UTF-8 when the bytes are valid UTF-8 and to
-/// Latin-1 otherwise, so a string is always produced.
+/// Latin-1 otherwise, so a string is always produced. Bytes flagged as EBU Latin
+/// that form valid *multi-byte* UTF-8 are decoded as UTF-8: many encoders put UTF-8
+/// file names into ContentName without changing the indicator, and such sequences are
+/// practically impossible in genuine EBU Latin text.
 pub fn decode(charset: u8, bytes: &[u8]) -> String {
     match charset {
+        charset_id::EBU_LATIN | 0x1 | 0x2
+            if !bytes.is_ascii() && std::str::from_utf8(bytes).is_ok() =>
+        {
+            String::from_utf8_lossy(bytes).into_owned()
+        }
         // 0x1 and 0x2 are the EBU Latin common core plus other scripts; the Latin part
         // is shared with the complete repertoire.
         charset_id::EBU_LATIN | 0x1 | 0x2 => {
@@ -125,6 +133,8 @@ mod tests {
         assert_eq!(decode(0, b"abc.jpg"), "abc.jpg");
         assert_eq!(decode(0, &[0x24, 0x5C, 0x5E, 0x60]), "łŮŁĄ");
         assert_eq!(decode(0, &[0x80, 0x9B, 0xA9, 0xFE]), "áç€ŧ");
+        // Mislabelled UTF-8 is recognised.
+        assert_eq!(decode(0, "Grüße.jpg".as_bytes()), "Grüße.jpg");
     }
 
     #[test]

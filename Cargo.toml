@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-2.0-or-later"
 repository = "https://github.com/CasualArclamp/DecDRM"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 num-complex = "0.4.6"

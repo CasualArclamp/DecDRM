@@ -277,14 +277,22 @@ impl FdkDrmDecoder {
         })
     }
 
-    /// Output geometry expected from the configuration alone (AAC only).
+    /// Output geometry expected from the configuration alone, used for silence when FDK
+    /// cannot conceal yet (before the first decoded frame).
     fn nominal_geometry(&self) -> Option<(u32, u16, usize)> {
+        let ch = if self.info.mode == AudioMode::Mono { 1 } else { 2 };
         if self.usac {
-            return None;
+            // FDK knows the core rate and core frame length (and the SBR output rate)
+            // right after configuration.
+            let si = self.raw_stream_info()?;
+            let core = u32::try_from(si.aacSampleRate).ok().filter(|&r| r > 0)?;
+            let core_len = usize::try_from(si.aacSamplesPerFrame).ok().filter(|&n| n > 0)?;
+            let rate = u32::try_from(si.extSamplingRate).ok().filter(|&r| r > 0).unwrap_or(core);
+            let len = core_len * rate as usize / core as usize;
+            return Some((rate, ch, len));
         }
         let core = self.info.sample_rate()?;
         let (rate, len) = if self.info.sbr { (2 * core, 2 * aac::FRAME_LEN) } else { (core, aac::FRAME_LEN) };
-        let ch = if self.info.mode == AudioMode::Mono { 1 } else { 2 };
         Some((rate, ch, len))
     }
 
@@ -569,6 +577,10 @@ pub struct FdkDrmEncoder {
     input: Vec<i16>,
     output: Vec<u8>,
     delay: usize,
+    /// MPEG-4 AudioSpecificConfig of the raw stream (used by the tests to decode FDK's
+    /// original access units for comparison).
+    #[cfg_attr(not(test), allow(dead_code))]
+    asc: Vec<u8>,
 }
 
 // SAFETY: as for the decoder — exclusively owned instance without thread affinity.
@@ -608,6 +620,7 @@ impl FdkDrmEncoder {
             input: vec![0; config.frame_len() * config.input_channels()],
             output: Vec::new(),
             delay: 0,
+            asc: Vec::new(),
             config,
         };
         let c = &enc.config;
@@ -668,6 +681,7 @@ impl FdkDrmEncoder {
         }
         enc.delay = info.nDelay as usize;
         enc.output = vec![0; (info.maxOutBufBytes as usize).max(8192)];
+        enc.asc = info.confBuf[..(info.confSize as usize).min(info.confBuf.len())].to_vec();
         Ok(enc)
     }
 
@@ -692,6 +706,19 @@ impl FdkDrmEncoder {
     /// `input_sample_rate()`, nominal range ±1). Returns `None` while the encoder's delay
     /// line is filling.
     pub fn encode(&mut self, pcm: &[f32]) -> Result<Option<DrmAacFrame>, CodecError> {
+        let n = self.encode_raw(pcm)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let Some(au) = aac::ga::parse_raw_data_block(&self.output[..n], &self.table)? else {
+            return Ok(None);
+        };
+        let drm = aac::drm::repack(&au)?;
+        Ok(Some(DrmAacFrame { crc: drm.crc, core: drm.core, sbr: drm.sbr }))
+    }
+
+    /// Runs FDK on one frame; the raw MPEG-4 access unit is left in `self.output[..n]`.
+    fn encode_raw(&mut self, pcm: &[f32]) -> Result<usize, CodecError> {
         if pcm.len() != self.input.len() {
             return Err(CodecError::InvalidInput(format!(
                 "expected {} samples per frame, got {}",
@@ -741,14 +768,246 @@ impl FdkDrmEncoder {
                 self.input.len()
             )));
         }
-        let n = out_args.numOutBytes.max(0) as usize;
-        if n == 0 {
-            return Ok(None);
+        Ok(out_args.numOutBytes.max(0) as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aac::ga::{Element, parse_raw_data_block};
+    use crate::aac::{ESC_HCB, INTENSITY_HCB, INTENSITY_HCB2, NOISE_HCB};
+
+    /// Plain MPEG-4 raw-transport FDK decoder, used as the reference.
+    struct GaDecoder {
+        h: NonNull<ffi::AAC_DECODER_INSTANCE>,
+        out: Vec<i16>,
+    }
+
+    impl GaDecoder {
+        fn new(asc: &[u8]) -> Self {
+            // SAFETY: plain constructor; checked for NULL.
+            let h = NonNull::new(unsafe { ffi::aacDecoder_Open(ffi::TT_MP4_RAW, 1) }).unwrap();
+            let mut conf = asc.to_vec();
+            let mut p = conf.as_mut_ptr();
+            let len = conf.len() as u32;
+            // SAFETY: pointer/length of the live `conf` buffer.
+            let err = unsafe { ffi::aacDecoder_ConfigRaw(h.as_ptr(), &mut p, &len) };
+            assert_eq!(err, ffi::AAC_DEC_OK, "GA decoder config");
+            Self { h, out: vec![0; OUT_CAPACITY] }
         }
-        let Some(au) = aac::ga::parse_raw_data_block(&self.output[..n], &self.table)? else {
-            return Ok(None);
+
+        fn decode(&mut self, au: &[u8]) -> Vec<f32> {
+            let mut buf = au.to_vec();
+            let mut p = buf.as_mut_ptr();
+            let size = buf.len() as u32;
+            let mut valid = size;
+            // SAFETY: pointer/length of the live `buf`; output buffer of OUT_CAPACITY.
+            unsafe {
+                assert_eq!(ffi::aacDecoder_Fill(self.h.as_ptr(), &mut p, &size, &mut valid), 0);
+                let err = ffi::aacDecoder_DecodeFrame(self.h.as_ptr(), self.out.as_mut_ptr(), OUT_CAPACITY as i32, 0);
+                assert_eq!(err, ffi::AAC_DEC_OK, "GA decode");
+                let si = *ffi::aacDecoder_GetStreamInfo(self.h.as_ptr());
+                let n = (si.frameSize * si.numChannels) as usize;
+                self.out[..n].iter().map(|&s| f32::from(s) / 32768.0).collect()
+            }
+        }
+    }
+
+    impl Drop for GaDecoder {
+        fn drop(&mut self) {
+            // SAFETY: opened in new(), closed once.
+            unsafe { ffi::aacDecoder_Close(self.h.as_ptr()) }
+        }
+    }
+
+    /// A deliberately hostile test signal: loud low tone (large quantised values → escape
+    /// codebook / VCB11), noise (PNS candidates), bursts (short windows, grouping) and
+    /// partially correlated stereo (M/S, intensity).
+    fn rich_signal(frame: usize, len: usize, fs: u32, channels: usize, seed: &mut u32) -> Vec<f32> {
+        let mut out = Vec::with_capacity(len * channels);
+        for j in 0..len {
+            let n = frame * len + j;
+            let t = n as f64 / f64::from(fs);
+            let burst = if frame % 7 == 3 && j > len / 2 {
+                (-((j - len / 2) as f64) / (len as f64 / 16.0)).exp()
+            } else {
+                0.0
+            };
+            for ch in 0..channels {
+                *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = f64::from(*seed >> 8) / f64::from(1u32 << 24) * 2.0 - 1.0;
+                let tone = (2.0 * std::f64::consts::PI * 220.0 * t).sin();
+                let high = (2.0 * std::f64::consts::PI * 3100.0 * t + ch as f64).sin();
+                let gain = if ch == 0 { 1.0 } else { 0.6 };
+                let v = gain * 0.55 * tone + 0.1 * high + 0.04 * noise + 0.8 * burst * noise;
+                out.push(v.clamp(-1.0, 1.0) as f32);
+            }
+        }
+        out
+    }
+
+    #[derive(Default, Debug)]
+    struct Stats {
+        frames: usize,
+        short: usize,
+        escape_bands: usize,
+        noise_bands: usize,
+        intensity_bands: usize,
+        ms: usize,
+    }
+
+    fn collect_stats(stats: &mut Stats, au: &crate::aac::ga::GaAccessUnit) {
+        stats.frames += 1;
+        let (info, list): (_, Vec<&crate::aac::ga::Ics>) = match &au.element {
+            Element::Sce { info, ics } => (info, vec![ics]),
+            Element::Cpe { info, ms_bits, ics } => {
+                if ms_bits.get(0) != 0 || ms_bits.get(1) != 0 {
+                    stats.ms += 1;
+                }
+                (info, ics.iter().collect())
+            }
         };
-        let drm = aac::drm::repack(&au)?;
-        Ok(Some(DrmAacFrame { crc: drm.crc, core: drm.core, sbr: drm.sbr }))
+        if info.is_short() {
+            stats.short += 1;
+        }
+        for ics in list {
+            for cb in ics.sfb_cb.iter().flatten() {
+                match *cb {
+                    ESC_HCB => stats.escape_bands += 1,
+                    NOISE_HCB => stats.noise_bands += 1,
+                    INTENSITY_HCB | INTENSITY_HCB2 => stats.intensity_bands += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Decoding FDK's original MPEG-4 access unit and our DRM access unit must give
+    /// bit-identical PCM: the conversion (VCB11 sections, HCR, element order) is lossless.
+    #[test]
+    fn drm_repacking_is_lossless() {
+        let cases = [
+            (12_000, false, 12_000u32),
+            (12_000, false, 24_000),
+            (24_000, false, 64_000),
+            (12_000, true, 20_000),
+            (24_000, true, 32_000),
+            (24_000, true, 96_000),
+        ];
+        let mut total = Stats::default();
+        for (rate, stereo, bitrate) in cases {
+            let cfg = FdkEncoderConfig { stereo, ..FdkEncoderConfig::new(AacProfile::Lc, rate, bitrate) };
+            let mut enc = FdkDrmEncoder::new(cfg.clone()).unwrap();
+            let mut ga_dec = GaDecoder::new(&enc.asc);
+            let mut drm_dec = FdkDrmDecoder::new(&enc.audio_info()).unwrap();
+            let mut seed = 1u32;
+            let mut stats = Stats::default();
+            for i in 0..150 {
+                let pcm = rich_signal(i, cfg.frame_len(), rate, cfg.input_channels(), &mut seed);
+                let n = enc.encode_raw(&pcm).unwrap();
+                if n == 0 {
+                    continue;
+                }
+                let raw = enc.output[..n].to_vec();
+                let Some(au) = parse_raw_data_block(&raw, &enc.table).unwrap() else { continue };
+                collect_stats(&mut stats, &au);
+                let drm = aac::drm::repack(&au).unwrap();
+                let frame = DrmAacFrame { crc: drm.crc, core: drm.core, sbr: drm.sbr };
+                let reference = ga_dec.decode(&raw);
+                let got = drm_dec.decode(&frame.to_bytes(), Some(frame.crc())).unwrap();
+                assert!(!got.concealed, "{rate} Hz stereo={stereo} {bitrate} bit/s frame {i}: concealed");
+                assert_eq!(got.samples, reference, "{rate} Hz stereo={stereo} {bitrate} bit/s frame {i}");
+            }
+            eprintln!("{rate} Hz stereo={stereo} {bitrate} bit/s: {stats:?}");
+            total.frames += stats.frames;
+            total.short += stats.short;
+            total.escape_bands += stats.escape_bands;
+            total.noise_bands += stats.noise_bands;
+            total.intensity_bands += stats.intensity_bands;
+            total.ms += stats.ms;
+        }
+        // Make sure the interesting code paths were exercised.
+        assert!(total.short > 10, "{total:?}");
+        assert!(total.escape_bands > 100, "{total:?}");
+        assert!(total.ms > 10, "{total:?}");
+    }
+
+    #[test]
+    fn padding_goes_between_core_and_sbr() {
+        let mut core = BitBuf::new();
+        core.push(0b1011, 4);
+        let mut sbr = BitBuf::new();
+        sbr.push(0b110, 3);
+        let f = DrmAacFrame { crc: 0, core, sbr: Some(sbr) };
+        assert_eq!(f.min_len(), 1);
+        // core 1011, gap 0, SBR reversed at the end: 011.
+        assert_eq!(f.to_bytes(), vec![0b1011_0011]);
+        assert_eq!(f.to_bytes_padded(2).unwrap(), vec![0b1011_0000, 0b0000_0011]);
+        assert!(f.to_bytes_padded(0).is_err());
+    }
+
+    /// Music-like test signal: harmonics with vibrato, noise and bursts.
+    fn noisy_music(frame: usize, len: usize, fs: u32, channels: usize, seed: &mut u32) -> Vec<f32> {
+        let mut out = Vec::with_capacity(len * channels);
+        for j in 0..len {
+            let t = (frame * len + j) as f64 / f64::from(fs);
+            let f0 = 196.0 * (1.0 + 0.01 * (2.0 * std::f64::consts::PI * 5.0 * t).sin());
+            let burst = if frame % 11 == 5 && j > len / 3 { 0.5 } else { 0.0 };
+            for ch in 0..channels {
+                *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = f64::from(*seed >> 8) / f64::from(1u32 << 24) * 2.0 - 1.0;
+                let mut v = 0.0;
+                for h in 1..12 {
+                    let ph = 2.0 * std::f64::consts::PI * f0 * h as f64 * t + (ch * h) as f64;
+                    v += 0.25 / h as f64 * ph.sin();
+                }
+                v += (0.05 + burst) * noise;
+                out.push(v.clamp(-1.0, 1.0) as f32);
+            }
+        }
+        out
+    }
+
+    /// FDK's CBR frames sit exactly at the budget (with stuffing). DRM frames drop the
+    /// stuffing and MPEG-4 headers but add VCB11/HCR side info: on average they are
+    /// smaller, individual frames may exceed the budget by a few bytes.
+    #[test]
+    fn drm_frame_sizes_track_the_bit_rate() {
+        for (profile, rate, stereo, bitrate) in [
+            (AacProfile::Lc, 12_000, false, 12_000u32),
+            (AacProfile::Lc, 24_000, true, 48_000),
+            (AacProfile::HeAac, 12_000, false, 16_000),
+            (AacProfile::HeAacV2, 12_000, false, 18_000),
+            (AacProfile::HeAac, 24_000, true, 32_000),
+        ] {
+            let cfg = FdkEncoderConfig { stereo, ..FdkEncoderConfig::new(profile, rate, bitrate) };
+            let mut enc = FdkDrmEncoder::new(cfg.clone()).unwrap();
+            let budget = f64::from(bitrate) * 960.0 / f64::from(rate) / 8.0;
+            let mut seed = 5u32;
+            let (mut ga, mut drm) = (Vec::new(), Vec::new());
+            for i in 0..300 {
+                let pcm = noisy_music(i, cfg.frame_len(), cfg.input_sample_rate(), cfg.input_channels(), &mut seed);
+                let n = enc.encode_raw(&pcm).unwrap();
+                if n == 0 {
+                    continue;
+                }
+                let au = parse_raw_data_block(&enc.output[..n], &enc.table).unwrap().unwrap();
+                let d = aac::drm::repack(&au).unwrap();
+                let f = DrmAacFrame { crc: d.crc, core: d.core, sbr: d.sbr };
+                ga.push(n);
+                drm.push(f.min_len());
+            }
+            let mean = |v: &[usize]| v.iter().sum::<usize>() as f64 / v.len() as f64;
+            let (dm, dx) = (mean(&drm), *drm.iter().max().unwrap());
+            eprintln!(
+                "{profile:?} {rate} Hz stereo={stereo} {bitrate} bit/s: budget {budget:.1} B, \
+                 MPEG-4 mean {:.1} max {}, DRM mean {dm:.1} max {dx}",
+                mean(&ga),
+                ga.iter().max().unwrap()
+            );
+            assert!(dm < budget, "DRM mean {dm:.1} B above budget {budget:.1} B");
+            assert!((dx as f64) < budget * 1.06 + 2.0, "DRM max {dx} B vs budget {budget:.1} B");
+        }
     }
 }

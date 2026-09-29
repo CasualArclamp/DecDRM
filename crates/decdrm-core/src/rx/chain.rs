@@ -42,6 +42,23 @@ pub struct MscFrame {
     pub path_metric: Real,
 }
 
+/// Plot data captured from the symbol chain (cheap to clone on demand).
+#[derive(Debug, Clone, Default)]
+pub struct ChainVisuals {
+    /// Equalised FAC / SDC / MSC cells of the most recent frame / super frame.
+    pub fac: Vec<Cplx>,
+    pub sdc: Vec<Cplx>,
+    pub msc: Vec<Cplx>,
+    /// Carrier index of each entry of `chan`.
+    pub kmin: i32,
+    /// Latest channel estimate per carrier.
+    pub chan: Vec<Cplx>,
+    /// Averaged power delay profile (impulse-response domain, rotated).
+    pub pds: Vec<Real>,
+    /// Per-carrier MSC SNR (carrier index, dB).
+    pub snr_profile: Vec<(i32, Real)>,
+}
+
 pub(super) enum ChainEvent {
     Fac(Fac),
     FacError,
@@ -89,6 +106,8 @@ pub(super) struct SymbolChain {
     msc_iterations: usize,
     tracking: bool,
     timing_tracking: bool,
+    vis: ChainVisuals,
+    vis_msc: Vec<Cplx>,
 }
 
 impl SymbolChain {
@@ -119,6 +138,8 @@ impl SymbolChain {
             msc_iterations: cfg.msc_iterations,
             tracking: false,
             timing_tracking: false,
+            vis: ChainVisuals::default(),
+            vis_msc: Vec::new(),
             map,
         })
     }
@@ -251,8 +272,56 @@ impl SymbolChain {
         track_reset(&mut self.chanest);
 
         let Some(eq) = eq else { return out };
+        self.capture(&eq.cells, eq.symbol, &eq.chan);
         self.demap(&eq.cells, eq.symbol, &mut out.events);
         out
+    }
+
+    /// Keep the latest cells of each channel for constellation plots. Called before
+    /// `demap`, so at symbol 0 the frame index has not advanced yet.
+    fn capture(&mut self, cells: &[EqCell], s: usize, chan: &[Cplx]) {
+        let map = &self.map;
+        let ns = map.symbols_per_frame;
+        if s == 0 {
+            self.vis.fac.clear();
+            if self.vis_msc.len() >= map.msc_cells_per_frame {
+                self.vis.msc = std::mem::take(&mut self.vis_msc);
+            }
+            self.vis_msc.clear();
+        }
+        for &c in map.fac_carriers(s) {
+            self.vis.fac.push(cells[c as usize].sig);
+        }
+        // Frame within the super frame (unknown before the first FAC: assume a frame
+        // without SDC so MSC cells are still plotted).
+        let frame = match self.frame_id {
+            Some(f) if s == 0 => (f + 1) % FRAMES_PER_SUPERFRAME,
+            Some(f) => f,
+            None => 1,
+        };
+        let sf_sym = frame * ns + s;
+        if sf_sym < map.mode().sdc_symbols() {
+            if sf_sym == 0 {
+                self.vis.sdc.clear();
+            }
+            for &c in map.sdc_carriers(sf_sym) {
+                self.vis.sdc.push(cells[c as usize].sig);
+            }
+        }
+        for &c in map.msc_carriers(sf_sym) {
+            self.vis_msc.push(cells[c as usize].sig);
+        }
+        self.vis.kmin = map.kmin;
+        self.vis.chan.clear();
+        self.vis.chan.extend_from_slice(chan);
+    }
+
+    /// Snapshot of the plot data.
+    pub fn visuals(&self) -> ChainVisuals {
+        let mut v = self.vis.clone();
+        v.pds = self.chanest.power_delay_profile().to_vec();
+        v.snr_profile = self.chanest.snr_profile();
+        v
     }
 
     fn demap(&mut self, cells: &[EqCell], s: usize, events: &mut Vec<ChainEvent>) {

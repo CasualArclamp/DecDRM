@@ -16,8 +16,7 @@ pub(crate) mod huffman;
 use crate::CodecError;
 use crate::bits::{BitBuf, BitReader};
 
-/// `window_sequence` values.
-pub(crate) const ONLY_LONG_SEQUENCE: u8 = 0;
+/// `window_sequence` of short blocks.
 pub(crate) const EIGHT_SHORT_SEQUENCE: u8 = 2;
 
 /// Special codebooks.
@@ -293,7 +292,7 @@ pub(crate) fn codeword_bits(cb: u8, v: &[i32]) -> Result<(u64, u32), CodecError>
         for &x in v.iter().take(2) {
             let a = x.unsigned_abs();
             if a >= 16 {
-                let n = 31 - a.leading_zeros(); // floor(log2(a)) >= 4
+                let n = a.ilog2(); // >= 4
                 // (n - 4) ones and a zero, then the n low bits of a.
                 let prefix = (1u64 << (n - 3)) - 2;
                 bits = (bits << (n - 3)) | prefix;

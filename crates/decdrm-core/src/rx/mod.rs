@@ -22,7 +22,7 @@ pub mod ofdm;
 pub mod timesync;
 mod chain;
 
-pub use chain::{MscConfig, MscFrame, SdcBlock};
+pub use chain::{ChainVisuals, MscConfig, MscFrame, SdcBlock};
 pub use input::{InputFormat, RealChannel};
 
 use crate::dsp::resampler::FracResampler;
@@ -128,6 +128,64 @@ pub enum ReceiverEvent {
     Restarted,
 }
 
+/// Snapshot of the receiver's plot data (see [`Receiver::visuals`]).
+#[derive(Debug, Clone, Default)]
+pub struct Visuals {
+    pub chain: ChainVisuals,
+    /// Averaged input power spectrum in dB, bins from −fs/2 to +fs/2 (for real input
+    /// only the upper half carries information).
+    pub spectrum_db: Vec<Real>,
+    pub spectrum_centre_hz: Real,
+    pub spectrum_span_hz: Real,
+    pub real_input: bool,
+}
+
+/// Averaged power spectrum of the (analytic / I/Q) input for display.
+#[derive(Debug)]
+struct InputSpectrum {
+    fft: crate::dsp::fft::Fft,
+    window: Vec<Real>,
+    buf: Vec<Cplx>,
+    avg: Vec<Real>,
+    count: u64,
+}
+
+impl InputSpectrum {
+    const LEN: usize = 2048;
+
+    fn new() -> Self {
+        Self {
+            fft: crate::dsp::fft::Fft::new(Self::LEN),
+            window: crate::dsp::hamming(Self::LEN),
+            buf: Vec::with_capacity(Self::LEN),
+            avg: vec![0.0; Self::LEN],
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, samples: &[Cplx]) {
+        for &s in samples {
+            self.buf.push(s);
+            if self.buf.len() == Self::LEN {
+                let mut work: Vec<Cplx> = self.buf.iter().zip(&self.window).map(|(s, w)| s * *w).collect();
+                self.fft.forward(&mut work);
+                let lambda = if self.count < 8 { 0.5 } else { 0.9 };
+                let half = Self::LEN / 2;
+                for (j, a) in self.avg.iter_mut().enumerate() {
+                    let p = work[(j + half) % Self::LEN].norm_sqr() / (Self::LEN * Self::LEN) as Real;
+                    *a = lambda * *a + (1.0 - lambda) * p;
+                }
+                self.count += 1;
+                self.buf.clear();
+            }
+        }
+    }
+
+    fn db(&self) -> Vec<Real> {
+        self.avg.iter().map(|p| 10.0 * p.max(1e-20).log10()).collect()
+    }
+}
+
 pub struct Receiver {
     cfg: ReceiverConfig,
     input: InputConverter,
@@ -152,6 +210,7 @@ pub struct Receiver {
     delayed_cnt: usize,
     delayed_done: bool,
     msc_config: Option<chain::MscConfig>,
+    spectrum: InputSpectrum,
     status: RxStatus,
     events: Vec<ReceiverEvent>,
 }
@@ -184,6 +243,7 @@ impl Receiver {
             delayed_cnt: DELAYED_TRACKING_FACS,
             delayed_done: false,
             msc_config: None,
+            spectrum: InputSpectrum::new(),
             status: RxStatus::default(),
             events: Vec::new(),
             cfg,
@@ -204,6 +264,18 @@ impl Receiver {
         self.msc_config = cfg;
         if let Some(chain) = self.chain.as_mut() {
             chain.set_msc_config(cfg, self.cfg.metric);
+        }
+    }
+
+    /// Plot data: constellations, channel, impulse response, per-carrier SNR and
+    /// the input spectrum. Cheap enough to call ~10 times per second.
+    pub fn visuals(&self) -> Visuals {
+        Visuals {
+            chain: self.chain.as_ref().map(|c| c.visuals()).unwrap_or_default(),
+            spectrum_db: self.spectrum.db(),
+            spectrum_centre_hz: 0.0,
+            spectrum_span_hz: Real::from(SAMPLE_RATE),
+            real_input: self.input.is_real(),
         }
     }
 
@@ -257,6 +329,7 @@ impl Receiver {
     fn push_chunk(&mut self, chunk: &[f32]) {
         self.conv.clear();
         self.input.process(chunk, &mut self.conv);
+        self.spectrum.push(&self.conv);
         self.res.clear();
         let fs = Real::from(SAMPLE_RATE);
         let sro = self.sro_hz.clamp(-MAX_SRO_HZ, MAX_SRO_HZ);

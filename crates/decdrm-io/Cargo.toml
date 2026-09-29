@@ -13,8 +13,10 @@ symphonia = { version = "0.6.1", default-features = false, features = ["wav", "f
 # Asynchronous (adjustable-ratio) sinc resampler.
 rubato = "5.0.0"
 # Sound cards: WASAPI on Windows, ALSA on Linux (no optional hosts, so only libasound2-dev is
-# needed to build on Linux).
-cpal = "0.18.2"
+# needed to build on Linux). "realtime" promotes the audio callback threads to real-time
+# (MMCSS) priority on Windows so a busy CPU cannot starve them; on Linux it is a no-op unless
+# "realtime-dbus" (which needs libdbus-1-dev) is enabled.
+cpal = { version = "0.18.2", features = ["realtime"] }
 # WAV writing.
 hound = "3.5.1"
 # FLAC encoding; the default "par"/"serde"/"log" features are not needed.

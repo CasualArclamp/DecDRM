@@ -93,7 +93,7 @@ fn slideshow_round_trip_with_model() {
     let events = run(&mut tx, &mut rx, 120, 800, 0.0, &mut rng);
     let mut show = SlideShow::new(8);
     let mut received: HashMap<String, usize> = HashMap::new();
-    for ev in events {
+    for ev in &events {
         if let DataEvent::SlideShowImage {
             transport_id,
             name,
@@ -104,10 +104,10 @@ fn slideshow_round_trip_with_model() {
         {
             let original = &images
                 .iter()
-                .find(|(n, _)| *n == name)
+                .find(|(n, _)| n == name)
                 .expect("known name")
                 .1;
-            assert_eq!(&data, original, "{name}");
+            assert_eq!(data, original, "{name}");
             assert_eq!(
                 mime,
                 if name.ends_with(".png") {
@@ -116,8 +116,12 @@ fn slideshow_round_trip_with_model() {
                     "image/jpeg"
                 }
             );
-            *received.entry(name).or_default() += 1;
-            show.push(Slide::from_mot(transport_id, header, data), None);
+            *received.entry(name.clone()).or_default() += 1;
+            assert_eq!(
+                Slide::from_mot(*transport_id, header.clone(), data.clone()).name,
+                *name
+            );
+            assert!(show.apply(ev, None));
         }
     }
     // 120 frames x 800 bytes carry the ~18 kB cycle several times.

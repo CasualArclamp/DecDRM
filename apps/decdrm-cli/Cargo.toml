@@ -7,8 +7,12 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[dependencies]
-
 [[bin]]
 name = "decdrm"
 path = "src/main.rs"
+
+[dependencies]
+decdrm-engine = { path = "../../crates/decdrm-engine" }
+decdrm-io = { path = "../../crates/decdrm-io" }
+clap = { version = "4.6", features = ["derive"] }
+anyhow.workspace = true

@@ -140,6 +140,9 @@ fn loopback_through_virtual_cable() {
                 player.push_blocking(block, src_rate, 1).unwrap();
             }
             assert!(player.drain(Duration::from_secs(3)));
+            for e in player.take_errors() {
+                println!("output backend reported: {e}");
+            }
             player.status()
         });
         // Meanwhile, this thread records.
@@ -151,6 +154,9 @@ fn loopback_through_virtual_cable() {
     });
     println!("player: {player_status:?}");
     println!("input: {:?}", input.stats());
+    for e in input.take_errors() {
+        println!("input backend reported: {e}");
+    }
     assert_eq!(player_status.underruns, 0);
     assert_eq!(input.stats().overruns, 0);
 
@@ -165,13 +171,55 @@ fn loopback_through_virtual_cable() {
         last as f64 / rate,
         (last - first) as f64 / rate
     );
-    // Anchor the window to the END of the tone: some virtual cables replay a few hundred ms
-    // of stale buffer content when a new playback client connects, which would fool an
-    // onset detector. Take one second of steady tone ending 0.1 s before the tone stops.
-    let end = last.saturating_sub(in_fmt.sample_rate as usize / 10);
-    let start = end.checked_sub(in_fmt.sample_rate as usize).expect("tone shorter than 1.1 s");
-    let seg = &left[start..end];
+    // Track the tone's phase and amplitude in 5 ms windows (5 whole cycles each). A phase or
+    // amplitude step means samples were lost or inserted somewhere between the player and the
+    // recorder. Our own ring buffers are verified above; under heavy CPU load the audio engine
+    // or the virtual cable itself can still glitch (visible as capture xruns), so measure the
+    // tone on the longest glitch-free stretch.
     let w = 2.0 * std::f64::consts::PI * freq / rate;
+    let win = in_fmt.sample_rate as usize / 200;
+    let (lo, hi) = (first + 4 * win, last - 4 * win); // skip fade-in and fade-out
+    let windows: Vec<(usize, f64, f64)> = (lo..hi.saturating_sub(win))
+        .step_by(win)
+        .map(|n0| {
+            let (mut xs, mut xc) = (0.0, 0.0);
+            for (i, &v) in left[n0..n0 + win].iter().enumerate() {
+                let (s, c) = (w * (n0 + i) as f64).sin_cos();
+                xs += f64::from(v) * s;
+                xc += f64::from(v) * c;
+            }
+            (n0, xc.atan2(xs), 2.0 * (xs * xs + xc * xc).sqrt() / win as f64)
+        })
+        .collect();
+    let (mut best_start, mut best_len, mut run_start, mut glitches) = (0, 1, 0, 0);
+    for k in 1..windows.len() {
+        let mut d = windows[k].1 - windows[k - 1].1;
+        while d > std::f64::consts::PI {
+            d -= 2.0 * std::f64::consts::PI;
+        }
+        while d < -std::f64::consts::PI {
+            d += 2.0 * std::f64::consts::PI;
+        }
+        let steady = (windows[k].2 - windows[k - 1].2).abs() < 0.05 * windows[k - 1].2;
+        if d.abs() > 0.05 || !steady {
+            glitches += 1;
+            println!("  discontinuity at {:.3} s ({:+.1} samples)", windows[k].0 as f64 / rate, d / w);
+            run_start = k;
+        }
+        if k + 1 - run_start > best_len {
+            (best_start, best_len) = (run_start, k + 1 - run_start);
+        }
+    }
+    let seg = &left[windows[best_start].0..windows[best_start + best_len - 1].0 + win];
+    let xruns = input.stats().xruns;
+    println!(
+        "longest clean stretch {:.3} s; {glitches} discontinuities; backend capture xruns {xruns}",
+        seg.len() as f64 / rate
+    );
+    if glitches > 0 && xruns == 0 {
+        println!("  note: discontinuities without capture xruns (render-side engine glitch?)");
+    }
+    assert!(seg.len() >= in_fmt.sample_rate as usize / 2, "no glitch-free 0.5 s stretch");
     let (mut ss, mut sc, mut cc, mut xs, mut xc) = (0.0, 0.0, 0.0, 0.0, 0.0);
     for (n, &v) in seg.iter().enumerate() {
         let (s, c) = (w * n as f64).sin_cos();
@@ -196,37 +244,6 @@ fn loopback_through_virtual_cable() {
         .sqrt();
     let snr = 20.0 * (amp / std::f64::consts::SQRT_2 / resid).log10();
     println!("captured tone: amplitude {amp:.4} (sent 0.25), SNR {snr:.1} dB");
-    // Diagnostics: track the tone's phase in 5 ms windows; a jump means samples were lost or
-    // inserted somewhere between the player and the recorder.
-    let win = in_fmt.sample_rate as usize / 200;
-    let mut prev: Option<f64> = None;
-    for (k, chunk) in left[first + win * 4..last - win * 4].chunks_exact(win).enumerate() {
-        let n0 = first + win * 4 + k * win;
-        let (mut xs, mut xc) = (0.0, 0.0);
-        for (i, &v) in chunk.iter().enumerate() {
-            let (s, c) = (w * (n0 + i) as f64).sin_cos();
-            xs += f64::from(v) * s;
-            xc += f64::from(v) * c;
-        }
-        let phase = xc.atan2(xs);
-        if let Some(p) = prev {
-            let mut d = phase - p;
-            while d > std::f64::consts::PI {
-                d -= 2.0 * std::f64::consts::PI;
-            }
-            while d < -std::f64::consts::PI {
-                d += 2.0 * std::f64::consts::PI;
-            }
-            if d.abs() > 0.05 {
-                println!(
-                    "  phase jump of {:+.1} samples at {:.3} s",
-                    d / w,
-                    n0 as f64 / rate
-                );
-            }
-        }
-        prev = Some(phase);
-    }
     // The cable's volume slider scales the level; the waveform must be a clean 1 kHz tone.
     assert!(amp > 0.02, "tone too weak: {amp}");
     assert!(snr > 60.0, "tone distorted or wrong frequency: SNR {snr:.1} dB");

@@ -68,9 +68,13 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
 
 ## Milestones
 
-- [ ] **M0 Setup** — workspace, references, design doc, git + private GitHub.
+- [x] **M0 Setup** — workspace, references, design doc, git + private GitHub.
 - [ ] **M1 RX spine** — file input → sync → OFDM → channel estimation → FAC/SDC/MSC →
       AAC audio (FDK) → WAV + playback, via CLI, on the mode A/B 10 kHz samples.
+      *Status:* PHY/FEC done — FAC/SDC decode on 21/22 recordings (modes A/B/C, 9–20 kHz,
+      real and I/Q, flipped spectrum, 1250 ppm clock offset; the 22nd is AM/AMSS, out of
+      scope); MSC multiplex frames decode (MER ≈ 21 dB on DW). Remaining: SDC parsing,
+      demux, audio super frames, FDK decode, CLI.
 - [ ] **M2 RX completeness** — all modes A–D and occupancies 0–5, HMsym/HMmix, long
       interleaving, flipped spectrum, I/Q inputs, offsets; Wiener channel estimation,
       iterative MLC, SRO tracking; minimal modulator + channel simulator for modes/SOs we

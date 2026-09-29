@@ -14,6 +14,7 @@
 //! The feeder follows Dream's `CMOTSlideShowEncoder`: header mode, a fresh transport id
 //! for each transmission, ContentName and TriggerTime = Now on every slide.
 
+use crate::decoder::DataEvent;
 use crate::encoder::DataUnitSource;
 use crate::error::{DataError, Result};
 use crate::mot::{MotEncoder, MotHeader, MotObject, content_type};
@@ -101,6 +102,23 @@ impl SlideShow {
             pending: Vec::new(),
             capacity: capacity.max(1),
             selected: None,
+        }
+    }
+
+    /// Feed a decoder event; [`DataEvent::SlideShowImage`] events are added with
+    /// [`Self::push`], others are ignored. Returns `true` if the displayed slide changed.
+    pub fn apply(&mut self, event: &DataEvent, now_unix: Option<i64>) -> bool {
+        match event {
+            DataEvent::SlideShowImage {
+                transport_id,
+                data,
+                header,
+                ..
+            } => self.push(
+                Slide::from_mot(*transport_id, header.clone(), data.clone()),
+                now_unix,
+            ),
+            _ => false,
         }
     }
 
