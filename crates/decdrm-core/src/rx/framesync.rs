@@ -14,6 +14,10 @@ const TICONST_FREQ_OFF_EST: Real = 1.0;
 const TICONST_SRO_EST: Real = 0.5;
 /// Symbols to average before the pilot-slope SRO estimate is reported.
 const SRO_EST_MIN_SYMBOLS: usize = 40;
+/// While tracking, the time-pilot correlation keeps running as a monitor; this many
+/// successive frames placing the time reference elsewhere mean the alignment is lost
+/// (e.g. the input lost or gained whole symbols).
+const MONITOR_MISMATCHES: usize = 2;
 
 /// Frame-sync status for the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,6 +45,9 @@ pub struct FrameSyncOutput {
     /// Sample-rate offset estimated from the pilot phase slope (fraction, positive
     /// when the received spectrum is stretched), once enough symbols are averaged.
     pub sro_estimate: Option<Real>,
+    /// While tracking: the time reference pilots were found at another symbol in
+    /// successive frames — the frame alignment is lost.
+    pub alignment_lost: bool,
 }
 
 #[derive(Debug)]
@@ -58,6 +65,8 @@ pub struct FrameSync {
     bad_frame_sync: bool,
     frame_sync_ok: bool,
     sym_counter: usize,
+    /// Tracking monitor: successive frames with the time reference at another symbol.
+    mismatches: usize,
     pub state: FrameSyncState,
     // Frequency tracking.
     pub track_freq: bool,
@@ -114,6 +123,7 @@ impl FrameSync {
             bad_frame_sync: true,
             frame_sync_ok: false,
             sym_counter: 0,
+            mismatches: 0,
             state: FrameSyncState::Searching,
             track_freq: false,
             freq_pil,
@@ -131,13 +141,29 @@ impl FrameSync {
     /// Process one demodulated symbol. `shift` is its timing shift.
     pub fn process(&mut self, cells: &[Cplx], shift: i64) -> FrameSyncOutput {
         let mut id_changed = false;
-        if self.acquisition {
-            let mut corr = 0.0;
-            for &(i1, p1, i2, p2) in &self.pairs {
-                corr += (cells[i1] * p1.conj() * cells[i2].conj() * p2 * self.r_hh).re;
+        let mut alignment_lost = false;
+        // The time-pilot correlation runs all the time: for acquisition and, while
+        // tracking, as a monitor of the frame alignment.
+        let mut corr = 0.0;
+        for &(i1, p1, i2, p2) in &self.pairs {
+            corr += (cells[i1] * p1.conj() * cells[i2].conj() * p2 * self.r_hh).re;
+        }
+        self.corr_hist.pop_front();
+        self.corr_hist.push_back(corr);
+        if !self.acquisition {
+            let (imax, _) = self.corr_hist.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).expect("non-empty");
+            let middle = self.ns / 2;
+            if imax == middle {
+                // The time reference symbol is in the middle of the history window.
+                if self.sym_counter == self.ns - middle - 1 {
+                    self.mismatches = 0;
+                } else {
+                    self.mismatches += 1;
+                    alignment_lost = self.mismatches >= MONITOR_MISMATCHES;
+                }
             }
-            self.corr_hist.pop_front();
-            self.corr_hist.push_back(corr);
+        }
+        if self.acquisition {
             if self.init_cnt > 0 {
                 self.init_cnt -= 1;
             } else {
@@ -227,7 +253,7 @@ impl FrameSync {
             self.have_old = true;
         }
 
-        FrameSyncOutput { symbol, id_changed, ready: !self.init_frame_sync, freq_delta_hz, sro_estimate }
+        FrameSyncOutput { symbol, id_changed, ready: !self.init_frame_sync, freq_delta_hz, sro_estimate, alignment_lost }
     }
 
     /// Adopt a new carrier layout (spectrum occupancy change) while keeping the

@@ -55,6 +55,13 @@ pub struct SymbolWindow {
     /// Timing change relative to the previous window's grid, in samples (positive:
     /// this window starts later than one symbol after the previous one).
     pub shift: i64,
+    /// Normalised correlation (0..=1) between the guard interval before the window and
+    /// the end of the window, i.e. of the cyclic prefix: high while the timing is
+    /// right, near zero after a timing jump (e.g. samples lost by the input). `None`
+    /// when the guard samples are no longer buffered.
+    pub guard_corr: Option<Real>,
+    /// Mean power of the window samples.
+    pub power: Real,
 }
 
 /// What the time-sync stage learned from the most recent input.
@@ -500,6 +507,8 @@ impl TimeSync {
             return None;
         }
         let samples = self.buf[rel..rel + self.fft_len].to_vec();
+        let guard_corr = self.guard_correlation(rel);
+        let power = samples.iter().map(|s| s.norm_sqr()).sum::<Real>() / samples.len().max(1) as Real;
         let shift = match self.last_start {
             Some(l) => start - (l + self.sym_len as i64),
             None => 0,
@@ -513,7 +522,33 @@ impl TimeSync {
             self.buf.drain(..d);
             self.buf_base += d as i64;
         }
-        Some(SymbolWindow { samples, start, shift })
+        Some(SymbolWindow { samples, start, shift, guard_corr, power })
+    }
+
+    /// Best normalised cyclic-prefix correlation for the window at buffer index `rel`,
+    /// over guard placements within ±G/2 of the window start (the timing loop may park
+    /// the window anywhere in the guard, so the exact position is not a reference).
+    fn guard_correlation(&self, rel: usize) -> Option<Real> {
+        let g = self.sym_len - self.fft_len;
+        let mut best: Option<Real> = None;
+        for step in -4isize..=4 {
+            let d = step * g as isize / 8;
+            let first = rel as isize - g as isize + d;
+            let last = rel as isize + self.fft_len as isize + d; // exclusive end of the copy
+            if first < 0 || last as usize > self.buf.len() {
+                continue;
+            }
+            let first = first as usize;
+            let (mut c, mut p) = (Cplx::new(0.0, 0.0), 0.0);
+            for i in 0..g {
+                let (a, b) = (self.buf[first + i], self.buf[first + self.fft_len + i]);
+                c += a * b.conj();
+                p += a.norm_sqr() + b.norm_sqr();
+            }
+            let rho = if p > 0.0 { 2.0 * c.norm() / p } else { 0.0 };
+            best = Some(best.map_or(rho, |b: Real| b.max(rho)));
+        }
+        best
     }
 
     /// Drop buffered samples when no timing exists yet (bounded memory).

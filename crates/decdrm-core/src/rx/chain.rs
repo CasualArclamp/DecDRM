@@ -79,6 +79,8 @@ pub(super) struct ChainOutput {
     pub sro_delta_hz: Real,
     /// Coarse SRO estimate from the pilot phase slope (fraction).
     pub sro_estimate: Option<Real>,
+    /// The frame alignment was lost while tracking (see `FrameSyncOutput`).
+    pub alignment_lost: bool,
     pub events: Vec<ChainEvent>,
 }
 
@@ -275,11 +277,19 @@ impl SymbolChain {
 
     pub fn process(&mut self, win: &SymbolWindow) -> ChainOutput {
         let mut out =
-            ChainOutput { freq_delta_hz: 0.0, timing_adjust: 0, sro_delta_hz: 0.0, sro_estimate: None, events: Vec::new() };
+            ChainOutput {
+            freq_delta_hz: 0.0,
+            timing_adjust: 0,
+            sro_delta_hz: 0.0,
+            sro_estimate: None,
+            alignment_lost: false,
+            events: Vec::new(),
+        };
         let mut cells = std::mem::take(&mut self.cells);
         self.ofdm.demodulate(&win.samples, &mut cells);
         let fs = self.frame.process(&cells, win.shift);
         out.sro_estimate = fs.sro_estimate;
+        out.alignment_lost = fs.alignment_lost;
         // Track frequency from the start: the pilots are there in every symbol.
         if !self.frame.track_freq {
             self.frame.track_freq = true;

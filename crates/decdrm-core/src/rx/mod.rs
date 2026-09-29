@@ -41,6 +41,19 @@ use timesync::{TimeSync, TimeSyncEvent};
 const MAX_SYMBOLS_WITHOUT_FAC: usize = 150;
 /// Consecutive bad FACs (while locked) before restarting acquisition.
 const MAX_BAD_FACS_LOCKED: usize = 10;
+/// Timing-loss detection from the cyclic-prefix correlation (a timing jump, e.g.
+/// samples lost or inserted by a network stream, makes it collapse while the input
+/// power stays; a fade lowers both). Averaging lengths in symbols:
+const CP_FAST_SYMBOLS: Real = 4.0;
+const CP_SLOW_SYMBOLS: Real = 60.0;
+/// The correlation counts as collapsed below this fraction of its reference ...
+const CP_LOSS_RATIO: Real = 0.35;
+/// ... while the power stays above this fraction of its reference ...
+const CP_POWER_RATIO: Real = 0.5;
+/// ... for this many symbols; with 2 bad FACs in a row the receiver then restarts at
+/// once instead of after `MAX_BAD_FACS_LOCKED`.
+const CP_LOSS_SYMBOLS: usize = 8;
+const CP_LOSS_BAD_FACS: usize = 2;
 /// Good FACs before switching timing to impulse-response tracking.
 const DELAYED_TRACKING_FACS: usize = 2;
 /// Limit of the sample-rate offset correction, Hz.
@@ -137,6 +150,10 @@ pub enum ReceiverEvent {
     Msc(MscFrame),
     /// Synchronisation was lost; acquisition restarted.
     Restarted,
+    /// The symbol timing jumped (e.g. samples lost or inserted by a network stream);
+    /// timing and frame sync are re-acquired, keeping the frequency, robustness mode,
+    /// sample-rate correction and MSC configuration.
+    Resynchronising,
 }
 
 /// Snapshot of the receiver's plot data (see [`Receiver::visuals`]).
@@ -225,6 +242,9 @@ pub struct Receiver {
     good_facs: usize,
     delayed_cnt: usize,
     delayed_done: bool,
+    /// Timing health: fast/slow averages of the cyclic-prefix correlation and of the
+    /// window power, reference samples, symbols with a collapsed correlation.
+    cp: TimingHealth,
     /// Pilot-slope SRO acquisition: estimates seen, and the previous block's.
     sro_reports: usize,
     sro_prev: Option<Real>,
@@ -261,6 +281,7 @@ impl Receiver {
             good_facs: 0,
             delayed_cnt: DELAYED_TRACKING_FACS,
             delayed_done: false,
+            cp: TimingHealth::default(),
             sro_reports: 0,
             sro_prev: None,
             msc_config: None,
@@ -332,6 +353,7 @@ impl Receiver {
         self.good_facs = 0;
         self.delayed_cnt = DELAYED_TRACKING_FACS;
         self.delayed_done = false;
+        self.cp = TimingHealth::default();
         let (ok, bad, sok, sbad) = (self.status.fac_ok, self.status.fac_bad, self.status.sdc_ok, self.status.sdc_bad);
         self.status = RxStatus { fac_ok: ok, fac_bad: bad, sdc_ok: sok, sdc_bad: sbad, sro_hz: self.sro_hz, ..Default::default() };
     }
@@ -448,8 +470,18 @@ impl Receiver {
                 c.set_msc_config(self.msc_config, self.cfg.metric);
             }
         }
+        if let Some(rho) = win.guard_corr {
+            self.cp.update(rho, win.power, self.state == RxState::Locked && self.bad_facs == 0);
+        }
         let Some(chain) = self.chain.as_mut() else { return };
         let out = chain.process(&win);
+        // The time-pilot monitor alone misfires on harsh channels (mode D on channels
+        // 5/6); a good FAC CRC proves the alignment, so a failed one must confirm it.
+        if out.alignment_lost && self.state == RxState::Locked && self.bad_facs >= 1 {
+            self.resync();
+            self.events.push(ReceiverEvent::Resynchronising);
+            return;
+        }
         self.track_hz += out.freq_delta_hz;
         if self.delayed_done && out.timing_adjust != 0 {
             self.timesync.adjust(out.timing_adjust);
@@ -567,9 +599,73 @@ impl Receiver {
     fn on_bad_fac(&mut self) {
         self.good_facs = 0;
         self.bad_facs += 1;
-        if self.state == RxState::Locked && self.bad_facs > MAX_BAD_FACS_LOCKED {
+        if self.state != RxState::Locked {
+            return;
+        }
+        if self.bad_facs >= CP_LOSS_BAD_FACS && self.cp.lost_symbols >= CP_LOSS_SYMBOLS {
+            self.resync();
+            self.events.push(ReceiverEvent::Resynchronising);
+        } else if self.bad_facs > MAX_BAD_FACS_LOCKED {
             self.restart();
             self.events.push(ReceiverEvent::Restarted);
         }
+    }
+
+    /// Re-acquire symbol timing and frame sync after a timing jump, keeping the
+    /// frequency, robustness mode, sample-rate correction and MSC configuration (a full
+    /// restart would also repeat the frequency search and mode detection, and the
+    /// session would wait for the next SDC). Without a FAC within
+    /// `MAX_SYMBOLS_WITHOUT_FAC` symbols the receiver still restarts fully.
+    fn resync(&mut self) {
+        self.timesync.configure(self.mode);
+        self.chain = None;
+        self.state = RxState::Acquisition;
+        self.symbols_without_fac = 0;
+        self.bad_facs = 0;
+        self.good_facs = 0;
+        self.delayed_cnt = DELAYED_TRACKING_FACS;
+        self.delayed_done = false;
+        self.cp = TimingHealth::default();
+        self.status.state = RxState::Acquisition;
+    }
+}
+
+/// Cyclic-prefix correlation and window power, averaged fast and slow (the slow
+/// reference only while reception is good), for detecting timing jumps.
+#[derive(Debug, Clone, Default)]
+struct TimingHealth {
+    fast: Real,
+    slow: Real,
+    power_fast: Real,
+    power_slow: Real,
+    ref_symbols: usize,
+    /// Consecutive symbols with a collapsed correlation at normal power.
+    lost_symbols: usize,
+}
+
+impl TimingHealth {
+    fn update(&mut self, rho: Real, power: Real, good: bool) {
+        let (af, as_) = (1.0 / CP_FAST_SYMBOLS, 1.0 / CP_SLOW_SYMBOLS);
+        if self.ref_symbols == 0 && self.fast == 0.0 {
+            self.fast = rho;
+            self.power_fast = power;
+        }
+        self.fast += af * (rho - self.fast);
+        self.power_fast += af * (power - self.power_fast);
+        // The reference only learns while the correlation is healthy (a collapse must
+        // not drag it down).
+        if good && (self.ref_symbols == 0 || self.fast > 0.7 * self.slow) {
+            if self.ref_symbols == 0 {
+                self.slow = rho;
+                self.power_slow = power;
+            }
+            self.slow += as_ * (rho - self.slow);
+            self.power_slow += as_ * (power - self.power_slow);
+            self.ref_symbols += 1;
+        }
+        let lost = self.ref_symbols >= CP_SLOW_SYMBOLS as usize
+            && self.fast < CP_LOSS_RATIO * self.slow
+            && self.power_fast > CP_POWER_RATIO * self.power_slow;
+        self.lost_symbols = if lost { self.lost_symbols + 1 } else { 0 };
     }
 }

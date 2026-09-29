@@ -177,6 +177,10 @@ impl Session {
                     out.push(SessionEvent::Log(format!("{t:7.2}s synchronisation lost, restarting")));
                     out.push(SessionEvent::ServicesChanged);
                 }
+                // The multiplex is unchanged: keep the services and pipelines.
+                ReceiverEvent::Resynchronising => {
+                    out.push(SessionEvent::Log(format!("{t:7.2}s timing jump, resynchronising")));
+                }
                 ReceiverEvent::Fac(fac) => {
                     self.log_channel_change(&fac, t, &mut out);
                     let changes = self.ens.update_fac(&fac);
