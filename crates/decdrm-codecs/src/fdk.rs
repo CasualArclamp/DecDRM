@@ -523,8 +523,12 @@ pub struct FdkEncoderConfig {
     /// adds VCB11/HCR side information: measured on music-like signals, DRM frames are on
     /// average 4–10 % *smaller* than that budget, but single frames can exceed it by up to
     /// ~3 % (a few bytes). A super-frame packer must therefore check the real sizes
-    /// ([`DrmAacFrame::min_len`]); the sum over the 5 or 10 frames of a super frame stays
-    /// well below the budget in practice.
+    /// ([`DrmAacFrame::min_len`]). The sum over the 5 or 10 frames of a super frame
+    /// usually stays below the budget, but not always: measured worst cases reach
+    /// 1.03–1.10 × the budget for stereo AAC-LC at low rates (`decdrm-station`'s
+    /// `fdk_fill` test), so leave headroom. FDK also silently changes rates outside
+    /// the range it supports for a configuration; see
+    /// [`FdkDrmEncoder::effective_bitrate`].
     pub bitrate: u32,
     /// Frames between SBR headers (`None`: every frame, the most robust choice for a
     /// broadcast that listeners join at arbitrary times).
@@ -791,6 +795,14 @@ impl FdkDrmEncoder {
         enc.output = vec![0; (info.maxOutBufBytes as usize).max(8192)];
         enc.asc = info.confBuf[..(info.confSize as usize).min(info.confBuf.len())].to_vec();
         Ok(enc)
+    }
+
+    /// The bit rate FDK actually encodes at. It differs from the configured one when
+    /// that is outside what FDK supports for the profile, rate and channels (FDK
+    /// adjusts it without reporting an error).
+    pub fn effective_bitrate(&self) -> u32 {
+        // SAFETY: the handle is valid for the lifetime of `self`; GetParam only reads.
+        unsafe { ffi::aacEncoder_GetParam(self.handle.as_ptr(), ffi::AACENC_BITRATE) }
     }
 
     /// The configuration.

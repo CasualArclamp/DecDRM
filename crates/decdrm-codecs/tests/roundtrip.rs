@@ -380,3 +380,15 @@ fn aac_high_bitrates_repack() {
         );
     }
 }
+
+#[test]
+fn effective_bitrate_reports_fdk_adjustments() {
+    // A normal rate is kept.
+    let enc = FdkDrmEncoder::new(FdkEncoderConfig::new(AacProfile::Lc, 12_000, 16_000)).unwrap();
+    assert_eq!(enc.effective_bitrate(), 16_000);
+    // Far below FDK's minimum for stereo HE-AAC: FDK raises it silently.
+    let mut cfg = FdkEncoderConfig::new(AacProfile::HeAac, 12_000, 4_000);
+    cfg.stereo = true;
+    let enc = FdkDrmEncoder::new(cfg).unwrap();
+    assert!(enc.effective_bitrate() > 4_000, "effective {}", enc.effective_bitrate());
+}

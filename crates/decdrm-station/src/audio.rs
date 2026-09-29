@@ -316,8 +316,20 @@ impl AacEncoder {
             ..FdkEncoderConfig::new(profile, plan.core_rate, plan.encoder_bitrate)
         };
         let granule = cfg.frame_len() * cfg.input_channels();
+        let fdk = FdkDrmEncoder::new(cfg)?;
+        // FDK silently raises rates below its minimum for the configuration; the
+        // frames would then overflow the stream. (Validation normally prevents this
+        // with its measured minimum payloads.)
+        let effective = fdk.effective_bitrate();
+        if f64::from(effective) > 1.02 * f64::from(plan.encoder_bitrate) {
+            return Err(decdrm_codecs::CodecError::InvalidConfig(format!(
+                "FDK encodes this configuration at no less than {:.1} kbit/s, the stream allows {:.1} kbit/s",
+                f64::from(effective) / 1000.0,
+                f64::from(plan.encoder_bitrate) / 1000.0
+            )));
+        }
         let mut enc = Self {
-            enc: FdkDrmEncoder::new(cfg)?,
+            enc: fdk,
             fmt: AacSuperFrameFormat::aac(plan.frames_per_super_frame, stream),
             frames: plan.frames_per_super_frame,
             granule,
