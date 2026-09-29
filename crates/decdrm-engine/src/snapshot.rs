@@ -51,6 +51,8 @@ pub struct Snapshot {
     /// Latest complete text message of the selected audio service.
     pub text: Option<String>,
     pub audio: AudioStatus,
+    /// Broadcast time and date from the SDC (type 8), formatted.
+    pub time_utc: Option<String>,
     pub log: VecDeque<String>,
     /// The worker stopped (end of file, error or stop command).
     pub stopped: bool,

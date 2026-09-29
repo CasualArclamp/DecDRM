@@ -278,6 +278,15 @@ impl OutputStage {
         self.work = w;
     }
 
+    /// Drain the channel filter at the end of a transmission: appends the filter's
+    /// tail (2·[`Self::latency`] samples per channel; nothing without the filter).
+    pub fn flush(&mut self, out: &mut Vec<f32>) {
+        let tail = 2 * self.latency();
+        if tail > 0 {
+            self.process(&vec![Cplx::new(0.0, 0.0); tail], out);
+        }
+    }
+
     fn clip(&mut self, v: Real) -> f32 {
         if v.abs() > 1.0 {
             self.clipped += 1;
@@ -370,6 +379,29 @@ mod tests {
                 assert!((peak_hz - expect_hz).abs() < 1.0, "{cfg:?}: peak at {peak_hz}");
             }
         }
+    }
+
+    /// Chunked processing equals one-shot processing, and `flush` drains the filter.
+    #[test]
+    fn streaming_and_flush() {
+        let l = layout(RobustnessMode::C, SpectrumOccupancy::SO_5);
+        let x: Vec<Cplx> = (0..5000).map(|i| Cplx::from_polar(20.0, 0.37 * i as Real)).collect();
+        let cfg = OutputConfig::real(suggested_if_hz(l));
+        let mut one = OutputStage::new(l, cfg).unwrap();
+        let mut a = Vec::new();
+        one.process(&x, &mut a);
+        one.flush(&mut a);
+        let mut chunked = OutputStage::new(l, cfg).unwrap();
+        let mut b = Vec::new();
+        for c in x.chunks(333) {
+            chunked.process(c, &mut b);
+        }
+        chunked.flush(&mut b);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), x.len() + 2 * one.latency());
+        // The flushed tail carries the last input samples (delayed by the latency).
+        let tail_energy: Real = a[x.len()..x.len() + one.latency()].iter().map(|&v| Real::from(v).powi(2)).sum();
+        assert!(tail_energy > 0.0);
     }
 
     /// Taking the real part folds the complex spectrum's negative-frequency half onto

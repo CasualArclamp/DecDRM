@@ -73,10 +73,6 @@ impl DataServices {
         self.services.is_empty()
     }
 
-    pub fn get(&self, short_id: u8) -> Option<&DataService> {
-        self.services.get(&short_id)
-    }
-
     pub fn get_mut(&mut self, short_id: u8) -> Option<&mut DataService> {
         self.services.get_mut(&short_id)
     }
@@ -171,10 +167,11 @@ mod tests {
 
         assert_eq!(d.slideshow_ids(), vec![1]);
         assert_eq!(d.journaline_ids(), vec![2]);
-        assert_eq!(d.get(1).unwrap().slideshow.current().unwrap().name, "a.png");
-        assert_eq!(d.get(2).unwrap().journaline.root().unwrap().title, "News");
-        assert_eq!(d.get(2).unwrap().raw_units, 1);
-        assert_eq!(d.get(3).unwrap().stream_bytes, 16);
+        assert_eq!(d.get_mut(1).unwrap().slideshow.current().unwrap().name, "a.png");
+        assert_eq!(d.get_mut(2).unwrap().journaline.root().unwrap().title, "News");
+        assert_eq!(d.get_mut(2).unwrap().raw_units, 1);
+        assert_eq!(d.get_mut(3).unwrap().stream_bytes, 16);
+        assert_eq!(d.iter().map(|(id, _)| id).collect::<Vec<_>>(), [1, 2, 3]);
         d.clear();
         assert!(d.slideshow_ids().is_empty());
     }

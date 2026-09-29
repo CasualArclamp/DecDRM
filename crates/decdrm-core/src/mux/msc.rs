@@ -107,6 +107,8 @@ pub fn demultiplex_bits(vspp: &[u8], main: &[u8], mux: &MultiplexDescription) ->
     stream_positions(mux, hierarchical)
         .into_iter()
         .map(|p| {
+            // Inside this closure `?` makes the closure return `None` (this stream is
+            // skipped) when `get` finds the range outside the decoded bits.
             let (a, b) = if p.hierarchical {
                 (&[][..], vspp.get(..p.len_b)?)
             } else {
@@ -245,13 +247,8 @@ mod tests {
             let refs: Vec<&[u8]> = frames.iter().map(|f| f.as_slice()).collect();
             let block = multiplex(&refs, &mux, MscGeometry::from(&params)).unwrap();
             assert_eq!(block.len(), params.total_bits());
-            let frame = MscFrame {
-                vspp: block[..params.bits_vspp].to_vec(),
-                bits: block[params.bits_vspp..].to_vec(),
-                hpp_bits: params.bits_hpp,
-                path_metric: 0.0,
-            };
-            let out = demultiplex(&frame, &mux);
+            let (vspp, main) = block.split_at(params.bits_vspp);
+            let out = demultiplex_bits(vspp, main, &mux);
             assert_eq!(out.len(), frames.len());
             for (i, (o, f)) in out.iter().zip(&frames).enumerate() {
                 let o = o.as_ref().unwrap_or_else(|| panic!("stream {i} missing ({mapping:?})"));
@@ -266,8 +263,7 @@ mod tests {
     #[test]
     fn oversized_description_is_rejected() {
         let mux = MultiplexDescription::new(0, 0, &[StreamLengths { part_a: 0, part_b: 100 }]);
-        let frame = MscFrame { vspp: vec![], bits: vec![1; 700], hpp_bits: 0, path_metric: 0.0 };
-        assert_eq!(demultiplex(&frame, &mux), vec![None]);
+        assert_eq!(demultiplex_bits(&[], &[1; 700], &mux), vec![None]);
         let geometry = MscGeometry { vspp_bits: 0, hpp_bits: 0, lpp_bits: 700 };
         assert!(matches!(multiplex(&[&[0u8; 100]], &mux, geometry), Err(MuxError::Capacity { .. })));
         assert!(matches!(multiplex(&[&[0u8; 99]], &mux, geometry), Err(MuxError::StreamLength { .. })));

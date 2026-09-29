@@ -179,7 +179,7 @@ impl SdcEntity {
         encode_body(&self.body, &mut body)?;
         let bits = body.into_bits();
         // Every body is 4 + 8n bits by construction of the encoders below.
-        debug_assert!(bits.len() >= 4 && (bits.len() - 4) % 8 == 0);
+        debug_assert!(bits.len() >= 4 && (bits.len() - 4).is_multiple_of(8));
         let len = bits.len().saturating_sub(4) / 8;
         if len > 127 {
             return Err(SdcError::BodyTooLong(len));
@@ -970,7 +970,7 @@ fn parse_body(entity_type: u8, raw: RawBody) -> EntityBody {
 }
 
 fn parse_multiplex(b: &mut Body) -> Result<MultiplexDescription, &'static str> {
-    if b.len == 0 || b.len % 3 != 0 || b.len / 3 > 4 {
+    if b.len == 0 || !b.len.is_multiple_of(3) || b.len / 3 > 4 {
         return Err("multiplex description needs 1 to 4 stream descriptions");
     }
     let protection_a = b.u8(2);
@@ -1024,7 +1024,7 @@ fn parse_afs_multiplex(b: &mut Body) -> Result<AfsMultiplex, &'static str> {
     } else {
         None
     };
-    if n % 2 != 0 {
+    if !n.is_multiple_of(2) {
         return Err("odd number of frequency bytes");
     }
     let frequencies = (0..n / 2).map(|_| DrmFrequency { times_ten: b.flag(), value: b.u(15) as u16 }).collect();
@@ -1222,7 +1222,7 @@ fn parse_language(b: &mut Body) -> Result<LanguageCountry, &'static str> {
 }
 
 fn parse_detailed_region(b: &mut Body) -> Result<AfsDetailedRegion, &'static str> {
-    if b.len == 0 || b.len % 6 != 0 {
+    if b.len == 0 || !b.len.is_multiple_of(6) {
         return Err("detailed region definition needs 6 bytes per square");
     }
     let region_id = b.u8(4);
@@ -1491,8 +1491,8 @@ fn encode_body(body: &EntityBody, w: &mut BitWriter) -> Result<(), SdcError> {
             w.write_bytes(&raw.bytes);
         }
     }
-    // Pad a body to 4 + 8n bits (only reachable for malformed input, e.g. a
-    // multiplex description whose fields do not fill whole bytes cannot occur).
+    // Defensive: every layout above already yields 4 + 8n bits; keep the header's
+    // length field consistent even if one of them is changed incorrectly.
     let extra = (w.len().max(4) - 4) % 8;
     if extra != 0 {
         bits(w, 0u8, (8 - extra) as u32);

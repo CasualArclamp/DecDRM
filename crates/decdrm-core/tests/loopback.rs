@@ -10,6 +10,8 @@
 //!   offsets. These print a report and only assert easy, high-SNR cases. The long
 //!   sweeps (SNR sweeps, channels 5/6, other layouts) are `#[ignore]`d; run them with
 //!   `cargo test -p decdrm-core --test loopback -- --ignored --nocapture`.
+//! * `known_issue_*` (ignored): receiver problems found by these tests, each stating
+//!   the expected behaviour; they fail until the receiver is fixed.
 //!
 //! Use `--nocapture` to see the result tables. Everything is seeded, so results are
 //! reproducible run to run.
@@ -139,6 +141,10 @@ struct Outcome {
     sdc_bad_after_ok: usize,
     msc: Matches,
     msc_frames: usize,
+    /// MSC frames the receiver flagged as incomplete (long interleaver filling).
+    msc_incomplete: usize,
+    /// MSC frames flagged complete that match nothing that was sent.
+    msc_complete_wrong: usize,
     /// Receiver status at the end.
     snr_db: Option<Real>,
     sro_hz: Real,
@@ -285,7 +291,13 @@ fn run(sc: &Scenario) -> Outcome {
                     o.msc_frames += 1;
                     let mut all = m.vspp.clone();
                     all.extend_from_slice(&m.bits);
-                    o.msc.record(sent_msc.iter().position(|s| *s == all), f, |j| mux_end_frame(j + depth - 1));
+                    let found = sent_msc.iter().position(|s| *s == all);
+                    if !m.complete {
+                        o.msc_incomplete += 1;
+                    } else if found.is_none() {
+                        o.msc_complete_wrong += 1;
+                    }
+                    o.msc.record(found, f, |j| mux_end_frame(j + depth - 1));
                 }
                 // Events the receiver may add later are irrelevant here.
                 #[allow(unreachable_patterns)]
@@ -526,6 +538,10 @@ fn check_msc(sc: &Scenario, o: &Outcome) -> Vec<String> {
     }
     if o.msc.breaks > 0 {
         p.push(format!("{} breaks in the MSC frame sequence", o.msc.breaks));
+    }
+    // In a clean channel every frame the receiver calls complete must be exact.
+    if o.msc_complete_wrong > 0 {
+        p.push(format!("{} MSC frames flagged complete but wrong", o.msc_complete_wrong));
     }
     // Multiplex frame j can be decoded once multiplex frame j + D − 1 has been
     // received; the event must come in the transmitter frame that completes it or,

@@ -114,10 +114,6 @@ impl CrcHistory {
         Self { window_s, readings: VecDeque::new() }
     }
 
-    pub fn clear(&mut self) {
-        self.readings.clear();
-    }
-
     /// Add a reading taken at time `t` (non-decreasing).
     pub fn push(&mut self, t: f64, ok: u64, bad: u64) {
         if let Some(last) = self.readings.back()

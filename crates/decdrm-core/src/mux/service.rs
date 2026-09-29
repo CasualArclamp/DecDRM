@@ -36,8 +36,10 @@ use crate::rx::MscConfig;
 pub enum AudioCodec {
     /// 00: MPEG-4 ER AAC (optionally with SBR/PS, MPEG Surround).
     Aac,
-    /// 01: reserved in ES 201 980 V4 (CELP in early versions); Dream uses it for its
-    /// experimental Opus mode. Dream also maps AAC with sampling-rate code 7 to Opus.
+    /// Dream's experimental Opus mode, signalled in three ways: audio coding 01
+    /// (reserved in ES 201 980 V4, CELP in early versions; current Dream), AAC with
+    /// sampling-rate code 7 (older Dream), and audio coding 11 without codec specific
+    /// config (Dream 2.x, before xHE-AAC was assigned 11).
     Opus,
     /// 10: reserved (HVXC in early versions).
     Reserved,
@@ -135,6 +137,14 @@ impl AudioParams {
     /// does: no SBR, stereo, 48 kHz).
     pub fn from_entity(a: &AudioInfo) -> Result<Self, &'static str> {
         let mut codec = AudioCodec::from_bits(a.coding);
+        if codec == AudioCodec::XheAac && a.codec_config.is_empty() {
+            // Dream 2.x signalled its Opus mode with audio coding 11 (reserved before
+            // xHE-AAC took the value) and no codec specific config. A genuine xHE-AAC
+            // entity always carries its static config (§6.4.3.10, n > 0), so an empty
+            // one identifies these transmissions (verified on the Opus test recordings:
+            // every packet CRC matches the 20-frame Opus framing).
+            codec = AudioCodec::Opus;
+        }
         let mut sbr = a.sbr;
         let mut mode = AudioMode::from_bits(a.mode);
         let rate = if codec == AudioCodec::XheAac {
@@ -593,6 +603,7 @@ impl Ensemble {
     pub fn new() -> Self {
         Self {
             channel: None,
+            // `from_fn` builds a fixed-size array by calling the closure with each index.
             services: std::array::from_fn(|i| ServiceInfo::new(i as u8)),
             fac_seen: [None; MAX_SERVICES],
             fac_count: 0,
@@ -622,7 +633,8 @@ impl Ensemble {
         &self.services
     }
 
-    /// Services signalled in the FAC, by Short Id.
+    /// Services signalled in the FAC, by Short Id. (`impl Iterator` = "some iterator
+    /// type" — the caller can loop over it or call `.find()`, `.collect()`, etc.)
     pub fn services(&self) -> impl Iterator<Item = &ServiceInfo> {
         self.services.iter().filter(|s| s.fac.is_some())
     }
@@ -679,6 +691,7 @@ impl Ensemble {
     /// MSC decoding parameters for [`crate::rx::Receiver::set_msc_config`], once the
     /// FAC channel parameters and the multiplex description are known.
     pub fn msc_config(&self) -> Option<MscConfig> {
+        // `?` on an `Option` returns `None` from the function when the value is missing.
         Some(msc_config(self.channel.as_ref()?, self.multiplex.as_ref()?))
     }
 
@@ -999,8 +1012,14 @@ mod tests {
         let p = AudioParams::from_entity(&e).unwrap();
         assert_eq!(p.type9_bytes, vec![0b1101_0110, 0, 0x12, 0x34]);
         assert_eq!(p.sample_rate_hz, 38_400);
-        // Opus (coding 01) and Dream's AAC + rate 7 variant normalise to stereo 48 kHz.
-        for e in [audio_entity(0, 0, 1, false, 0, 5, true), audio_entity(0, 0, 0, false, 0, 7, true)] {
+        // Opus: coding 01 (Dream-mjf), AAC + rate 7 (the "_V2" recordings) and coding 11
+        // without codec config (Dream 2.x, the other Opus recordings) all normalise to
+        // stereo 48 kHz.
+        for e in [
+            audio_entity(0, 0, 1, false, 0, 5, true),
+            audio_entity(0, 0, 0, false, 0, 7, true),
+            audio_entity(0, 0, 3, false, 0, 0, true),
+        ] {
             let p = AudioParams::from_entity(&e).unwrap();
             assert_eq!((p.codec, p.mode, p.sample_rate_hz), (AudioCodec::Opus, AudioMode::Stereo, 48_000));
             assert_eq!(p.type9_bytes, vec![0b0101_0101, 0x80]);

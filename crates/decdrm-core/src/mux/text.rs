@@ -197,6 +197,8 @@ impl TextMessageDecoder {
         if !self.segments[..n].iter().all(Option::is_some) {
             return None;
         }
+        // The first `flatten` skips `None` slots (all are `Some` here), the second
+        // walks the bytes of each segment.
         let bytes: Vec<u8> = self.segments[..n].iter().flatten().flatten().copied().collect();
         let msg = TextMessage { bytes, text_control: self.text_control };
         if self.current.as_ref() == Some(&msg) {
@@ -261,6 +263,7 @@ impl TextMessageEncoder {
 
     /// The four text bytes for the next logical frame.
     pub fn next_piece(&mut self) -> [u8; 4] {
+        // `let … else`: bind `seg` if there is a segment, otherwise leave the function.
         let Some(seg) = self.segments.get(self.segment) else { return [0; 4] };
         let mut piece = [0u8; 4];
         piece.copy_from_slice(&seg[self.pos..self.pos + 4]);

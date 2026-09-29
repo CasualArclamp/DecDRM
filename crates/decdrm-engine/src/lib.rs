@@ -8,6 +8,7 @@
 //! because its channels can be polled without blocking from a GUI frame loop.
 
 pub mod audio_out;
+pub mod data_store;
 pub mod session;
 pub mod snapshot;
 pub mod source;
@@ -155,6 +156,10 @@ fn worker(
     let mut rcfg = cfg.receiver.clone();
     rcfg.channels = info.channels;
     let mut session = Session::new(rcfg);
+    // File playback paces the decoder to the sound card; live input relies on the
+    // player's drift compensation.
+    let mut audio = audio_out::AudioOut::new(cfg.play_audio, cfg.output_device.clone(), info.is_file, cfg.record_audio.clone())?;
+    let mut saver = cfg.data_dir.clone().map(data_store::DataStore::new);
     let log = |line: String, snap: &mut Snapshot| {
         let _ = ev_tx.send(EngineEvent::Log(line.clone()));
         snap.push_log(line);
@@ -162,34 +167,34 @@ fn worker(
 
     let mut snap = Snapshot::default();
     snap.input.info = info.clone();
-    log(
-        format!("input: {} ({} Hz, {} ch)", info.name, info.sample_rate, info.channels),
-        &mut snap,
-    );
+    log(format!("input: {} ({} Hz, {} ch)", info.name, info.sample_rate, info.channels), &mut snap);
 
     let started = Instant::now();
     let mut last_publish = Instant::now() - Duration::from_secs(1);
     let chunk_frames = (info.sample_rate as usize / 20).max(256); // 50 ms
     loop {
-        // Commands.
         for c in cmd_rx.try_iter() {
             match c {
                 Command::Stop => {
-                    publish(shared, &mut snap, &session, &source, true);
+                    audio.finish()?;
+                    publish(shared, &mut snap, &session, &source, &audio, true);
                     return Ok(());
                 }
                 Command::Restart => {
                     session.restart();
                     log("receiver restarted".into(), &mut snap);
                 }
-                Command::SelectService(id) => snap.selected_service = Some(id),
+                Command::SelectService(id) => {
+                    session.select_service(id);
+                    snap.selected_service = Some(id);
+                }
             }
         }
 
         let Some(frames) = source.read(chunk_frames)? else {
-            publish(shared, &mut snap, &session, &source, true);
+            audio.finish()?;
             log(format!("end of input after {:.1} s", source.position_s()), &mut snap);
-            publish(shared, &mut snap, &session, &source, true);
+            publish(shared, &mut snap, &session, &source, &audio, true);
             return Ok(());
         };
         if !frames.is_empty() {
@@ -199,17 +204,38 @@ fn worker(
         for ev in session.push(&frames) {
             match ev {
                 SessionEvent::Log(l) => log(l, &mut snap),
-                SessionEvent::Fac(fac) => update_services_from_fac(&mut snap, &fac),
-                SessionEvent::Sdc(_) | SessionEvent::Msc(_) => {}
+                SessionEvent::Audio(pcm) => {
+                    if let Err(e) = audio.push(&pcm.samples, pcm.sample_rate, usize::from(pcm.channels)) {
+                        log(format!("audio output error: {e:#}"), &mut snap);
+                    }
+                }
+                SessionEvent::Text(t) => {
+                    if let Some(t) = &t {
+                        let _ = ev_tx.send(EngineEvent::Text(t.clone()));
+                    }
+                    snap.text = t;
+                }
+                SessionEvent::Data { short_id, event } => {
+                    if let Some(s) = saver.as_mut()
+                        && let Some(line) = s.save(short_id, &event)
+                    {
+                        log(line, &mut snap);
+                    }
+                    let _ = ev_tx.send(EngineEvent::Data { short_id, event });
+                }
+                SessionEvent::ServicesChanged => {
+                    snap.services = session.service_views();
+                    snap.selected_service = session.current_audio_service();
+                }
             }
         }
 
         if last_publish.elapsed() >= Duration::from_millis(100) {
-            publish(shared, &mut snap, &session, &source, false);
+            publish(shared, &mut snap, &session, &source, &audio, false);
             last_publish = Instant::now();
         }
-        if realtime {
-            // Pace to wall-clock time.
+        if realtime && !audio.is_playing() {
+            // Pace to wall-clock time (with playback, the sound card paces us).
             let ahead = source.position_s() - started.elapsed().as_secs_f64();
             if ahead > 0.0 {
                 std::thread::sleep(Duration::from_secs_f64(ahead.min(0.2)));
@@ -218,39 +244,32 @@ fn worker(
     }
 }
 
-fn publish(shared: &Arc<Mutex<Snapshot>>, snap: &mut Snapshot, session: &Session, source: &Source, finished: bool) {
+fn publish(
+    shared: &Arc<Mutex<Snapshot>>,
+    snap: &mut Snapshot,
+    session: &Session,
+    source: &Source,
+    audio: &audio_out::AudioOut,
+    finished: bool,
+) {
     snap.rx = session.status().clone();
     snap.visuals = session.visuals();
     snap.input.position_s = source.position_s();
     snap.input.finished = finished;
+    let st = &session.audio_stats;
+    snap.audio.codec = st.codec.clone();
+    snap.audio.frames_ok = st.frames_ok;
+    snap.audio.frames_bad = st.frames_concealed;
+    snap.audio.playing = audio.is_playing();
+    if let Some((buffered, ppm)) = audio.status() {
+        snap.audio.buffer_ms = buffered.as_secs_f32() * 1000.0;
+        snap.audio.drift_ppm = ppm;
+    }
+    snap.time_utc = session.ensemble().time().map(|t| {
+        let (y, m, d) = t.date();
+        format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", t.hour, t.minute)
+    });
     if let Ok(mut s) = shared.lock() {
         *s = snap.clone();
-    }
-}
-
-/// Until the SDC parser is wired in, list services from the FAC alone.
-fn update_services_from_fac(snap: &mut Snapshot, fac: &decdrm_core::fac::Fac) {
-    let s = &fac.service;
-    let view = ServiceView {
-        short_id: s.short_id,
-        service_id: s.service_id,
-        label: String::new(),
-        is_audio: !s.is_data,
-        description: session::describe_fac_service(fac),
-        language: decdrm_core::fac::LANGUAGES.get(s.language as usize).copied().unwrap_or("").to_string(),
-    };
-    match snap.services.iter_mut().find(|v| v.short_id == s.short_id) {
-        Some(v) => {
-            let label = std::mem::take(&mut v.label);
-            *v = view;
-            v.label = label;
-        }
-        None => {
-            snap.services.push(view);
-            snap.services.sort_by_key(|v| v.short_id);
-        }
-    }
-    if snap.selected_service.is_none() && !s.is_data {
-        snap.selected_service = Some(s.short_id);
     }
 }
