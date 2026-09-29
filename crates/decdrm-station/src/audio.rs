@@ -62,6 +62,11 @@ pub(crate) trait AudioSource: Send {
     }
     /// For status displays.
     fn describe(&self) -> String;
+    /// Ratio trim applied to follow the input's clock (sound-card input with a
+    /// sound-card output), ppm.
+    fn drift_ppm(&self) -> Option<f64> {
+        None
+    }
 }
 
 /// Interleaved samples waiting to be consumed.
@@ -191,46 +196,167 @@ impl AudioSource for FileSource {
 }
 
 /// A sound-card input.
+///
+/// With a sound-card output as well, two clocks run the station: the output card
+/// paces the frames, the input card delivers the audio, and a typical 50–200 ppm
+/// difference would slowly fill the capture buffer (dropped input) or drain it
+/// (the output starves). [`InputDrift`] then trims the input resampling ratio to hold
+/// the capture backlog at a target, like the receiver's playback drift loop.
+///
+/// The backlog only measures the drift once the output paces the station, that is once
+/// the output's queue is full. At start-up the station fills that queue as fast as it
+/// can, consuming input faster than it arrives; the first read therefore waits for the
+/// target backlog plus the queue plus the read itself, which leaves the target backlog
+/// once the queue is full, and the loop starts after the reads that fill it.
 struct DeviceSource {
     name: String,
     stream: InputStream,
     in_ch: usize,
+    in_rate: u32,
     out_ch: usize,
+    out_rate: u32,
     gain: f32,
     resampler: Option<Resampler>,
     fifo: Fifo,
     scratch: Vec<f32>,
+    /// Drift compensation (sound-card output).
+    drift: Option<InputDrift>,
+    /// Capacity of the sound-card output's queue, s (with drift compensation).
+    output_queue_s: f64,
+    /// The first read has waited for the start-up backlog.
+    primed: bool,
+    /// Reads left while the station fills the output's queue (the backlog does not
+    /// measure the drift yet).
+    filling_reads: u32,
 }
 
+/// PI loop holding the capture backlog of a sound-card input at a target by trimming
+/// the resampling ratio: a growing backlog (input clock fast) makes the resampler
+/// consume more input per output frame.
+#[derive(Debug, Clone)]
+struct InputDrift {
+    target_s: f64,
+    /// Low-pass filtered backlog, s.
+    filtered: Option<f64>,
+    integral: f64,
+    ppm: f64,
+}
+
+impl InputDrift {
+    /// Proportional gain: 25 ms of excess backlog → 1000 ppm (as the receiver's player).
+    const KP: f64 = 0.04;
+    /// Integral gain (critically damped).
+    const KI: f64 = Self::KP * Self::KP / 4.0;
+    /// Largest trim, ppm (±1.7 cents; sound cards differ by up to ~200 ppm).
+    const MAX_PPM: f64 = 1000.0;
+    /// Time constant of the backlog filter, s (as the receiver's player). The capture
+    /// buffer fills in callback-sized steps (10–20 ms), which the proportional term
+    /// would pass on as several hundred ppm of jitter.
+    const FILTER_TAU_S: f64 = 5.0;
+
+    fn new(target_s: f64) -> Self {
+        Self { target_s, filtered: None, integral: 0.0, ppm: 0.0 }
+    }
+
+    /// New ratio trim (ppm) for a backlog of `backlog_s` seconds, `dt` seconds after
+    /// the previous update.
+    fn update(&mut self, backlog_s: f64, dt: f64) -> f64 {
+        let filtered = match self.filtered {
+            None => backlog_s,
+            Some(f) => f + (dt / Self::FILTER_TAU_S).min(1.0) * (backlog_s - f),
+        };
+        self.filtered = Some(filtered);
+        let e = filtered - self.target_s;
+        let limit = Self::MAX_PPM * 1e-6 / Self::KI;
+        self.integral = (self.integral + e * dt).clamp(-limit, limit);
+        let u = -(Self::KP * e + Self::KI * self.integral);
+        self.ppm = (u * 1e6).clamp(-Self::MAX_PPM, Self::MAX_PPM);
+        self.ppm
+    }
+}
+
+/// Capture backlog the drift loop holds, s.
+const INPUT_BACKLOG_S: f64 = 0.3;
+
 impl DeviceSource {
-    fn open(device: &str, out_rate: u32, out_ch: usize, gain: f32) -> std::result::Result<Self, String> {
+    /// Open `device` for PCM at `out_rate` with `out_ch` channels. `output_queue` is the
+    /// capacity of the station's sound-card output, if it has one: the two clocks then
+    /// need drift compensation.
+    fn open(
+        device: &str,
+        out_rate: u32,
+        out_ch: usize,
+        gain: f32,
+        output_queue: Option<Duration>,
+    ) -> std::result::Result<Self, String> {
+        let queue = output_queue.unwrap_or_default();
         let opts = InputOptions {
             device: (!device.eq_ignore_ascii_case("default")).then(|| device.to_string()),
             sample_rate: Some(out_rate),
             channels: Some(out_ch),
-            buffer: Duration::from_secs(2),
+            // Room for the start-up backlog (the output queue plus at most 0.7 s) with
+            // 2 s to spare.
+            buffer: Duration::from_secs(2) + queue,
         };
         let stream = InputStream::open(&opts).map_err(|e| e.to_string())?;
         let fmt = stream.format();
-        let resampler = (fmt.sample_rate != out_rate)
+        let compensate = output_queue.is_some();
+        // Drift compensation needs a resampler even at equal nominal rates.
+        let resampler = (compensate || fmt.sample_rate != out_rate)
             .then(|| Resampler::new(fmt.sample_rate, out_rate, out_ch, ResamplerQuality::Balanced))
             .transpose()
             .map_err(|e| e.to_string())?;
         Ok(Self {
             name: stream.device_name().to_string(),
             in_ch: fmt.channels,
+            in_rate: fmt.sample_rate,
             stream,
             out_ch,
+            out_rate,
             gain,
             resampler,
             fifo: Fifo::default(),
             scratch: Vec::new(),
+            drift: compensate.then(|| InputDrift::new(INPUT_BACKLOG_S)),
+            output_queue_s: queue.as_secs_f64(),
+            primed: false,
+            filling_reads: 0,
         })
+    }
+
+    /// Wait until the capture buffer holds the start-up backlog for a first read of
+    /// `frames` output frames (see the type's documentation). If the station started
+    /// late and more has piled up, the oldest audio is dropped instead.
+    fn prime(&mut self, frames: usize) {
+        let read_s = frames as f64 / f64::from(self.out_rate);
+        let seconds = INPUT_BACKLOG_S + self.output_queue_s + read_s;
+        let target = (seconds * f64::from(self.in_rate)) as usize;
+        let deadline = std::time::Instant::now() + Duration::from_secs_f64(seconds + 2.0);
+        while self.stream.available_frames() < target && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let excess = self.stream.available_frames().saturating_sub(target);
+        if excess > 0 {
+            self.stream.read(excess);
+        }
+        self.primed = true;
+        // Each read is followed by the frame's write, which blocks once the queue is full.
+        self.filling_reads = (self.output_queue_s / read_s - 1e-9).ceil().max(0.0) as u32;
+    }
+
+    /// Seconds of input captured but not yet consumed (in the capture buffer and,
+    /// converted, in the FIFO).
+    fn backlog_s(&self) -> f64 {
+        self.stream.available_frames() as f64 / f64::from(self.in_rate)
+            + (self.fifo.len() / self.out_ch.max(1)) as f64 / f64::from(self.out_rate)
     }
 }
 
 impl AudioSource for DeviceSource {
     fn read(&mut self, frames: usize, out: &mut Vec<f32>) -> std::result::Result<(), String> {
+        if self.drift.is_some() && !self.primed {
+            self.prime(frames);
+        }
         let need = frames * self.out_ch;
         while self.fifo.len() < need {
             let block = self.stream.read_blocking(1024, Duration::from_secs(2)).map_err(|e| e.to_string())?;
@@ -245,11 +371,22 @@ impl AudioSource for DeviceSource {
             }
         }
         self.fifo.take(need, out);
+        let backlog = self.backlog_s();
+        if self.filling_reads > 0 {
+            self.filling_reads -= 1;
+        } else if let (Some(drift), Some(r)) = (self.drift.as_mut(), self.resampler.as_mut()) {
+            let ppm = drift.update(backlog, frames as f64 / f64::from(self.out_rate));
+            r.set_ratio_adjust_ppm(ppm).map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
     fn describe(&self) -> String {
         format!("sound card \"{}\"", self.name)
+    }
+
+    fn drift_ppm(&self) -> Option<f64> {
+        self.drift.as_ref().map(|d| d.ppm)
     }
 }
 
@@ -287,7 +424,10 @@ fn open_source(cfg: &StationConfig, input: &AudioInputSettings, rate: u32, ch: u
         return Ok(Box::new(FileSource::open(&cfg.resolve(f), input.looped, rate, ch, gain)?));
     }
     if let Some(d) = &input.device {
-        return Ok(Box::new(DeviceSource::open(d, rate, ch, gain)?));
+        // Two sound cards (input and output) need drift compensation; with file output
+        // the input's clock paces the station.
+        let output_queue = crate::output::device_queue(&cfg.output);
+        return Ok(Box::new(DeviceSource::open(d, rate, ch, gain, output_queue)?));
     }
     let freq = input.tone_hz.ok_or("the audio input needs `file`, `device` or `tone_hz`")?;
     Ok(Box::new(ToneSource {
@@ -649,6 +789,9 @@ pub struct AudioCounters {
     pub frames_dropped: u64,
     /// Encoder errors.
     pub encoder_errors: u64,
+    /// Ratio trim following a sound-card input's clock, ppm (sound-card input and
+    /// output only).
+    pub input_drift_ppm: Option<f64>,
 }
 
 /// Input → encoder → logical frames of one audio service.
@@ -709,6 +852,7 @@ impl AudioChain {
         let (sum, peak) = self.pcm.iter().fold((0.0f64, 0.0f32), |(s, p), &v| (s + f64::from(v * v), p.max(v.abs())));
         self.counters.input_rms_dbfs = to_db((sum / self.pcm.len().max(1) as f64).sqrt() as f32);
         self.counters.input_peak_dbfs = to_db(peak);
+        self.counters.input_drift_ppm = self.source.drift_ppm();
         let len = self.plan.super_frame_len;
         let mut lf = match &mut self.encoder {
             Encoder::Aac(e) => {
@@ -764,6 +908,46 @@ impl AudioChain {
 
 #[cfg(test)]
 mod tests {
+    use super::InputDrift;
+
+    /// Input clock `offset` fast (fraction), station consuming 400 ms per step, the
+    /// backlog measured with ±10 ms of jitter (the capture buffer fills in steps).
+    /// Returns the mean backlog, the mean trim and the trim's largest deviation from
+    /// its mean over the last 400 s of 1200 s.
+    fn simulate(offset: f64) -> (f64, f64, f64) {
+        let mut drift = InputDrift::new(0.3);
+        let (mut backlog, dt) = (0.3, 0.4);
+        let mut ppm = 0.0;
+        let mut seed = 1u32;
+        let mut tail = Vec::new();
+        for step in 0..3000 {
+            // Arrived: dt·(1 + offset); consumed: dt / (1 + trim) of input.
+            backlog += dt * (1.0 + offset) - dt / (1.0 + ppm * 1e-6);
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let jitter = (f64::from(seed >> 8) / f64::from(1u32 << 24) - 0.5) * 0.02;
+            ppm = drift.update(backlog + jitter, dt);
+            if step >= 2000 {
+                tail.push((backlog, ppm));
+            }
+        }
+        let n = tail.len() as f64;
+        let mean_backlog = tail.iter().map(|t| t.0).sum::<f64>() / n;
+        let mean_ppm = tail.iter().map(|t| t.1).sum::<f64>() / n;
+        let ripple = tail.iter().map(|t| (t.1 - mean_ppm).abs()).fold(0.0, f64::max);
+        (mean_backlog, mean_ppm, ripple)
+    }
+
+    #[test]
+    fn input_drift_loop_follows_the_clock() {
+        for offset_ppm in [-200.0, -50.0, 0.0, 100.0, 300.0] {
+            let (backlog, ppm, ripple) = simulate(offset_ppm * 1e-6);
+            assert!((backlog - 0.3).abs() < 0.002, "{offset_ppm} ppm: backlog {backlog}");
+            assert!((ppm + offset_ppm).abs() < 5.0, "{offset_ppm} ppm: trim {ppm}");
+            // Unfiltered, the ±10 ms would give ±400 ppm.
+            assert!(ripple < 200.0, "{offset_ppm} ppm: trim ripple {ripple}");
+        }
+    }
+
     use super::*;
 
     #[test]

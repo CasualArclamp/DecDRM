@@ -114,8 +114,10 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       *Status:* `decdrm-station` + `decdrm tx station.toml` + GUI tab done
       (AAC/HE-AAC/v2 up to AAC's bit-rate limit, Opus, slideshow, website, Journaline,
       EPG, text, time; all MSC modes incl. HM/UEP), verified by loopback through our
-      receiver, also live through a virtual audio cable. To do: clock-drift
-      compensation between a sound-card input and output.
+      receiver, also live through a virtual audio cable. A sound-card input with a
+      sound-card output is drift-compensated: a PI loop trims the input resampler to
+      hold the capture backlog at 0.3 s (primed by the output queue at start-up); live
+      85 s run: trim within ±160 ppm, 0 underruns.
 - [x] **M8 TX codecs** — xHE-AAC (libxaac encoder), Opus.
       *Done:* station codecs `xhe-aac` (24/32/48 kHz by stream rate, mono/stereo,
       text) and `opus`; `XheAacFramer` writes the header reservoir level itself and

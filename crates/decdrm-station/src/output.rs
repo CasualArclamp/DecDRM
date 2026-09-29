@@ -31,6 +31,18 @@ pub(crate) fn open_file(cfg: &StationConfig, channels: usize) -> Result<Option<F
     FileWriter::create(&path, AudioFormat::new(RATE, channels), container, encoding).map(Some).map_err(StationError::Output)
 }
 
+/// Playback starts once this much signal is queued on the sound card.
+fn device_buffer(out: &OutputSettings) -> Duration {
+    Duration::from_millis(u64::from(out.device_buffer_ms.clamp(100, 5000)))
+}
+
+/// Most signal queued on the sound card of `out` (the ring buffer's capacity: twice
+/// `device_buffer_ms`), if the output is a sound card. The station fills it at start-up
+/// as fast as it can produce frames; after that the card paces the station.
+pub(crate) fn device_queue(out: &OutputSettings) -> Option<Duration> {
+    out.device.as_ref().map(|_| device_buffer(out) * 2)
+}
+
 /// A sound-card output.
 pub(crate) struct DeviceSink {
     stream: OutputStream,
@@ -46,14 +58,13 @@ pub(crate) struct DeviceSink {
 impl DeviceSink {
     /// Open the device of `out` for a signal of `channels` channels at 48 kHz.
     pub fn open(out: &OutputSettings, channels: usize) -> Result<Option<Self>> {
-        let Some(name) = &out.device else { return Ok(None) };
-        let buffer = Duration::from_millis(u64::from(out.device_buffer_ms.clamp(100, 5000)));
+        let (Some(name), Some(capacity)) = (&out.device, device_queue(out)) else { return Ok(None) };
         let opts = OutputOptions {
             device: (!name.eq_ignore_ascii_case("default")).then(|| name.clone()),
             sample_rate: Some(RATE),
             channels: Some(channels),
-            buffer: buffer * 2,
-            start_threshold: buffer,
+            buffer: capacity,
+            start_threshold: device_buffer(out),
         };
         let stream = OutputStream::open(&opts).map_err(StationError::Output)?;
         let fmt = stream.format();
@@ -74,7 +85,7 @@ impl DeviceSink {
             resampler,
             resampled: Vec::new(),
             mapped: Vec::new(),
-            stall_timeout: buffer * 2 + Duration::from_secs(1),
+            stall_timeout: capacity + Duration::from_secs(1),
         }))
     }
 

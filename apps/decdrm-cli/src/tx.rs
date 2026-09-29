@@ -93,10 +93,11 @@ fn print_status(s: &StationStatus) {
         let mut line = format!("          service {} {:06X} \"{}\" {:.2} kbit/s", sv.short_id, sv.service_id, sv.label, sv.bitrate / 1000.0);
         if let Some(a) = &sv.audio {
             line.push_str(&format!(
-                ": {}, input {:.1} dBFS{}{}",
+                ": {}, input {:.1} dBFS{}{}{}",
                 a.codec,
                 a.counters.input_rms_dbfs,
                 if a.input_finished { " (ended)" } else { "" },
+                a.counters.input_drift_ppm.map(|p| format!(", clock trim {p:+.0} ppm")).unwrap_or_default(),
                 if a.counters.frames_dropped > 0 { format!(", {} frames dropped", a.counters.frames_dropped) } else { String::new() }
             ));
         }
