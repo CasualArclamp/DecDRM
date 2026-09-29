@@ -10,4 +10,9 @@ rust-version.workspace = true
 [dependencies]
 decdrm-fdk-sys = { path = "../decdrm-fdk-sys" }
 decdrm-opus-sys = { path = "../decdrm-opus-sys" }
+decdrm-xaac-sys = { path = "../decdrm-xaac-sys" }
 thiserror = "2"
+
+[dev-dependencies]
+# xHE-AAC round trip through the real audio super-frame builder/parser.
+decdrm-core = { path = "../decdrm-core" }
