@@ -83,9 +83,12 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       bit-exact for 16/64-QAM SM, HMsym, HMmix with short/long interleaving, AWGN and
       channels 1–6, ±50 ppm / frequency offsets. Beyond Dream: sub-bin SRO estimation,
       two-window mode detection, pilot-slope SRO acquisition, seamless occupancy change.
-      SRO estimation: cross-correlation of PDS snapshots (robust to fading paths),
-      exact pilot-grid scaling, lag-compensated tracking; pilot-slope acquisition
-      only beyond the ~1000 ppm unaided lock range and only when confirmed.
+      SRO estimation: translation of PDS snapshots (phase-slope fraction with a
+      robust fallback), exact pilot-grid scaling, lag-compensated tracking;
+      pilot-slope acquisition only beyond the ~1000 ppm unaided lock range and only
+      when confirmed. Timing jumps (samples lost/inserted by network streams) are
+      detected from the cyclic-prefix correlation and a time-pilot monitor and
+      resynchronised in ~1 s without a full restart (`examples/dropout`).
       Sensitivity (`examples/bercurve.rs`, BER 1e-4 after decoding, 64-QAM R = 0.6,
       2 MLC iterations, real synchronisation and channel estimation) against ES 201 980
       annex A (ideal estimation): ch1 ≈15.1 dB (14.9), ch2 ≈15.8 (16.5), ch3 ≈24.5
@@ -102,16 +105,21 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       writes metrics rows (and events in JSON Lines).
 - [ ] **M6 GUI** — egui: spectrum/waterfall, constellations, SNR/MER, sync status,
       service list, text, slideshow, Journaline browser, EPG, clock/AFS.
-      *Status:* receiver tab done (plots, LEDs, services, text, slideshow, Journaline);
-      waterfall, EPG and AFS views and the TX tab to do.
-- [ ] **M7 Transmitter** — full TX chain, FDK AAC/HE-AAC encoding, all data services,
+      *Status:* receiver tab (plots, LEDs, services, text, slideshow, Journaline) and
+      transmitter tab (TOML editor, validation, transmit to file/sound card, status,
+      TX spectrum) done; waterfall, EPG and AFS views in progress.
+- [x] **M7 Transmitter** — full TX chain, FDK AAC/HE-AAC encoding, all data services,
       file/sound-card output, channel simulator, loopback BER tests; GUI TX tab + CLI.
-      *Status:* `decdrm-station` + `decdrm tx station.toml` done (AAC/HE-AAC/v2, Opus,
-      slideshow, website, Journaline, EPG, text, time; all MSC modes incl. HM/UEP),
-      verified by loopback through our receiver. GUI TX tab to do.
+      *Status:* `decdrm-station` + `decdrm tx station.toml` + GUI tab done
+      (AAC/HE-AAC/v2 up to AAC's bit-rate limit, Opus, slideshow, website, Journaline,
+      EPG, text, time; all MSC modes incl. HM/UEP), verified by loopback through our
+      receiver, also live through a virtual audio cable. To do: clock-drift
+      compensation between a sound-card input and output.
 - [ ] **M8 TX codecs** — xHE-AAC (libxaac encoder), Opus.
 - [ ] **M9 EnCodec** — experimental neural-codec extension (TX + RX).
 - [ ] **M10 Polish** — performance, Linux verification, docs.
+      *Status:* manual GitHub Actions workflow (`.github/workflows/linux.yml`) builds
+      and tests the workspace on Ubuntu; receiver runs ~75–100× real time.
 
 ## Conventions
 
