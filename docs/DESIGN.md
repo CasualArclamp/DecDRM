@@ -54,6 +54,9 @@ and the milestone plan. Keep the milestone checklist current.
   sound-card input/output via cpal.
 * **decdrm-engine**: glues the above together on threads (input → receiver → audio out),
   owns the codec/data registries, publishes status snapshots for the UIs, writes logs.
+* **decdrm-station**: the transmitter application layer: a TOML station config
+  (services, codecs, data applications, output) → planned multiplex → frames from
+  `decdrm-core::tx` → WAV/FLAC or sound card.
 
 ### Receiver data flow
 
@@ -69,24 +72,39 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
 ## Milestones
 
 - [x] **M0 Setup** — workspace, references, design doc, git + private GitHub.
-- [ ] **M1 RX spine** — file input → sync → OFDM → channel estimation → FAC/SDC/MSC →
+- [x] **M1 RX spine** — file input → sync → OFDM → channel estimation → FAC/SDC/MSC →
       AAC audio (FDK) → WAV + playback, via CLI, on the mode A/B 10 kHz samples.
-      *Status:* PHY/FEC done — FAC/SDC decode on 21/22 recordings (modes A/B/C, 9–20 kHz,
-      real and I/Q, flipped spectrum, 1250 ppm clock offset; the 22nd is AM/AMSS, out of
-      scope); MSC multiplex frames decode (MER ≈ 21 dB on DW). Remaining: SDC parsing,
-      demux, audio super frames, FDK decode, CLI.
-- [ ] **M2 RX completeness** — all modes A–D and occupancies 0–5, HMsym/HMmix, long
+      *Done:* audio on every DRM recording in `samples/` (21 of 22; the 22nd is AM/AMSS).
+- [x] **M2 RX completeness** — all modes A–D and occupancies 0–5, HMsym/HMmix, long
       interleaving, flipped spectrum, I/Q inputs, offsets; Wiener channel estimation,
       iterative MLC, SRO tracking; minimal modulator + channel simulator for modes/SOs we
       have no recordings of (mode D, 4.5/5/18 kHz).
-- [ ] **M3 Codecs & text** — xHE-AAC, Opus, text messages, concealment, drift-compensated
-      live playback.
+      *Done:* `tests/loopback.rs` covers every layout (I/Q, real IF, offset), MSC
+      bit-exact for 16/64-QAM SM, HMsym, HMmix with short/long interleaving, AWGN and
+      channels 1–6, ±50 ppm / frequency offsets. Beyond Dream: sub-bin SRO estimation,
+      two-window mode detection, pilot-slope SRO acquisition, seamless occupancy change.
+      SRO estimation: cross-correlation of PDS snapshots (robust to fading paths),
+      exact pilot-grid scaling, lag-compensated tracking; pilot-slope acquisition
+      only beyond the ~1000 ppm unaided lock range and only when confirmed.
+      Still to do: a systematic sensitivity comparison with Dream.
+- [x] **M3 Codecs & text** — xHE-AAC, Opus, text messages, concealment, drift-compensated
+      live playback. *Done* (xHE-AAC on FMGold, Opus in all three signalling variants).
 - [ ] **M4 Data services** — Journaline, MOT Slideshow, BWS, EPG, TPEG/raw; clock & AFS.
-- [ ] **M5 Live input & logging** — sound-card input (VAC), CSV/JSON logs & metrics.
+      *Status:* decoders done and verified on recordings (slideshow, Journaline, BWS);
+      EPG/TPEG untested for lack of samples; clock and AFS shown in the CLI
+      (`Snapshot::afs`, `time_utc`), not yet in the GUI.
+- [x] **M5 Live input & logging** — sound-card input (VAC), CSV/JSON logs & metrics.
+      *Done:* sound-card input (CLI `--device`, GUI); `decdrm rx --log FILE.csv|.jsonl`
+      writes metrics rows (and events in JSON Lines).
 - [ ] **M6 GUI** — egui: spectrum/waterfall, constellations, SNR/MER, sync status,
       service list, text, slideshow, Journaline browser, EPG, clock/AFS.
+      *Status:* receiver tab done (plots, LEDs, services, text, slideshow, Journaline);
+      waterfall, EPG and AFS views and the TX tab to do.
 - [ ] **M7 Transmitter** — full TX chain, FDK AAC/HE-AAC encoding, all data services,
       file/sound-card output, channel simulator, loopback BER tests; GUI TX tab + CLI.
+      *Status:* `decdrm-station` + `decdrm tx station.toml` done (AAC/HE-AAC/v2, Opus,
+      slideshow, website, Journaline, EPG, text, time; all MSC modes incl. HM/UEP),
+      verified by loopback through our receiver. GUI TX tab to do.
 - [ ] **M8 TX codecs** — xHE-AAC (libxaac encoder), Opus.
 - [ ] **M9 EnCodec** — experimental neural-codec extension (TX + RX).
 - [ ] **M10 Polish** — performance, Linux verification, docs.
@@ -105,9 +123,9 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
 
 * Dream source r1548 (`branches/dream-mjf`) — `reference/dream-mjf/` (fetched over SVN HTTP
   from `https://svn.code.sf.net/p/drm/code/branches/dream-mjf/`).
-* ETSI specifications (free, but etsi.org blocks scripted downloads — fetch them in a
-  browser into `reference/etsi/`):
+* ETSI specifications (free; store them in `reference/etsi/`):
   * [ES 201 980 V4.2.1](https://www.etsi.org/deliver/etsi_es/201900_201999/201980/04.02.01_60/es_201980v040201p.pdf) — DRM system specification
+    (`reference/etsi/es_201980v040201p.pdf`, plus a `.txt` extraction for grepping)
   * TS 101 968 — DRM data applications directory
   * TS 102 979 — Journaline
   * EN 301 234 — MOT protocol; TS 101 499 — MOT SlideShow; TS 101 498 — Broadcast Website

@@ -23,6 +23,7 @@ pub mod timesync;
 mod chain;
 
 pub use chain::{ChainVisuals, MscConfig, MscFrame, SdcBlock};
+pub use chanest::PdsAxis;
 pub use input::{InputFormat, RealChannel};
 
 use crate::dsp::resampler::FracResampler;
@@ -45,7 +46,14 @@ const DELAYED_TRACKING_FACS: usize = 2;
 /// Limit of the sample-rate offset correction, Hz.
 const MAX_SRO_HZ: Real = 200.0;
 /// Pilot-slope SRO estimates above this fraction are applied during acquisition.
-const SRO_ACQ_THRESHOLD: Real = 100e-6;
+/// Only offsets the receiver cannot lock on by itself need it (it locks up to
+/// ~1000 ppm and then measures the offset from the impulse-response drift); on
+/// fading channels the pilot-slope estimate is noisy (hundreds of ppm on DRM
+/// channel 3), so it must also be confirmed.
+const SRO_ACQ_THRESHOLD: Real = 600e-6;
+/// Pilot-slope estimates are compared every this many symbols; two successive ones
+/// (nearly independent: the estimate averages over 0.5 s) must agree.
+const SRO_ACQ_BLOCK: usize = 40;
 
 /// Receiver configuration.
 #[derive(Debug, Clone)]
@@ -94,6 +102,7 @@ pub struct RxStatus {
     pub mode: Option<RobustnessMode>,
     pub occupancy: Option<SpectrumOccupancy>,
     /// Frequency of the DRM DC carrier in the input spectrum (Hz), incl. tracking.
+    /// With an inverted spectrum the carriers above it are the lower ones.
     pub dc_frequency_hz: Option<Real>,
     pub inverted: bool,
     /// Sample-rate offset being corrected (Hz at 48 kHz).
@@ -138,6 +147,11 @@ pub struct Visuals {
     pub spectrum_centre_hz: Real,
     pub spectrum_span_hz: Real,
     pub real_input: bool,
+    /// DRM DC carrier in the displayed input spectrum, Hz.
+    pub dc_hz: Option<Real>,
+    /// Occupied band (lowest carrier − ½ spacing … highest carrier + ½ spacing) in the
+    /// displayed input spectrum, Hz, once mode and occupancy are known.
+    pub signal_band_hz: Option<(Real, Real)>,
 }
 
 /// Averaged power spectrum of the (analytic / I/Q) input for display.
@@ -209,6 +223,9 @@ pub struct Receiver {
     good_facs: usize,
     delayed_cnt: usize,
     delayed_done: bool,
+    /// Pilot-slope SRO acquisition: estimates seen, and the previous block's.
+    sro_reports: usize,
+    sro_prev: Option<Real>,
     msc_config: Option<chain::MscConfig>,
     spectrum: InputSpectrum,
     status: RxStatus,
@@ -242,6 +259,8 @@ impl Receiver {
             good_facs: 0,
             delayed_cnt: DELAYED_TRACKING_FACS,
             delayed_done: false,
+            sro_reports: 0,
+            sro_prev: None,
             msc_config: None,
             spectrum: InputSpectrum::new(),
             status: RxStatus::default(),
@@ -270,12 +289,23 @@ impl Receiver {
     /// Plot data: constellations, channel, impulse response, per-carrier SNR and
     /// the input spectrum. Cheap enough to call ~10 times per second.
     pub fn visuals(&self) -> Visuals {
+        let dc_hz = self.status.dc_frequency_hz;
+        let signal_band_hz = match (dc_hz, self.status.mode, self.status.occupancy) {
+            (Some(dc), Some(mode), Some(so)) => crate::params::carrier_range(mode, so).map(|(kmin, kmax)| {
+                let df = mode.carrier_spacing();
+                let (lo, hi) = (Real::from(kmin) * df - df / 2.0, Real::from(kmax) * df + df / 2.0);
+                if self.conj { (dc - hi, dc - lo) } else { (dc + lo, dc + hi) }
+            }),
+            _ => None,
+        };
         Visuals {
             chain: self.chain.as_ref().map(|c| c.visuals()).unwrap_or_default(),
             spectrum_db: self.spectrum.db(),
             spectrum_centre_hz: 0.0,
             spectrum_span_hz: Real::from(SAMPLE_RATE),
             real_input: self.input.is_real(),
+            dc_hz,
+            signal_band_hz,
         }
     }
 
@@ -361,7 +391,9 @@ impl Receiver {
         }
         self.res = samples;
         self.status.sro_hz = self.sro_hz;
-        self.status.dc_frequency_hz = if self.acq.is_none() { Some(self.dc_hz + self.track_hz) } else { None };
+        // The mixer works on the conjugated input when the spectrum is inverted.
+        let dc = self.dc_hz + self.track_hz;
+        self.status.dc_frequency_hz = self.acq.is_none().then_some(if self.conj { -dc } else { dc });
     }
 
     /// Mix to baseband and run time sync and the symbol chain.
@@ -408,6 +440,8 @@ impl Receiver {
         if self.chain.is_none() {
             let so = SpectrumOccupancy::SO_3;
             self.chain = SymbolChain::new(self.mode, so, &self.cfg);
+            self.sro_reports = 0;
+            self.sro_prev = None;
             if let Some(c) = self.chain.as_mut() {
                 c.set_msc_config(self.msc_config, self.cfg.metric);
             }
@@ -418,15 +452,26 @@ impl Receiver {
         if self.delayed_done && out.timing_adjust != 0 {
             self.timesync.adjust(out.timing_adjust);
         }
-        // Coarse SRO acquisition from the pilot slope, only while searching: large
-        // clock offsets (hundreds of ppm) otherwise prevent the first FAC.
+        // Coarse SRO acquisition from the pilot slope, only while searching: clock
+        // offsets beyond ~1000 ppm otherwise prevent the first FAC.
         let mut sro_delta = out.sro_delta_hz;
         if self.state == RxState::Acquisition
             && let Some(eps) = out.sro_estimate
-            && eps.abs() > SRO_ACQ_THRESHOLD
         {
-            sro_delta += eps * Real::from(SAMPLE_RATE);
-            chain.reset_sro_estimate();
+            self.sro_reports += 1;
+            if self.sro_reports.is_multiple_of(SRO_ACQ_BLOCK) {
+                let prev = self.sro_prev.replace(eps);
+                if let Some(prev) = prev
+                    && prev.abs() > SRO_ACQ_THRESHOLD
+                    && eps.abs() > SRO_ACQ_THRESHOLD
+                    && (prev - eps).abs() < 0.25 * prev.abs().max(eps.abs())
+                {
+                    sro_delta += 0.5 * (prev + eps) * Real::from(SAMPLE_RATE);
+                    chain.reset_sro_estimate();
+                    self.sro_reports = 0;
+                    self.sro_prev = None;
+                }
+            }
         }
         let chain_stats = chain.stats();
         self.status.snr_db = chain_stats.snr_db;

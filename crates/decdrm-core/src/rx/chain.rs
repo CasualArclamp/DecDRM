@@ -3,7 +3,7 @@
 //! the robustness mode, spectrum occupancy or coding parameters change.
 
 use super::ReceiverConfig;
-use super::chanest::{ChanStats, ChannelEstimator};
+use super::chanest::{ChanStats, ChannelEstimator, PdsAxis};
 use super::framesync::{FrameSync, FrameSyncState};
 use super::ofdm::OfdmDemod;
 use super::timesync::SymbolWindow;
@@ -49,7 +49,8 @@ pub struct MscFrame {
 /// Plot data captured from the symbol chain (cheap to clone on demand).
 #[derive(Debug, Clone, Default)]
 pub struct ChainVisuals {
-    /// Equalised FAC / SDC / MSC cells of the most recent frame / super frame.
+    /// Equalised FAC / SDC / MSC cells of the most recent complete frame / super
+    /// frame / multiplex frame (never a partial set).
     pub fac: Vec<Cplx>,
     pub sdc: Vec<Cplx>,
     pub msc: Vec<Cplx>,
@@ -57,8 +58,10 @@ pub struct ChainVisuals {
     pub kmin: i32,
     /// Latest channel estimate per carrier.
     pub chan: Vec<Cplx>,
-    /// Averaged power delay profile (impulse-response domain, rotated).
+    /// Averaged power delay profile (linear power), ordered by delay: value `i` is
+    /// at `pds_axis.start_ms + i · pds_axis.step_ms`.
     pub pds: Vec<Real>,
+    pub pds_axis: Option<PdsAxis>,
     /// Per-carrier MSC SNR (carrier index, dB).
     pub snr_profile: Vec<(i32, Real)>,
 }
@@ -122,6 +125,9 @@ pub(super) struct SymbolChain {
     tracking: bool,
     timing_tracking: bool,
     vis: ChainVisuals,
+    // Cells being collected for the next complete set.
+    vis_fac: Vec<Cplx>,
+    vis_sdc: Vec<Cplx>,
     vis_msc: Vec<Cplx>,
 }
 
@@ -158,6 +164,8 @@ impl SymbolChain {
             tracking: false,
             timing_tracking: false,
             vis: ChainVisuals::default(),
+            vis_fac: Vec::new(),
+            vis_sdc: Vec::new(),
             vis_msc: Vec::new(),
             map,
         })
@@ -335,14 +343,17 @@ impl SymbolChain {
         let map = &self.map;
         let ns = map.symbols_per_frame;
         if s == 0 {
-            self.vis.fac.clear();
+            self.vis_fac.clear();
             if self.vis_msc.len() >= map.msc_cells_per_frame {
                 self.vis.msc = std::mem::take(&mut self.vis_msc);
             }
             self.vis_msc.clear();
         }
         for &c in map.fac_carriers(s) {
-            self.vis.fac.push(cells[c as usize].sig);
+            self.vis_fac.push(cells[c as usize].sig);
+        }
+        if s == self.last_fac_symbol && self.vis_fac.len() == NUM_FAC_CELLS {
+            self.vis.fac = std::mem::take(&mut self.vis_fac);
         }
         // Frame within the super frame (unknown before the first FAC: assume a frame
         // without SDC so MSC cells are still plotted).
@@ -352,12 +363,16 @@ impl SymbolChain {
             None => 1,
         };
         let sf_sym = frame * ns + s;
-        if sf_sym < map.mode().sdc_symbols() {
+        let sdc_symbols = map.mode().sdc_symbols();
+        if sf_sym < sdc_symbols {
             if sf_sym == 0 {
-                self.vis.sdc.clear();
+                self.vis_sdc.clear();
             }
             for &c in map.sdc_carriers(sf_sym) {
-                self.vis.sdc.push(cells[c as usize].sig);
+                self.vis_sdc.push(cells[c as usize].sig);
+            }
+            if sf_sym == sdc_symbols - 1 && self.vis_sdc.len() == map.sdc_cells_per_superframe {
+                self.vis.sdc = std::mem::take(&mut self.vis_sdc);
             }
         }
         for &c in map.msc_carriers(sf_sym) {
@@ -371,7 +386,9 @@ impl SymbolChain {
     /// Snapshot of the plot data.
     pub fn visuals(&self) -> ChainVisuals {
         let mut v = self.vis.clone();
-        v.pds = self.chanest.power_delay_profile().to_vec();
+        let (pds, axis) = self.chanest.power_delay_profile();
+        v.pds = pds;
+        v.pds_axis = Some(axis);
         v.snr_profile = self.chanest.snr_profile();
         v
     }

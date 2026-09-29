@@ -100,17 +100,6 @@ impl DataServices {
             .map(|(&id, _)| id)
             .collect()
     }
-
-    /// Summed (good, CRC-failed) packet counters of all services, for the MSC
-    /// indicator.
-    pub fn packet_counters(&self) -> (u64, u64) {
-        self.services
-            .values()
-            .filter_map(|s| s.stats.as_ref())
-            .fold((0, 0), |(ok, bad), st| {
-                (ok + st.packets_ok, bad + st.packets_crc_error)
-            })
-    }
 }
 
 /// Pick which service a data view shows: keep the user's choice while it still has
@@ -210,9 +199,8 @@ mod tests {
     }
 
     #[test]
-    fn packet_counters_sum_over_services() {
+    fn latest_stats_are_kept_per_service() {
         let mut d = DataServices::default();
-        assert_eq!(d.packet_counters(), (0, 0));
         let stats = |ok, bad| {
             DataEvent::Stats(DataStats {
                 packets_ok: ok,
@@ -223,7 +211,13 @@ mod tests {
         d.apply(1, &stats(10, 1), None);
         d.apply(2, &stats(5, 0), None);
         d.apply(1, &stats(12, 2), None); // cumulative: replaces the earlier value
-        assert_eq!(d.packet_counters(), (17, 2));
+        let packets = |d: &mut DataServices, id| {
+            let st = d.get_mut(id).unwrap().stats.clone().unwrap();
+            (st.packets_ok, st.packets_crc_error)
+        };
+        assert_eq!(packets(&mut d, 1), (12, 2));
+        assert_eq!(packets(&mut d, 2), (5, 0));
+        assert!(d.slideshow_ids().is_empty(), "statistics are not content");
     }
 
     #[test]

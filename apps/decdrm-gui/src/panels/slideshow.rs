@@ -55,6 +55,11 @@ impl SlideshowView {
         *self = Self::default();
     }
 
+    /// Prefer service `short_id` (shown if it has slides).
+    pub fn focus(&mut self, short_id: u8) {
+        self.service = Some(short_id);
+    }
+
     pub fn show(&mut self, ui: &mut Ui, data: &mut DataServices) {
         let ids = data.slideshow_ids();
         self.service = choose_service(self.service, &ids);

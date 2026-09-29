@@ -16,7 +16,9 @@ pub fn service_name(s: &ServiceView) -> String {
     }
 }
 
-pub fn show(ui: &mut Ui, rx: &mut RxSession) {
+/// Draw the panel; returns the short id of a service the user clicked. (The caller
+/// acts on it: selecting needs `&mut RxSession`, and this function only reads.)
+pub fn show(ui: &mut Ui, rx: &RxSession) -> Option<u8> {
     heading(ui, "Services");
     let mut clicked = None;
     if rx.snap.services.is_empty() {
@@ -30,8 +32,13 @@ pub fn show(ui: &mut Ui, rx: &mut RxSession) {
             if response.clicked() {
                 clicked = Some(s.short_id);
             }
+            let action = if s.is_audio {
+                "click to listen"
+            } else {
+                "click to show its data"
+            };
             response.on_hover_text(format!(
-                "Short id {}, service id {:06X} — click to select",
+                "Short id {}, service id {:06X} — {action}",
                 s.short_id, s.service_id
             ));
             let kind = if s.is_audio { "Audio" } else { "Data" };
@@ -47,11 +54,6 @@ pub fn show(ui: &mut Ui, rx: &mut RxSession) {
                 ui.add(egui::Label::new(RichText::new(&s.description).weak()).wrap());
             });
         }
-    }
-    // Rust note: the click is only recorded inside the loop and acted on here, because
-    // `rx.snap.services` is borrowed by the loop and `select_service` needs `&mut rx`.
-    if let Some(id) = clicked {
-        rx.select_service(id);
     }
 
     ui.add_space(6.0);
@@ -104,6 +106,7 @@ pub fn show(ui: &mut Ui, rx: &mut RxSession) {
             ui.label(RichText::new(format!("{:+.1} ppm", a.drift_ppm)).monospace());
             ui.end_row();
         });
+    clicked
 }
 
 #[cfg(test)]

@@ -1,6 +1,8 @@
 //! Snapshot of everything a user interface shows, published by the engine thread.
 
+use crate::session::MscStats;
 use crate::source::SourceInfo;
+use decdrm_core::fac::ChannelParams;
 use decdrm_core::rx::{RxStatus, Visuals};
 use std::collections::VecDeque;
 
@@ -12,8 +14,8 @@ pub const LOG_LINES: usize = 200;
 pub struct InputStatus {
     pub info: SourceInfo,
     pub position_s: f64,
-    /// RMS input level in dBFS.
-    pub level_dbfs: f32,
+    /// RMS input level in dBFS (`None` before the first samples arrive).
+    pub level_dbfs: Option<f32>,
     pub finished: bool,
 }
 
@@ -43,16 +45,26 @@ pub struct AudioStatus {
 /// Everything a UI needs, cheap enough to clone ~10 times per second.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
+    /// Publish counter: increments with every published snapshot.
+    pub seq: u64,
     pub rx: RxStatus,
+    /// Channel parameters of the latest FAC (modulations, interleaving, occupancy).
+    pub channel: Option<ChannelParams>,
+    /// Multiplex frames decoded, and how many passed their content checks.
+    pub msc: MscStats,
     pub visuals: Visuals,
     pub input: InputStatus,
     pub services: Vec<ServiceView>,
+    /// The audio service being decoded; in a data-only multiplex the chosen (or
+    /// first) data service.
     pub selected_service: Option<u8>,
     /// Latest complete text message of the selected audio service.
     pub text: Option<String>,
     pub audio: AudioStatus,
     /// Broadcast time and date from the SDC (type 8), formatted.
     pub time_utc: Option<String>,
+    /// Alternative frequencies, schedules and regions from the SDC, one line each.
+    pub afs: Vec<String>,
     pub log: VecDeque<String>,
     /// The worker stopped (end of file, error or stop command).
     pub stopped: bool,

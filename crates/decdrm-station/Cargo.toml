@@ -1,0 +1,27 @@
+[package]
+name = "decdrm-station"
+description = "DecDRM transmitter application layer: station configuration, multiplex planning and the frame loop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decdrm-core = { path = "../decdrm-core" }
+decdrm-codecs = { path = "../decdrm-codecs" }
+decdrm-data = { path = "../decdrm-data" }
+decdrm-io = { path = "../decdrm-io" }
+# Station configuration files (same versions as the GUI's settings file).
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1"
+# Journaline page files may also be written as JSON.
+serde_json = "1"
+thiserror.workspace = true
+
+[dev-dependencies]
+# The receiver session decodes the loopback tests' output.
+decdrm-engine = { path = "../decdrm-engine" }
+# Small JPEG/PNG slides for the slideshow loopback test.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+tempfile = "3"

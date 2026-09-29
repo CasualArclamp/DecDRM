@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 use std::f64::consts::PI;
 use std::sync::Arc;
 use time_wiener::TimeWiener;
+pub use track::PdsAxis;
 use track::{PdsTracker, TrackOutput};
 
 const INIT_SNR_WIEN_FREQ_DB: Real = 30.0;
@@ -202,9 +203,9 @@ impl ChannelEstimator {
         self.track.reset_sro();
     }
 
-    /// Averaged power delay profile (for plotting), rotated as used for tracking.
-    pub fn power_delay_profile(&self) -> &[Real] {
-        &self.track.avg_pds
+    /// Averaged power delay profile ordered by delay, and its delay axis (plotting).
+    pub fn power_delay_profile(&self) -> (Vec<Real>, PdsAxis) {
+        self.track.pds_view()
     }
 
     fn update_freq_wiener(&mut self, snr: Real, len_ratio: Real, offs_ratio: Real) {

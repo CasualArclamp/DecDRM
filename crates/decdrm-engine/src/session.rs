@@ -33,6 +33,18 @@ pub enum SessionEvent {
     ServicesChanged,
 }
 
+/// Multiplex frames decoded, judged by the CRCs of their contents: the frames of
+/// the decoded audio service and the packets of every data application.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MscStats {
+    /// Multiplex frames decoded (including those while the interleaver fills).
+    pub frames: u64,
+    /// Frames whose checked contents were all correct.
+    pub ok: u64,
+    /// Frames with at least one failed check.
+    pub bad: u64,
+}
+
 /// Audio decoding statistics of the current service.
 #[derive(Debug, Clone, Default)]
 pub struct AudioStats {
@@ -67,6 +79,7 @@ pub struct Session {
     audio: Option<AudioPipeline>,
     data: Vec<DataPipeline>,
     pub audio_stats: AudioStats,
+    pub msc_stats: MscStats,
     text: Option<String>,
     samples_in: u64,
     last_channel: Option<decdrm_core::fac::ChannelParams>,
@@ -82,6 +95,7 @@ impl Session {
             audio: None,
             data: Vec::new(),
             audio_stats: AudioStats::default(),
+            msc_stats: MscStats::default(),
             text: None,
             samples_in: 0,
             last_channel: None,
@@ -107,6 +121,16 @@ impl Session {
     /// Short id of the audio service being decoded.
     pub fn current_audio_service(&self) -> Option<u8> {
         self.audio.as_ref().map(|a| a.short_id)
+    }
+
+    /// The service a UI shows as selected: the audio service being decoded, else the
+    /// chosen service if it exists, else the first service with data applications.
+    pub fn selected_service(&self) -> Option<u8> {
+        self.current_audio_service()
+            .or_else(|| self.selected.filter(|&id| self.ens.service(id).is_some()))
+            .or_else(|| {
+                self.ens.services().find(|s| s.is_data() || !s.applications.is_empty()).map(|s| s.short_id)
+            })
     }
 
     /// Choose the audio service to decode (short id 0..=3).
@@ -296,6 +320,8 @@ impl Session {
     fn on_msc(&mut self, frame: &MscFrame, out: &mut Vec<SessionEvent>) {
         let Some(mux) = self.ens.multiplex() else { return };
         let logical: Vec<Option<LogicalFrame>> = demultiplex(frame, mux);
+        // Content checks of this multiplex frame (passed, failed).
+        let (mut good, mut bad) = (0u64, 0u64);
 
         if let Some(a) = self.audio.as_mut()
             && let Some(Some(lf)) = logical.get(a.stream_id as usize)
@@ -321,6 +347,7 @@ impl Session {
                     }
                 }
                 if sf.error.is_some() {
+                    bad += 1;
                     self.audio_stats.super_frame_errors += 1;
                     for _ in 0..sf.nominal_frames.unwrap_or(0) {
                         if let Ok(pcm) = a.decoder.conceal() {
@@ -333,13 +360,16 @@ impl Session {
                     match a.decoder.decode(&f.data, f.crc_byte) {
                         Ok(pcm) => {
                             if pcm.concealed {
+                                bad += 1;
                                 self.audio_stats.frames_concealed += 1;
                             } else {
+                                good += 1;
                                 self.audio_stats.frames_ok += 1;
                             }
                             out.push(SessionEvent::Audio(pcm));
                         }
                         Err(_) => {
+                            bad += 1;
                             self.audio_stats.frames_concealed += 1;
                             if let Ok(pcm) = a.decoder.conceal() {
                                 out.push(SessionEvent::Audio(pcm));
@@ -353,11 +383,23 @@ impl Session {
         for d in &mut self.data {
             if let Some(Some(lf)) = logical.get(d.app.stream_id as usize) {
                 for event in d.decoder.push_frame_with_hint(&lf.data, frame.complete) {
-                    if !matches!(event, DataEvent::Stats(_)) {
-                        out.push(SessionEvent::Data { short_id: d.short_id, event });
+                    if let DataEvent::Stats(st) = &event
+                        && frame.complete
+                    {
+                        good += u64::from(st.last_frame_packets_ok);
+                        bad += u64::from(st.last_frame_packets_bad);
                     }
+                    out.push(SessionEvent::Data { short_id: d.short_id, event });
                 }
             }
+        }
+
+        let m = &mut self.msc_stats;
+        m.frames += 1;
+        if bad > 0 {
+            m.bad += 1;
+        } else if good > 0 {
+            m.ok += 1;
         }
     }
 

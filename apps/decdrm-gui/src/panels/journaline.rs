@@ -29,6 +29,11 @@ fn page_title(browser: &JournalineBrowser, id: u16) -> String {
 }
 
 impl JournalineView {
+    /// Prefer service `short_id` (shown if it has Journaline pages).
+    pub fn focus(&mut self, short_id: u8) {
+        self.service = Some(short_id);
+    }
+
     pub fn show(&mut self, ui: &mut Ui, data: &mut DataServices) {
         let ids = data.journaline_ids();
         self.service = choose_service(self.service, &ids);

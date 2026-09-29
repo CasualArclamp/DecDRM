@@ -12,18 +12,29 @@ milestone checklist (keep it current).
 - `crates/decdrm-codecs` (+ `decdrm-fdk-sys`, `decdrm-opus-sys`) — FDK-AAC / libopus FFI.
 - `crates/decdrm-io` — WAV/FLAC, resampling, sound card (cpal), drift-compensated player.
 - `crates/decdrm-data` — packet mode, MOT, Journaline, EPG, BWS, TPEG.
-- `apps/decdrm-cli` (binary `decdrm`), later `apps/decdrm-gui` (egui).
+- `crates/decdrm-engine` — worker thread: source → `Session` (receiver + multiplex +
+  audio/text/data pipelines) → audio out / data store; `Snapshot`s for the UIs.
+- `crates/decdrm-station` — transmitter application layer (TOML station config).
+- `apps/decdrm-cli` (binary `decdrm`: `rx`, `tx`, `devices`), `apps/decdrm-gui` (egui,
+  MSRV 1.95 because of eframe).
 - `third_party/` — pinned submodules (fdk-aac v2.0.3, opus v1.6.1); clone with
   `--recursive`.
 - `samples/` (user recordings) and `reference/` (Dream r1548 source, ETSI PDFs) are
-  git-ignored and never committed.
+  git-ignored and never committed. `reference/etsi/es_201980v040201p.txt` is the DRM
+  spec as text — grep it for clause numbers and tables.
 
 ## Commands
 - Build/test: `cargo test -p decdrm-core` (DSP is slow unoptimised; the dev profile
   uses opt-level 1, deps at 3).
-- Receiver smoke test on a recording:
+- Full decode of a recording (audio, text, data):
+  `cargo run --release -p decdrm-cli -- rx samples/DW_ModeB_10kHz.flac [--out a.wav]
+  [--data-dir DIR] [--format iq]`; GUI: `cargo run --release -p decdrm-gui -- FILE`.
+- Receiver-only smoke test:
   `cargo run --release -p decdrm-core --example rxfile -- samples/DW_ModeB_10kHz.flac`
-  (append `iq` for I/Q files). `--example spectrum` prints a coarse spectrum.
+  (append `iq` for I/Q files). `--example spectrum` prints a coarse spectrum,
+  `--example modescores` the mode-detection margins per layout/SNR.
+- Loopback suite incl. long sweeps:
+  `cargo test --release -p decdrm-core --test loopback -- --include-ignored --nocapture`.
 
 ## Conventions
 - DSP in `f64` (`Real`, `Cplx`); PCM audio is `f32`. Working sample rate 48 kHz.
@@ -36,3 +47,5 @@ milestone checklist (keep it current).
 - User is strong in DSP, newer to Rust: explain non-obvious Rust idioms briefly.
 - Git: commit per milestone, repo-local identity already set; push to the private
   `origin` (github.com/CasualArclamp/DecDRM).
+- Sub-agents share one target dir and a 31 GB machine: one cargo command at a time, no
+  load generators, sound-card tests `#[ignore]`d, never play audio audibly.

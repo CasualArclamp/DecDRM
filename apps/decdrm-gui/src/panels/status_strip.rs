@@ -1,8 +1,11 @@
-//! Status strip: synchronisation / CRC indicators and the main reception figures.
+//! Status strip: synchronisation / CRC indicators, the signalled channel coding and
+//! the main reception figures, in two rows.
 
 use super::{Palette, led, value};
-use crate::indicators::{LEVEL_CLIP_DBFS, LEVEL_SILENT_DBFS, fmt_db, fmt_time};
-use crate::plots::display_dc_hz;
+use crate::indicators::{
+    LEVEL_CLIP_DBFS, LEVEL_SILENT_DBFS, fmt_db, fmt_interleaving, fmt_msc_mode, fmt_sdc_mode,
+    fmt_time, msc_help,
+};
 use crate::receiver::RxSession;
 use decdrm_core::rx::RxState;
 use eframe::egui::{self, RichText, Ui};
@@ -13,6 +16,7 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
     let leds = rx.indicators.leds;
     let running = rx.is_running();
 
+    // Row 1: indicators, state and what the FAC signals.
     ui.horizontal_wrapped(|ui| {
         led(
             ui,
@@ -44,12 +48,7 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
             "SDC",
             "CRC of the service description channel blocks of the last ~2.5 s",
         );
-        led(
-            ui,
-            leds.msc,
-            "MSC",
-            "CRCs of the audio frames and data packets carried in the MSC",
-        );
+        led(ui, leds.msc, "MSC", &msc_help(&snap.msc));
         led(
             ui,
             leds.audio,
@@ -85,18 +84,27 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
             ui.label(RichText::new("inverted").italics())
                 .on_hover_text("The spectrum is mirrored (found by auto-flip).");
         }
-        ui.separator();
-        level_meter(
-            ui,
-            snap.input.level_dbfs,
-            running && snap.input.position_s > 0.0,
-        );
-        position(ui, snap);
+        if let Some(c) = &snap.channel {
+            ui.separator();
+            value(ui, "MSC", fmt_msc_mode(c.msc_mode))
+                .on_hover_text("MSC constellation, from the FAC.");
+            value(ui, "SDC", fmt_sdc_mode(c.sdc_mode))
+                .on_hover_text("SDC constellation, from the FAC.");
+            let (word, help) = fmt_interleaving(c.interleaving);
+            value(ui, "Interleaving", word).on_hover_text(help);
+        }
+        if let Some(t) = &snap.time_utc {
+            ui.separator();
+            value(ui, "Time", t.as_str()).on_hover_text("Broadcast time and date from the SDC.");
+        }
     });
 
+    // Row 2: measurements and the input.
     ui.horizontal_wrapped(|ui| {
-        let dc = display_dc_hz(r).map_or_else(|| "–".to_string(), |f| format!("{f:.1} Hz"));
-        value(ui, "DC", dc);
+        let dc = r
+            .dc_frequency_hz
+            .map_or_else(|| "–".to_string(), |f| format!("{f:.1} Hz"));
+        value(ui, "DC", dc).on_hover_text("DRM DC carrier in the input spectrum.");
         value(ui, "SNR", fmt_db(r.snr_db));
         value(ui, "MER", fmt_db(r.mer_db));
         value(ui, "WMER", fmt_db(r.wmer_db));
@@ -104,9 +112,9 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
         value(ui, "Delay", format!("{:.2} ms", r.delay_ms));
         value(ui, "SRO", format!("{:+.2} Hz", r.sro_hz))
             .on_hover_text("Sample-rate offset being corrected, at 48 kHz.");
-        if let Some(t) = &snap.time_utc {
-            value(ui, "Time", t.as_str()).on_hover_text("Broadcast time and date from the SDC.");
-        }
+        ui.separator();
+        level_meter(ui, snap.input.level_dbfs.filter(|_| running));
+        position(ui, snap);
     });
 
     if let Some(err) = &snap.error {
@@ -115,15 +123,17 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
     }
 }
 
-fn level_meter(ui: &mut Ui, level_dbfs: f32, valid: bool) {
+/// Input level bar (−90 … 0 dBFS); `None` before the first samples or when stopped.
+fn level_meter(ui: &mut Ui, level_dbfs: Option<f32>) {
     ui.label(RichText::new("Level").weak());
-    let (fraction, text) = if valid {
-        let f = ((level_dbfs - LEVEL_SILENT_DBFS) / (0.0 - LEVEL_SILENT_DBFS)).clamp(0.0, 1.0);
-        (f, format!("{level_dbfs:.1} dBFS"))
-    } else {
-        (0.0, "–".to_string())
+    let (fraction, text) = match level_dbfs {
+        Some(l) => {
+            let f = ((l - LEVEL_SILENT_DBFS) / (0.0 - LEVEL_SILENT_DBFS)).clamp(0.0, 1.0);
+            (f, format!("{l:.1} dBFS"))
+        }
+        None => (0.0, "–".to_string()),
     };
-    let color = if valid && level_dbfs >= LEVEL_CLIP_DBFS {
+    let color = if level_dbfs.is_some_and(|l| l >= LEVEL_CLIP_DBFS) {
         egui::Color32::from_rgb(230, 55, 50)
     } else {
         ui.visuals().selection.bg_fill

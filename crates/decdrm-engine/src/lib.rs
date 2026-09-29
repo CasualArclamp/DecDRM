@@ -7,15 +7,18 @@
 //! clone) and channel endpoints for commands and events. `crossbeam_channel` is used
 //! because its channels can be polled without blocking from a GUI frame loop.
 
+pub mod afs;
 pub mod audio_out;
 pub mod data_store;
+pub mod logger;
 pub mod session;
 pub mod snapshot;
 pub mod source;
 
 pub use decdrm_core::rx::{InputFormat, RealChannel, ReceiverConfig};
 pub use decdrm_data;
-pub use session::{Session, SessionEvent};
+pub use logger::{LogConfig, LogFormat};
+pub use session::{MscStats, Session, SessionEvent};
 pub use snapshot::{AudioStatus, InputStatus, ServiceView, Snapshot};
 pub use source::{InputSpec, Source, SourceInfo};
 
@@ -38,18 +41,28 @@ pub struct EngineConfig {
     pub record_audio: Option<std::path::PathBuf>,
     /// Directory for slideshow images, websites, EPG and raw data.
     pub data_dir: Option<std::path::PathBuf>,
+    /// Reception log (metrics rows as CSV or JSON Lines, events in JSON Lines).
+    pub log: Option<LogConfig>,
 }
 
-impl EngineConfig {
-    pub fn file(path: impl Into<std::path::PathBuf>) -> Self {
+impl Default for EngineConfig {
+    /// The default sound-card input, no outputs.
+    fn default() -> Self {
         Self {
-            input: InputSpec::File { path: path.into(), realtime: false },
+            input: InputSpec::Device { name: None, channels: None },
             receiver: ReceiverConfig::default(),
             play_audio: false,
             output_device: None,
             record_audio: None,
             data_dir: None,
+            log: None,
         }
+    }
+}
+
+impl EngineConfig {
+    pub fn file(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { input: InputSpec::File { path: path.into(), realtime: false }, ..Self::default() }
     }
 }
 
@@ -160,6 +173,7 @@ fn worker(
     // player's drift compensation.
     let mut audio = audio_out::AudioOut::new(cfg.play_audio, cfg.output_device.clone(), info.is_file, cfg.record_audio.clone())?;
     let mut saver = cfg.data_dir.clone().map(data_store::DataStore::new);
+    let mut logger = cfg.log.as_ref().map(logger::Logger::create).transpose()?;
     let log = |line: String, snap: &mut Snapshot| {
         let _ = ev_tx.send(EngineEvent::Log(line.clone()));
         snap.push_log(line);
@@ -177,6 +191,9 @@ fn worker(
             match c {
                 Command::Stop => {
                     audio.finish()?;
+                    if let Some(l) = logger.as_mut() {
+                        l.finish(source.position_s(), &session, &snap)?;
+                    }
                     publish(shared, &mut snap, &session, &source, &audio, true);
                     return Ok(());
                 }
@@ -186,22 +203,29 @@ fn worker(
                 }
                 Command::SelectService(id) => {
                     session.select_service(id);
-                    snap.selected_service = Some(id);
+                    snap.selected_service = session.selected_service();
                 }
             }
         }
 
         let Some(frames) = source.read(chunk_frames)? else {
             audio.finish()?;
+            if let Some(l) = logger.as_mut() {
+                l.finish(source.position_s(), &session, &snap)?;
+            }
             log(format!("end of input after {:.1} s", source.position_s()), &mut snap);
             publish(shared, &mut snap, &session, &source, &audio, true);
             return Ok(());
         };
         if !frames.is_empty() {
             let rms = (frames.iter().map(|v| v * v).sum::<f32>() / frames.len() as f32).sqrt();
-            snap.input.level_dbfs = 20.0 * rms.max(1e-9).log10();
+            snap.input.level_dbfs = Some(20.0 * rms.max(1e-9).log10());
         }
+        let t = source.position_s();
         for ev in session.push(&frames) {
+            if let Some(l) = logger.as_mut() {
+                log_event(l, t, &ev)?;
+            }
             match ev {
                 SessionEvent::Log(l) => log(l, &mut snap),
                 SessionEvent::Audio(pcm) => {
@@ -225,11 +249,14 @@ fn worker(
                 }
                 SessionEvent::ServicesChanged => {
                     snap.services = session.service_views();
-                    snap.selected_service = session.current_audio_service();
+                    snap.selected_service = session.selected_service();
                 }
             }
         }
 
+        if let Some(l) = logger.as_mut() {
+            l.tick(t, &session, &snap)?;
+        }
         if last_publish.elapsed() >= Duration::from_millis(100) {
             publish(shared, &mut snap, &session, &source, &audio, false);
             last_publish = Instant::now();
@@ -244,6 +271,27 @@ fn worker(
     }
 }
 
+/// Events worth a line in the JSON Lines log.
+fn log_event(l: &mut logger::Logger, t: f64, ev: &SessionEvent) -> Result<()> {
+    use decdrm_data::DataEvent;
+    match ev {
+        SessionEvent::Log(m) => l.event(t, "log", &[("message", m.clone())]),
+        SessionEvent::Text(Some(m)) => l.event(t, "text", &[("text", m.clone())]),
+        SessionEvent::Data { short_id, event } => {
+            let obj = |kind: &str, name: &str, size: usize| {
+                vec![("service", short_id.to_string()), ("object", kind.to_string()), ("name", name.to_string()), ("bytes", size.to_string())]
+            };
+            match event {
+                DataEvent::SlideShowImage { name, data, .. } => l.event(t, "data", &obj("slide", name, data.len())),
+                DataEvent::WebsiteFile { path, data, .. } => l.event(t, "data", &obj("website_file", path, data.len())),
+                DataEvent::Epg { name, xml } => l.event(t, "data", &obj("epg", name, xml.len())),
+                _ => Ok(()),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
 fn publish(
     shared: &Arc<Mutex<Snapshot>>,
     snap: &mut Snapshot,
@@ -252,7 +300,10 @@ fn publish(
     audio: &audio_out::AudioOut,
     finished: bool,
 ) {
+    snap.seq += 1;
     snap.rx = session.status().clone();
+    snap.channel = session.ensemble().channel().copied();
+    snap.msc = session.msc_stats;
     snap.visuals = session.visuals();
     snap.input.position_s = source.position_s();
     snap.input.finished = finished;
@@ -265,6 +316,7 @@ fn publish(
         snap.audio.buffer_ms = buffered.as_secs_f32() * 1000.0;
         snap.audio.drift_ppm = ppm;
     }
+    snap.afs = afs::describe(session.ensemble().alternative_frequencies(), session.ensemble().time());
     snap.time_utc = session.ensemble().time().map(|t| {
         let (y, m, d) = t.date();
         format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", t.hour, t.minute)

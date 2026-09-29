@@ -1,0 +1,109 @@
+# DecDRM station configuration — run with
+#
+#     decdrm tx crates/decdrm-station/examples/station.toml --duration 30
+#     decdrm tx crates/decdrm-station/examples/station.toml --check     # only print the multiplex
+#
+# Relative paths are relative to this file. Names are matched case-insensitively and
+# ignoring "-", "_" and spaces ("64-QAM" = "64qam" = "QAM64").
+
+# --- Transmission parameters (FAC channel parameters, MSC protection) --------------
+[channel]
+mode = "B"                   # robustness mode A (good channels) .. D (severe Doppler/delay)
+occupancy = 3                # 0..5 = 4.5, 5, 9, 10, 18, 20 kHz; modes C and D only 3 or 5
+msc_mode = "64-QAM"          # "16-QAM", "64-QAM", "HMsym" or "HMmix" (hierarchical 64-QAM)
+sdc_mode = "16-QAM"          # "16-QAM" or "4-QAM" (robust, about half the SDC capacity)
+interleaving = "long"        # "long" (2 s, robust against fading) or "short" (400 ms)
+protection_b = 1             # 0 = most robust; 0-1 with 16-QAM, 0-3 with 64-QAM
+protection_a = 0             # only used when a stream sets part = "A" (unequal protection)
+protection_hierarchical = 0  # HMsym/HMmix: protection of the hierarchical stream (0-3)
+
+# --- Output --------------------------------------------------------------------------
+[output]
+file = "drm_station.wav"     # WAV or FLAC, 48 kHz; the CLI's --output FILE replaces this
+sample_format = "int16"      # "int16", "int24" or "float32" (WAV only)
+# device = "CABLE-A Input"   # sound card (name or unique part of it; "default" = system default)
+# device_buffer_ms = 400     # audio queued ahead on the sound card
+format = "real"              # "real" IF signal (1 channel) or "iq" (2 channels, I left)
+# if_hz = 12000              # real: DRM DC carrier frequency (default 12 kHz, band centre for 18/20 kHz)
+# iq_offset_hz = 0           # iq: DC carrier offset
+# iq_swap = false            # iq: I on the right channel
+level_dbfs = -15             # RMS level per channel; OFDM peaks are ~10 dB higher
+band_limit = true            # transmit channel filter against the OFDM side lobes
+
+# --- SDC time and date (type 8), sent at the start and then once per minute ---------
+[time]
+enabled = true
+# start = "2026-09-29T18:00:00Z"   # time of the first frame (default: system clock); it
+                                   # then advances with the signal, 400 ms per frame
+# local_offset_minutes = 120       # local time offset to signal (half-hour steps)
+
+# --- Services: up to four, Short Ids 0.. in this order --------------------------------
+[[service]]
+label = "DecDRM Radio"       # up to 16 characters (SDC type 1)
+id = 0xD0D001                # 24-bit service id (hex allowed)
+language = "English"         # FAC language: name from ES 201 980 table 18 or 0-15
+iso_language = "eng"         # SDC type 12 (optional): ISO 639-2 language ...
+iso_country = "gb"           # ... and ISO 3166 country code
+programme_type = "Pop Music" # FAC programme type: name from table 19 or 0-31
+
+[service.audio]
+codec = "he-aac"             # "aac", "he-aac" (SBR), "he-aac-v2" (SBR + parametric stereo), "opus"
+core_rate = 12000            # AAC core rate: 12000 (5 frames per 400 ms) or 24000 (10 frames)
+stereo = false               # stereo coding (HE-AAC v2 is always parametric stereo)
+# share = 1.0                # weight when several audio services split the capacity
+# part = "B"                 # "A" puts the stream into the higher protected part
+# hierarchical = false       # HMsym/HMmix: carry this stream in the hierarchical part
+# The audio stream gets whatever the data applications leave; the encoder's bit rate
+# follows from its length. Text messages (up to 128 bytes of UTF-8 each) take 4 bytes
+# of the stream per frame and are sent one after the other.
+text = ["Welcome to DecDRM", "A Rust DRM30 transmitter"]
+
+[service.audio.input]        # exactly one of file / device / tone_hz
+tone_hz = 1000.0             # built-in test tone ...
+level_dbfs = -12             # ... and its peak level
+# file = "programme.flac"    # WAV/FLAC, any rate and channel count (resampled, mixed)
+# loop = true                # restart the file at its end (false: silence follows)
+# device = "Line In"         # sound-card capture
+# gain_db = 0.0              # gain for file or sound-card input
+
+# A data application that rides along with the audio service (SDC type 5 with this
+# service's Short Id), e.g. a slideshow for the programme:
+# [[service.app]]
+# type = "slideshow"         # "slideshow", "website", "journaline" or "epg"
+# path = "slides"            # folder of JPEG/PNG images (cycled in name order)
+# bitrate = 2000             # requested bit/s, rounded up to whole packets per frame
+# packet_length = 45         # packet data field bytes (1-255; +3 bytes header and CRC)
+# packet_id = 0              # 0-3 (default: first free one in the stream)
+# stream = "data"            # share one packet stream with other applications (same packet length)
+# segment_size = 512         # MOT segment size
+
+# A data service: Journaline news pages and an EPG in one shared packet stream.
+[[service]]
+label = "DecDRM News"
+id = 0xD0D002
+language = "English"
+# fac_app_id = 0             # FAC application id (0 = described by SDC type 5 only)
+
+[service.data]
+type = "journaline"
+path = "journaline.toml"     # page file: TOML, or JSON with a .json extension
+compress = false             # deflate-compress the pages
+bitrate = 1200
+stream = "data"
+
+[[service.app]]
+type = "epg"                 # programme guide of the audio service's schedule
+bitrate = 400
+stream = "data"
+# path = "schedule.toml"     # more [[programme]] entries from a file
+
+[[service.app.programme]]
+title = "Morning Show"       # mediumName (16 characters; longer names also go to longName)
+start = "2026-09-29T06:00:00Z"
+duration_min = 180
+description = "Music and news to start the day"
+
+[[service.app.programme]]
+title = "DecDRM Hour"
+start = "2026-09-29T09:00:00Z"
+duration_min = 60

@@ -4,9 +4,10 @@
 //! unit-tested. Times are seconds since an arbitrary epoch (`f64`) rather than
 //! `Instant`s for the same reason.
 
+use decdrm_core::fac::{Interleaving, MscMode, SdcMode};
 use decdrm_core::rx::RxStatus;
 use decdrm_core::rx::framesync::FrameSyncState;
-use decdrm_engine::{AudioStatus, InputStatus, Snapshot};
+use decdrm_engine::{AudioStatus, InputStatus, MscStats, Snapshot};
 use std::collections::VecDeque;
 
 /// State of one indicator.
@@ -38,13 +39,11 @@ pub const LEVEL_WEAK_DBFS: f32 = -60.0;
 pub const LEVEL_HOT_DBFS: f32 = -10.0;
 pub const LEVEL_CLIP_DBFS: f32 = -3.0;
 
-/// Input: level within a sensible range.
+/// Input: level within a sensible range (grey until the first samples arrive).
 pub fn input_led(running: bool, input: &InputStatus) -> Led {
-    // The level is only meaningful once some input has been read (it starts at 0 dBFS).
-    if !running || input.position_s <= 0.0 {
+    let Some(l) = input.level_dbfs.filter(|_| running) else {
         return Led::Off;
-    }
-    let l = input.level_dbfs;
+    };
     if !l.is_finite() || l <= LEVEL_SILENT_DBFS || l >= LEVEL_CLIP_DBFS {
         Led::Red
     } else if l <= LEVEL_WEAK_DBFS || l >= LEVEL_HOT_DBFS {
@@ -171,7 +170,8 @@ pub struct Indicators {
 impl Default for Indicators {
     fn default() -> Self {
         Self {
-            // A FAC block arrives every 400 ms, an SDC block every 1.2 s.
+            // A FAC block and a multiplex frame arrive every 400 ms, an SDC block
+            // every 1.2 s; each window spans about three of them.
             fac: CrcHistory::new(1.3),
             sdc: CrcHistory::new(2.5),
             msc: CrcHistory::new(1.3),
@@ -186,22 +186,14 @@ impl Indicators {
         *self = Self::default();
     }
 
-    /// Update from a new snapshot taken at time `t`. `data_packets` are the summed
-    /// (good, CRC-failed) packet counters of all data services.
-    ///
-    /// TODO(engine): the MSC indicator is derived from the audio frame and data packet
-    /// CRCs because the snapshot has no MSC counters of its own (e.g. `msc_ok` /
-    /// `msc_bad` in `RxStatus`), and the engine does not forward `DataEvent::Stats`
-    /// yet, so data-only services leave it grey.
-    pub fn update(&mut self, t: f64, snap: &Snapshot, running: bool, data_packets: (u64, u64)) {
+    /// Update from a new snapshot taken at time `t`.
+    pub fn update(&mut self, t: f64, snap: &Snapshot, running: bool) {
         let rx = &snap.rx;
         self.fac.push(t, rx.fac_ok, rx.fac_bad);
         self.sdc.push(t, rx.sdc_ok, rx.sdc_bad);
         let a = &snap.audio;
         self.audio.push(t, a.frames_ok, a.frames_bad);
-        let msc_ok = a.frames_ok + data_packets.0;
-        let msc_bad = a.frames_bad + data_packets.1;
-        self.msc.push(t, msc_ok, msc_bad);
+        self.msc.push(t, snap.msc.ok, snap.msc.bad);
 
         let gate = |led: Led| if running { led } else { Led::Off };
         self.leds = Leds {
@@ -210,13 +202,20 @@ impl Indicators {
             frame_sync: frame_sync_led(running, rx),
             fac: gate(self.fac.led()),
             sdc: gate(self.sdc.led()),
-            msc: if msc_ok + msc_bad == 0 {
-                Led::Off
-            } else {
-                gate(self.msc.led())
-            },
+            msc: msc_led(running, &snap.msc, &self.msc),
             audio: audio_led(running, a, &self.audio),
         };
+    }
+}
+
+/// MSC: from the engine's per-multiplex-frame verdicts. Grey until a frame with
+/// checkable content has been judged (none are while the long interleaver fills, or
+/// if no service carries a CRC).
+pub fn msc_led(running: bool, msc: &MscStats, history: &CrcHistory) -> Led {
+    if !running || msc.ok + msc.bad == 0 {
+        Led::Off
+    } else {
+        history.led()
     }
 }
 
@@ -257,12 +256,45 @@ pub fn fmt_error_rate(ok: u64, bad: u64) -> String {
     }
 }
 
+pub fn fmt_msc_mode(m: MscMode) -> &'static str {
+    match m {
+        MscMode::Qam64Sm => "64-QAM",
+        MscMode::Qam64HmSym => "64-QAM HMsym",
+        MscMode::Qam64HmMix => "64-QAM HMmix",
+        MscMode::Qam16Sm => "16-QAM",
+    }
+}
+
+pub fn fmt_sdc_mode(m: SdcMode) -> &'static str {
+    match m {
+        SdcMode::Qam16 => "16-QAM",
+        SdcMode::Qam4 => "4-QAM",
+    }
+}
+
+/// Interleaving depth as a word, and its duration for a tooltip.
+pub fn fmt_interleaving(i: Interleaving) -> (&'static str, &'static str) {
+    match i {
+        Interleaving::Long => ("long", "long interleaving: 2 s (5 multiplex frames)"),
+        Interleaving::Short => ("short", "short interleaving: 400 ms (1 multiplex frame)"),
+    }
+}
+
+/// Tooltip for the MSC indicator with the engine's frame counts.
+pub fn msc_help(m: &MscStats) -> String {
+    format!(
+        "multiplex frames whose audio frames and data packets passed their CRCs \
+         ({} ok, {} bad, {} decoded in all)",
+        m.ok, m.bad, m.frames
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use decdrm_core::params::RobustnessMode;
 
-    fn running_input(level: f32) -> InputStatus {
+    fn input(level: Option<f32>) -> InputStatus {
         InputStatus {
             position_s: 1.0,
             level_dbfs: level,
@@ -272,18 +304,14 @@ mod tests {
 
     #[test]
     fn input_levels() {
-        assert_eq!(input_led(false, &running_input(-30.0)), Led::Off);
-        assert_eq!(
-            input_led(true, &InputStatus::default()),
-            Led::Off,
-            "nothing read yet"
-        );
-        assert_eq!(input_led(true, &running_input(-30.0)), Led::Green);
-        assert_eq!(input_led(true, &running_input(-8.0)), Led::Yellow);
-        assert_eq!(input_led(true, &running_input(-1.0)), Led::Red);
-        assert_eq!(input_led(true, &running_input(-70.0)), Led::Yellow);
-        assert_eq!(input_led(true, &running_input(-180.0)), Led::Red);
-        assert_eq!(input_led(true, &running_input(f32::NAN)), Led::Red);
+        assert_eq!(input_led(false, &input(Some(-30.0))), Led::Off);
+        assert_eq!(input_led(true, &input(None)), Led::Off, "nothing read yet");
+        assert_eq!(input_led(true, &input(Some(-30.0))), Led::Green);
+        assert_eq!(input_led(true, &input(Some(-8.0))), Led::Yellow);
+        assert_eq!(input_led(true, &input(Some(-1.0))), Led::Red);
+        assert_eq!(input_led(true, &input(Some(-70.0))), Led::Yellow);
+        assert_eq!(input_led(true, &input(Some(-180.0))), Led::Red);
+        assert_eq!(input_led(true, &input(Some(f32::NAN))), Led::Red);
     }
 
     #[test]
@@ -352,14 +380,14 @@ mod tests {
         let mut ind = Indicators::default();
         let mut snap = Snapshot::default();
         snap.rx.fac_ok = 5;
-        ind.update(0.0, &snap, true, (0, 0));
+        ind.update(0.0, &snap, true);
         snap.rx.fac_ok = 7;
-        ind.update(0.5, &snap, true, (0, 0));
+        ind.update(0.5, &snap, true);
         assert_eq!(ind.leds.fac, Led::Green);
         assert_eq!(ind.leds.sdc, Led::Red, "no SDC yet");
         assert_eq!(ind.leds.msc, Led::Off, "no MSC information at all");
         assert_eq!(ind.leds.audio, Led::Off, "no audio decoder yet");
-        ind.update(0.6, &snap, false, (0, 0));
+        ind.update(0.6, &snap, false);
         assert_eq!(ind.leds, Leds::default(), "everything off when stopped");
     }
 
@@ -368,12 +396,31 @@ mod tests {
         let mut ind = Indicators::default();
         let mut snap = Snapshot::default();
         snap.audio.codec = "AAC".into();
-        ind.update(0.0, &snap, true, (10, 0));
+        // Frames decoded while the interleaver fills are not judged: MSC stays grey.
+        snap.msc = MscStats {
+            frames: 4,
+            ok: 0,
+            bad: 0,
+        };
+        ind.update(0.0, &snap, true);
         assert_eq!(ind.leds.audio, Led::Red, "decoder present but no frames");
+        assert_eq!(ind.leds.msc, Led::Off);
         snap.audio.frames_ok = 10;
-        ind.update(0.4, &snap, true, (12, 1));
+        snap.msc = MscStats {
+            frames: 6,
+            ok: 1,
+            bad: 1,
+        };
+        ind.update(0.4, &snap, true);
         assert_eq!(ind.leds.audio, Led::Green);
-        assert_eq!(ind.leds.msc, Led::Yellow, "a data packet failed its CRC");
+        assert_eq!(ind.leds.msc, Led::Yellow, "one good and one bad frame");
+        snap.msc = MscStats {
+            frames: 7,
+            ok: 2,
+            bad: 1,
+        };
+        ind.update(2.0, &snap, true);
+        assert_eq!(ind.leds.msc, Led::Green, "the bad frame aged out");
     }
 
     #[test]
@@ -386,5 +433,15 @@ mod tests {
         assert_eq!(fmt_time(59.96), "1:00.0");
         assert_eq!(fmt_error_rate(0, 0), "–");
         assert_eq!(fmt_error_rate(3, 1), "25.0 %");
+        assert_eq!(fmt_msc_mode(MscMode::Qam64HmMix), "64-QAM HMmix");
+        assert_eq!(fmt_msc_mode(MscMode::Qam16Sm), "16-QAM");
+        assert_eq!(fmt_sdc_mode(SdcMode::Qam4), "4-QAM");
+        assert_eq!(fmt_interleaving(Interleaving::Long).0, "long");
+        let help = msc_help(&MscStats {
+            frames: 10,
+            ok: 7,
+            bad: 1,
+        });
+        assert!(help.contains("7 ok, 1 bad, 10 decoded"), "{help}");
     }
 }

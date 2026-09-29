@@ -229,7 +229,13 @@ impl DecDrmApp {
 
     /// Services, text, audio, then the data-service views filling the rest.
     fn side_panel(&mut self, ui: &mut Ui) {
-        panels::services::show(ui, &mut self.rx);
+        if let Some(id) = panels::services::show(ui, &self.rx) {
+            // An audio service is decoded (and its text shown); a data service's
+            // content is brought up in the data views.
+            self.rx.select_service(id);
+            self.slideshow.focus(id);
+            self.journaline.focus(id);
+        }
         ui.separator();
         ui.horizontal(|ui| {
             heading(ui, "Data");

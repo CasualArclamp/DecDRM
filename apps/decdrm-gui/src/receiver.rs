@@ -19,8 +19,8 @@
 
 use crate::data::DataServices;
 use crate::indicators::Indicators;
-use crate::plots::{HeldPoints, PlotData};
-use decdrm_engine::{Command, Engine, EngineConfig, EngineEvent, InputSpec, Snapshot};
+use crate::plots::PlotData;
+use decdrm_engine::{Command, Engine, EngineConfig, EngineEvent, InputSpec, ServiceView, Snapshot};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -30,8 +30,30 @@ pub const FETCH_INTERVAL: Duration = Duration::from_millis(100);
 pub const LOG_CAPACITY: usize = 5000;
 /// Text messages kept for the history list.
 pub const TEXT_HISTORY: usize = 20;
-/// Snapshots for which a complete FAC/SDC constellation is held (see [`HeldPoints`]).
-const CONSTELLATION_HOLD: u32 = 30;
+
+/// What selecting service `clicked` changes before the engine confirms it: the
+/// highlighted service, and whether the text-message history must be cleared.
+///
+/// The engine highlights the audio service it decodes, falling back to the chosen
+/// service only when no audio service is decoded; choosing a data service therefore
+/// changes nothing while an audio service plays (its data is decoded anyway).
+/// Mirroring that rule keeps the list from flickering until the next snapshot.
+pub fn selection_preview(
+    services: &[ServiceView],
+    current: Option<u8>,
+    clicked: u8,
+) -> (Option<u8>, bool) {
+    let is_audio = services.iter().any(|s| s.short_id == clicked && s.is_audio);
+    let any_audio = services.iter().any(|s| s.is_audio);
+    if is_audio {
+        // Text messages belong to the decoded audio service.
+        (Some(clicked), current != Some(clicked))
+    } else if !any_audio {
+        (Some(clicked), false)
+    } else {
+        (current, false)
+    }
+}
 
 /// Bounded list of log lines.
 #[derive(Debug, Clone, Default)]
@@ -89,8 +111,6 @@ pub struct RxSession {
     pub snap: Snapshot,
     /// Plot data prepared from `snap`.
     pub plots: PlotData,
-    held_fac: HeldPoints,
-    held_sdc: HeldPoints,
     pub indicators: Indicators,
     pub data: DataServices,
     pub log: LogBuffer,
@@ -111,8 +131,6 @@ impl Default for RxSession {
             stopping: false,
             snap: Snapshot::default(),
             plots: PlotData::default(),
-            held_fac: HeldPoints::new(CONSTELLATION_HOLD),
-            held_sdc: HeldPoints::new(CONSTELLATION_HOLD),
             indicators: Indicators::default(),
             data: DataServices::default(),
             log: LogBuffer::default(),
@@ -141,8 +159,6 @@ impl RxSession {
         self.live = matches!(cfg.input, InputSpec::Device { .. });
         self.snap = Snapshot::default();
         self.plots = PlotData::default();
-        self.held_fac = HeldPoints::new(CONSTELLATION_HOLD);
-        self.held_sdc = HeldPoints::new(CONSTELLATION_HOLD);
         self.indicators.clear();
         self.data.clear();
         self.texts.clear();
@@ -167,15 +183,17 @@ impl RxSession {
         }
     }
 
+    /// Ask the engine to decode / show service `short_id`, and show the expected
+    /// result right away (see [`selection_preview`]); the next snapshot confirms it.
     pub fn select_service(&mut self, short_id: u8) {
         if let Some(e) = &self.engine {
             e.command(Command::SelectService(short_id));
-            if self.snap.selected_service != Some(short_id) {
-                // Text messages belong to the selected audio service.
+            let (highlight, clear_texts) =
+                selection_preview(&self.snap.services, self.snap.selected_service, short_id);
+            if clear_texts {
                 self.texts.clear();
             }
-            // Show the choice immediately; the next snapshot confirms it.
-            self.snap.selected_service = Some(short_id);
+            self.snap.selected_service = highlight;
         }
     }
 
@@ -221,19 +239,20 @@ impl RxSession {
             .last_fetch
             .is_none_or(|t| now.duration_since(t) >= FETCH_INTERVAL);
         if due || finished {
-            self.snap = engine.snapshot();
-            let mut plots = PlotData::from_snapshot(&self.snap);
-            // `std::mem::take` moves the vector out and leaves an empty one behind,
-            // avoiding a copy.
-            plots.fac = self.held_fac.update(std::mem::take(&mut plots.fac));
-            plots.sdc = self.held_sdc.update(std::mem::take(&mut plots.sdc));
-            self.plots = plots;
+            let snap = engine.snapshot();
+            // `seq` counts the engine's publications: the same number means the same
+            // content, so the plot data need not be prepared again.
+            if snap.seq != self.snap.seq {
+                self.plots = PlotData::from_snapshot(&snap);
+            }
+            self.snap = snap;
             self.last_fetch = Some(now);
             changed = true;
+            // The CRC indicators work on time windows, so they are updated on every
+            // fetch, new content or not.
             let t = now.duration_since(self.epoch).as_secs_f64();
             let running = !finished && !self.snap.stopped;
-            self.indicators
-                .update(t, &self.snap, running, self.data.packet_counters());
+            self.indicators.update(t, &self.snap, running);
         }
         if finished {
             // The worker has exited, so dropping the handle joins it immediately. The
@@ -294,6 +313,24 @@ mod tests {
         s.select_service(1);
         assert!(!s.is_stopping());
         assert_eq!(s.snap.selected_service, None, "no engine, no selection");
+    }
+
+    #[test]
+    fn selection_follows_the_engine_rule() {
+        let service = |short_id, is_audio| ServiceView {
+            short_id,
+            is_audio,
+            ..Default::default()
+        };
+        let mixed = [service(0, true), service(1, true), service(2, false)];
+        // Another audio service: highlight it and drop the old service's texts.
+        assert_eq!(selection_preview(&mixed, Some(0), 1), (Some(1), true));
+        assert_eq!(selection_preview(&mixed, Some(0), 0), (Some(0), false));
+        // A data service while audio is decoded: the audio service stays highlighted.
+        assert_eq!(selection_preview(&mixed, Some(0), 2), (Some(0), false));
+        // Data-only multiplex: the chosen data service is highlighted.
+        let data_only = [service(0, false), service(1, false)];
+        assert_eq!(selection_preview(&data_only, Some(0), 1), (Some(1), false));
     }
 
     /// End-to-end with a missing file: the engine reports the error and stops, and the

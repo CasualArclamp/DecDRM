@@ -206,7 +206,7 @@ fn output_for(layout: ChannelLayout, link: Link) -> OutputStage {
 /// Transmitter frame that carries the end of multiplex frame `j` (multiplex frame
 /// 3s+0 ends in transmission frame 3s+1, 3s+1 and 3s+2 end in 3s+2).
 fn mux_end_frame(j: usize) -> usize {
-    if j % 3 == 0 { j + 1 } else { j - j % 3 + 2 }
+    if j.is_multiple_of(3) { j + 1 } else { j - j % 3 + 2 }
 }
 
 fn run(sc: &Scenario) -> Outcome {

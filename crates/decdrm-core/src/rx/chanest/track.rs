@@ -3,11 +3,18 @@
 //! offset estimation from the drift of the strongest path, and the delay-spread
 //! estimate used to adapt the frequency-direction Wiener filter.
 //!
-//! Unlike Dream, the strongest path is located with sub-bin precision (Gaussian
-//! interpolation of the averaged PDS, plus the fractional part of the timing
-//! corrections) and the drift is a least-squares slope rather than the difference
-//! of two integer bin indices: one impulse-response bin is ~5 samples, so a single
-//! bin flip within the 4 s acquisition would otherwise read as a ~1.3 Hz offset.
+//! Sample-rate offset: Dream tracks the integer index of the strongest path. One
+//! impulse-response bin is ~5 samples, so a single bin flip within its 4 s
+//! acquisition reads as ~1.3 Hz, and on multipath channels the strongest path hops
+//! between close paths. Here the drift is measured as the translation of the whole
+//! averaged PDS between snapshots 0.1 s apart (cross-correlation with sub-bin
+//! interpolation, plus the timing corrections applied in between; the average
+//! follows timing corrections exactly, including fractions of a bin). Clock drift
+//! moves the profile a little in every step, fading of unresolved paths sporadically
+//! by up to a bin or two, so acquisition takes the median step and tracking a sum
+//! with outlying steps clipped. Tracking corrects the residual offset with a 10 s
+//! time constant, compensating for the corrections applied within its 30 s
+//! measurement window (otherwise the loop lags and overshoots).
 
 use crate::cellmap::CellMap;
 use crate::dsp::fft::Fft;
@@ -20,12 +27,37 @@ const TICONST_PDS: Real = 0.25;
 const CONT_PROP_ENERGY: Real = 0.02;
 const NUM_SAM_IR_FOR_MIN_STAT: usize = 10;
 const OVER_EST_FACT_MIN_STAT: Real = 4.0;
-const CONTR_SAMP_OFF_INT: Real = 0.001;
+/// Drift history for SRO tracking, s.
 const HIST_LEN_SAM_OFF_S: Real = 30.0;
+/// SRO acquisition: the first estimate after this long.
 const SAM_OFF_ACQ_LEN_S: Real = 4.0;
-/// Larger per-symbol changes of the strongest-path position (IR bins) are treated
-/// as jumps and removed from the drift history.
-const MAX_PEAK_STEP_BINS: Real = 2.0;
+/// The first part of the acquisition window is left out: the averaged PDS is still
+/// building up.
+const SAM_OFF_ACQ_SETTLE_S: Real = 1.0;
+/// Time between PDS snapshots for the drift measurement, s.
+const SRO_STEP_S: Real = 0.1;
+/// Largest drift searched for between snapshots, IR bins: 1000 ppm moves the IR by
+/// about one bin per 0.1 s.
+const SRO_MAX_STEP_BINS: usize = 3;
+/// Tracking: fraction of the residual offset corrected per second.
+const SRO_TRACK_RATE: Real = 0.1;
+/// Tracking starts with this much drift history, s.
+const SRO_TRACK_MIN_S: Real = 5.0;
+
+/// Delay axis of the averaged power delay profile returned by
+/// [`PdsTracker::pds_view`], for plotting (like Dream's `GetAvPoDeSp`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PdsAxis {
+    /// Delay of the first value, ms (negative delays: pre-echo region).
+    pub start_ms: Real,
+    /// Delay between consecutive values, ms.
+    pub step_ms: Real,
+    /// Guard interval (start, end), ms.
+    pub guard_ms: (Real, Real),
+    /// Estimated begin and end of the channel impulse response, ms.
+    pub pds_begin_ms: Real,
+    pub pds_end_ms: Real,
+}
 
 /// Outputs of one tracking step.
 #[derive(Debug, Clone, Copy, Default)]
@@ -42,10 +74,12 @@ pub struct TrackOutput {
 
 #[derive(Debug)]
 pub struct PdsTracker {
-    n_car: usize,
-    fft_len: usize,
+    /// Impulse-response samples per input sample: the IR is the IFFT over the
+    /// `num_pil` pilot-grid carriers spaced `x` apart, so one IR sample lasts
+    /// `fft_len / (x · num_pil)` input samples. (Dream uses `num_carriers / fft_len`,
+    /// which is off by up to a few per cent and biases the fractional SRO estimate.)
+    ir_per_sample: Real,
     num_pil: usize,
-    sym_delay: usize,
     ti_corr_hist: VecDeque<i64>,
     new_meas_hist: VecDeque<i64>,
     fft: Fft,
@@ -53,23 +87,36 @@ pub struct PdsTracker {
     work: Vec<Cplx>,
     pub avg_pds: Vec<Real>,
     rotated: Vec<Real>,
+    scratch: Vec<Real>,
     lambda: Real,
     guard_ir: Real,
     st_po_rot: usize,
-    frac_ti_cor: Real,
     frac_contr: Real,
     pub tracking: bool,
     pub sro_acquisition: bool,
     // Sample-rate offset estimation.
-    len_corr_hist: usize,
+    sym_rate: Real,
     acq_cnt_max: usize,
+    acq_settle: usize,
     acq_cnt: usize,
-    /// Position of the strongest path in a fixed frame, IR bins, one per symbol.
-    sr_hist: VecDeque<Real>,
-    /// Fill the whole history with the next position (after a restart).
-    sr_fill: bool,
-    integ_ti_corrections: i64,
+    /// Symbols between PDS snapshots, and symbols since the last one.
+    xc_period: usize,
+    xc_count: usize,
+    /// Last snapshot: the rotated averaged PDS and the position of its frame.
+    xc_ref: Option<(Vec<Real>, Real)>,
+    /// Drift between successive snapshots (IR bins) and the tracker's cumulative
+    /// SRO correction when it was measured (Hz), newest last.
+    drift: VecDeque<(Real, Real)>,
+    drift_max: usize,
+    /// SRO corrections emitted since the drift history started, Hz.
+    applied_hz: Real,
+    /// Timing corrections followed by the averaged PDS so far (IR bins): the
+    /// position of its frame.
+    frame_pos: Real,
     sym_len_ir: Real,
+    /// Duration of one impulse-response sample, ms.
+    ir_step_ms: Real,
+    guard_ms: Real,
     // Delay-spread estimate.
     pub pds_begin: Real,
     pub pds_end: Real,
@@ -79,23 +126,20 @@ impl PdsTracker {
     /// `sym_delay` = channel-estimation delay + 1 (Dream's `iLenHistBuff`).
     pub fn new(map: &CellMap, num_pil: usize, sym_delay: usize) -> Self {
         let mode = map.mode();
-        let n_car = map.num_carriers;
         let fft_len = mode.fft_size();
-        let (gn, gd) = mode.guard_ratio();
-        let guard_ir = n_car as Real * gn as Real / gd as Real;
+        let ir_per_sample = (num_pil * map.scattered.freq_int) as Real / fft_len as Real;
+        let guard_ir = mode.guard_len() as Real * ir_per_sample;
         let st_po_rot = if guard_ir as usize > num_pil {
             num_pil
         } else {
             (guard_ir + ((num_pil as Real - guard_ir) / 2.0).ceil() + 1.0) as usize
         };
         let sym_rate = Real::from(SAMPLE_RATE) / mode.symbol_len() as Real;
-        let len_corr_hist = (HIST_LEN_SAM_OFF_S * sym_rate) as usize;
         let acq_cnt_max = (SAM_OFF_ACQ_LEN_S * sym_rate) as usize;
+        let xc_period = ((SRO_STEP_S * sym_rate).round() as usize).max(1);
         Self {
-            n_car,
-            fft_len,
+            ir_per_sample,
             num_pil,
-            sym_delay,
             ti_corr_hist: VecDeque::from(vec![0; sym_delay]),
             new_meas_hist: VecDeque::from(vec![0; sym_delay.saturating_sub(1)]),
             fft: Fft::new(num_pil),
@@ -103,20 +147,27 @@ impl PdsTracker {
             work: vec![Cplx::new(0.0, 0.0); num_pil],
             avg_pds: vec![0.0; num_pil],
             rotated: vec![0.0; num_pil],
+            scratch: vec![0.0; num_pil],
             lambda: iir1_lambda(TICONST_PDS, sym_rate),
             guard_ir,
             st_po_rot,
-            frac_ti_cor: 0.0,
             frac_contr: 0.0,
             tracking: false,
             sro_acquisition: true,
-            len_corr_hist,
+            sym_rate,
             acq_cnt_max,
+            acq_settle: (SAM_OFF_ACQ_SETTLE_S * sym_rate) as usize,
             acq_cnt: acq_cnt_max,
-            sr_hist: VecDeque::from(vec![0.0; len_corr_hist]),
-            sr_fill: true,
-            integ_ti_corrections: 0,
-            sym_len_ir: mode.symbol_len() as Real * n_car as Real / fft_len as Real,
+            xc_period,
+            xc_count: 0,
+            xc_ref: None,
+            drift: VecDeque::new(),
+            drift_max: ((HIST_LEN_SAM_OFF_S * sym_rate) as usize / xc_period).max(1),
+            applied_hz: 0.0,
+            frame_pos: 0.0,
+            sym_len_ir: mode.symbol_len() as Real * ir_per_sample,
+            ir_step_ms: 1e3 / (ir_per_sample * Real::from(SAMPLE_RATE)),
+            guard_ms: mode.guard_len() as Real / Real::from(SAMPLE_RATE) * 1e3,
             pds_begin: 0.0,
             pds_end: guard_ir,
         }
@@ -135,12 +186,13 @@ impl PdsTracker {
         self.ti_corr_hist.pop_front();
         self.ti_corr_hist.push_back(-input_shift);
         let oldest = *self.ti_corr_hist.front().unwrap_or(&0);
-        let act_shift = self.frac_ti_cor - oldest as Real * self.n_car as Real / self.fft_len as Real;
-        let int_part = act_shift.round() as i64;
-        self.frac_ti_cor = act_shift - int_part as Real;
-        let shift_val = if act_shift < 0.0 { int_part + p as i64 } else { int_part };
-        if shift_val > 0 && (shift_val as usize) < p {
-            self.avg_pds.rotate_left(shift_val as usize);
+        // Dream rotates by whole bins and carries the remainder; rotating by the
+        // exact amount (linear interpolation) keeps the average aligned with the new
+        // estimates, which the drift measurement below relies on.
+        let shift = -(oldest as Real) * self.ir_per_sample;
+        if shift != 0.0 && shift.abs() < p as Real {
+            rotate_left_frac(&mut self.avg_pds, shift, &mut self.scratch);
+            self.frame_pos += shift;
         }
 
         // New PDS estimate.
@@ -174,7 +226,7 @@ impl PdsTracker {
 
         if self.tracking {
             let delay = first_path as i64 + self.st_po_rot as i64 - p as i64 - 1;
-            let ti_offset = -(delay as Real) * self.fft_len as Real / self.n_car as Real
+            let ti_offset = -(delay as Real) / self.ir_per_sample
                 - *self.new_meas_hist.front().unwrap_or(&0) as Real;
             let mut gain = CONT_PROP_ENERGY;
             if self.sro_acquisition {
@@ -195,46 +247,27 @@ impl PdsTracker {
             out.timing_adjust = -contr;
         }
 
-        // Sample-rate offset from the drift of the strongest path.
-        let (max_ind, _) = self
-            .rotated
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))
-            .unwrap_or((0, &0.0));
-        let peak = max_ind as Real + peak_offset(&self.rotated, max_ind);
-        self.integ_ti_corrections += int_part;
-        // The averaged PDS follows the timing corrections in whole bins; the
-        // estimates also moved by the fractional remainder.
-        let cur_res = self.integ_ti_corrections as Real + self.frac_ti_cor + peak;
-        if std::mem::take(&mut self.sr_fill) {
-            self.sr_hist.iter_mut().for_each(|v| *v = cur_res);
-        }
-        self.sr_hist.pop_front();
-        self.sr_hist.push_back(cur_res);
-        let n = self.len_corr_hist;
-        // A jump (another path became the strongest, or the peak wrapped around the
-        // IR buffer) is removed from the history.
-        let new_diff = self.sr_hist[n - 2] - cur_res;
-        if new_diff.abs() > MAX_PEAK_STEP_BINS {
-            for i in 0..n - 1 {
-                self.sr_hist[i] -= new_diff;
-            }
-        }
+        // Sample-rate offset from the drift of the impulse response.
+        let frame_pos = self.frame_pos;
         if self.acq_cnt > 0 {
             self.acq_cnt -= 1;
-        } else if self.sro_acquisition {
-            self.sro_acquisition = false;
-            let span = self.acq_cnt_max.saturating_sub(self.sym_delay);
-            if span > 1 {
-                let slope = ls_slope(self.sr_hist.range(n - span..));
-                out.sro_delta_hz = -self.sam_off_hz(slope);
+        }
+        self.xc_count += 1;
+        if self.xc_count >= self.xc_period {
+            self.xc_count = 0;
+            match &mut self.xc_ref {
+                Some((prev, prev_pos)) => {
+                    let s = profile_shift(prev, &self.rotated, SRO_MAX_STEP_BINS);
+                    self.drift.push_back((s + frame_pos - *prev_pos, self.applied_hz));
+                    if self.drift.len() > self.drift_max {
+                        self.drift.pop_front();
+                    }
+                    prev.copy_from_slice(&self.rotated);
+                    *prev_pos = frame_pos;
+                }
+                None => self.xc_ref = Some((self.rotated.clone(), frame_pos)),
             }
-            self.sr_fill = true;
-            self.integ_ti_corrections = 0;
-        } else {
-            let slope = ls_slope(self.sr_hist.iter());
-            out.sro_delta_hz = -CONTR_SAMP_OFF_INT * self.sam_off_hz(slope);
+            out.sro_delta_hz = self.sro_step();
         }
 
         // Delay spread from noise-corrected cumulative energy.
@@ -275,13 +308,71 @@ impl PdsTracker {
         out
     }
 
+    /// The averaged power delay profile ordered by delay (linear power, the same
+    /// rotation the timing tracking uses) and its delay axis.
+    pub fn pds_view(&self) -> (Vec<Real>, PdsAxis) {
+        let p = self.num_pil;
+        let rot_start = self.st_po_rot - 1;
+        let pds = (0..p).map(|i| self.avg_pds[(rot_start + i) % p]).collect();
+        let step = self.ir_step_ms;
+        let axis = PdsAxis {
+            start_ms: (rot_start as Real - p as Real) * step,
+            step_ms: step,
+            guard_ms: (0.0, self.guard_ms),
+            pds_begin_ms: self.pds_begin * step,
+            pds_end_ms: self.pds_end * step,
+        };
+        (pds, axis)
+    }
+
     /// Restart the sample-rate-offset measurement (after an external correction,
     /// whose effect would otherwise pollute the drift history).
     pub fn reset_sro(&mut self) {
         self.acq_cnt = self.acq_cnt_max;
         self.sro_acquisition = true;
-        self.sr_fill = true;
-        self.integ_ti_corrections = 0;
+        self.xc_ref = None;
+        self.xc_count = 0;
+        self.drift.clear();
+        self.applied_hz = 0.0;
+    }
+
+    /// SRO correction (Hz) after a new drift measurement; usually 0 during
+    /// acquisition, small steps during tracking.
+    fn sro_step(&mut self) -> Real {
+        let step_syms = self.xc_period as Real;
+        if self.sro_acquisition {
+            if self.acq_cnt > 0 {
+                return 0.0;
+            }
+            // End of acquisition: mean drift after the settling time. The history
+            // then restarts, since the correction changes the drift.
+            self.sro_acquisition = false;
+            let settle = self.acq_settle.div_ceil(self.xc_period);
+            let used: Vec<Real> = self.drift.iter().skip(settle).map(|d| d.0).collect();
+            self.drift.clear();
+            self.applied_hz = 0.0;
+            if used.is_empty() {
+                return 0.0;
+            }
+            let rate = median(&used) / step_syms;
+            return -self.sam_off_hz(rate);
+        }
+        // Tracking: the drift over the history gives the correction that was needed
+        // on average over it; corrections applied since then are subtracted.
+        let n = self.drift.len();
+        if (n as Real) * step_syms < SRO_TRACK_MIN_S * self.sym_rate {
+            return 0.0;
+        }
+        let steps: Vec<Real> = self.drift.iter().map(|d| d.0).collect();
+        let m = median(&steps);
+        let dev: Vec<Real> = steps.iter().map(|v| (v - m).abs()).collect();
+        let lim = 4.0 * median(&dev).max(1e-3);
+        let rate = steps.iter().map(|v| v.clamp(m - lim, m + lim)).sum::<Real>() / (n as Real * step_syms);
+        let mean_applied = self.drift.iter().map(|d| d.1).sum::<Real>() / n as Real;
+        let residual = -self.sam_off_hz(rate) - (self.applied_hz - mean_applied);
+        let delta = residual * SRO_TRACK_RATE * step_syms / self.sym_rate;
+        self.applied_hz += delta;
+        delta
     }
 
     /// Sample-rate offset (Hz) for a drift of the impulse response of `slope` IR
@@ -292,33 +383,103 @@ impl PdsTracker {
     }
 }
 
-/// Fractional offset (−0.5..=0.5) of the true maximum from bin `i` of a power
-/// profile, by fitting a parabola to the logarithm of the three bins around it
-/// (exact for a Gaussian main lobe, close for the Hamming-windowed IR).
-fn peak_offset(p: &[Real], i: usize) -> Real {
-    let n = p.len();
-    if n < 3 {
-        return 0.0;
+/// Circular left rotation by a fractional number of samples (linear interpolation):
+/// `v[i] ← v[i + shift]`.
+fn rotate_left_frac(v: &mut [Real], shift: Real, scratch: &mut [Real]) {
+    let n = v.len();
+    let k = shift.floor();
+    let f = shift - k;
+    let k = (k as isize).rem_euclid(n as isize) as usize;
+    for i in 0..n {
+        scratch[i] = (1.0 - f) * v[(i + k) % n] + f * v[(i + k + 1) % n];
     }
-    let ln = |v: Real| v.max(1e-30).ln();
-    let (a, b, c) = (ln(p[(i + n - 1) % n]), ln(p[i]), ln(p[(i + 1) % n]));
-    let den = a - 2.0 * b + c;
-    if den >= 0.0 { 0.0 } else { (0.5 * (a - c) / den).clamp(-0.5, 0.5) }
+    v.copy_from_slice(scratch);
 }
 
-/// Least-squares slope of equally spaced values (units per sample).
-fn ls_slope<'a>(values: impl ExactSizeIterator<Item = &'a Real> + Clone) -> Real {
-    let m = values.len();
-    if m < 2 {
+/// Median (the mean of the two middle values for an even count).
+fn median(v: &[Real]) -> Real {
+    if v.is_empty() {
         return 0.0;
     }
-    let xm = (m - 1) as Real / 2.0;
-    let ym = values.clone().sum::<Real>() / m as Real;
-    let (mut sxy, mut sxx) = (0.0, 0.0);
-    for (i, &y) in values.enumerate() {
-        let dx = i as Real - xm;
-        sxy += dx * (y - ym);
-        sxx += dx * dx;
+    let mut s = v.to_vec();
+    s.sort_by(Real::total_cmp);
+    let n = s.len();
+    if n % 2 == 1 { s[n / 2] } else { 0.5 * (s[n / 2 - 1] + s[n / 2]) }
+}
+
+/// Shift `s` (IR bins, with sub-bin precision) that best aligns `cur` with `prev`,
+/// i.e. `cur(i + s) ≈ prev(i)`, searched within ±`max`: circular cross-correlation of
+/// the mean-removed profiles plus a parabolic fit around its maximum. A translation of
+/// the whole profile (clock drift, timing change) moves the maximum; fading that
+/// changes the relative power of paths at fixed delays hardly does.
+fn profile_shift(prev: &[Real], cur: &[Real], max: usize) -> Real {
+    let n = prev.len();
+    if n < 3 || cur.len() != n {
+        return 0.0;
     }
-    sxy / sxx
+    let mean = |v: &[Real]| v.iter().sum::<Real>() / n as Real;
+    let (mp, mc) = (mean(prev), mean(cur));
+    let m = max.min(n / 2 - 1) as isize;
+    let corr: Vec<Real> = (-m..=m)
+        .map(|s| {
+            (0..n)
+                .map(|i| (prev[i] - mp) * (cur[(i as isize + s).rem_euclid(n as isize) as usize] - mc))
+                .sum::<Real>()
+        })
+        .collect();
+    let Some((best, _)) = corr.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)) else { return 0.0 };
+    let frac = if best > 0 && best + 1 < corr.len() {
+        let (a, b, c) = (corr[best - 1], corr[best], corr[best + 1]);
+        let den = a - 2.0 * b + c;
+        if den < 0.0 { (0.5 * (a - c) / den).clamp(-0.5, 0.5) } else { 0.0 }
+    } else {
+        0.0
+    };
+    best as Real - m as Real + frac
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two paths (Hamming-like lobes) at `a` and `a + d` with powers `pa`, `pb`.
+    fn profile(n: usize, a: Real, d: Real, pa: Real, pb: Real) -> Vec<Real> {
+        let lobe = |x: Real| if x.abs() < 2.0 { (0.54 + 0.46 * (std::f64::consts::PI * x / 2.0).cos()).powi(2) } else { 0.0 };
+        (0..n).map(|i| 1e-3 + pa * lobe(i as Real - a) + pb * lobe(i as Real - a - d)).collect()
+    }
+
+    #[test]
+    fn shift_follows_translation() {
+        for true_shift in [-2.3, -0.4, 0.0, 0.15, 1.7] {
+            let prev = profile(64, 20.0, 6.0, 1.0, 0.5);
+            let cur = profile(64, 20.0 + true_shift, 6.0, 1.0, 0.5);
+            let s = profile_shift(&prev, &cur, 3);
+            assert!((s - true_shift).abs() < 0.15, "shift {true_shift}: measured {s}");
+        }
+    }
+
+    #[test]
+    fn resolved_paths_swapping_power_are_not_a_shift() {
+        // Two paths 5 bins apart swap their powers: the strongest-path position jumps
+        // by 5 bins, the profile does not move. (Unresolved paths, closer than the
+        // lobe width, cannot be told from a translation; the median over many steps
+        // takes care of those.)
+        let prev = profile(64, 20.0, 5.0, 1.0, 0.6);
+        let cur = profile(64, 20.0, 5.0, 0.6, 1.0);
+        let s = profile_shift(&prev, &cur, 3);
+        assert!(s.abs() < 0.3, "measured {s}");
+    }
+
+    #[test]
+    fn fractional_rotation() {
+        let mut v = vec![0.0, 1.0, 2.0, 3.0];
+        let mut scratch = vec![0.0; 4];
+        rotate_left_frac(&mut v, 1.25, &mut scratch);
+        assert_eq!(v, [1.25, 2.25, 2.25, 0.25]);
+        let mut w = vec![0.0, 1.0, 2.0, 3.0];
+        rotate_left_frac(&mut w, -0.5, &mut scratch);
+        assert_eq!(w, [1.5, 0.5, 1.5, 2.5]);
+        assert_eq!(median(&[3.0, 1.0, 2.0]), 2.0);
+        assert_eq!(median(&[4.0, 1.0, 2.0, 3.0]), 2.5);
+    }
 }

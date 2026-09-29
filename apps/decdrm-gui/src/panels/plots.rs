@@ -8,8 +8,8 @@ use crate::plots::{DB_FLOOR, PlotData, Points};
 use crate::settings::PlotTab;
 use eframe::egui::{Color32, Ui};
 use egui_plot::{
-    HLine, HoverPosition, Line, LineStyle, Plot, PlotBounds, PlotPoints, Points as Scatter, Span,
-    VLine,
+    HLine, HoverPosition, Line, LineStyle, MarkerShape, Plot, PlotBounds, PlotPoints,
+    Points as Scatter, Span, VLine,
 };
 
 /// Tab bar plus the selected tab.
@@ -110,15 +110,29 @@ fn spectrum(ui: &mut Ui, data: &PlotData, pal: &Palette, height: f32) {
 /// FAC, SDC and MSC constellations side by side, each `side` × `side`.
 fn constellation_row(ui: &mut Ui, data: &PlotData, pal: &Palette, side: f32) {
     ui.horizontal(|ui| {
-        constellation(ui, "FAC", &data.fac, pal.fac, side);
-        constellation(ui, "SDC", &data.sdc, pal.sdc, side);
-        constellation(ui, "MSC", &data.msc, pal.msc, side);
+        let plots = [
+            ("FAC", &data.fac, &data.fac_ideal, pal.fac),
+            ("SDC", &data.sdc, &data.sdc_ideal, pal.sdc),
+            ("MSC", &data.msc, &data.msc_ideal, pal.msc),
+        ];
+        for (name, cells, ideal, color) in plots {
+            constellation(ui, name, cells, ideal, color, pal.ideal, side);
+        }
     });
 }
 
 /// One constellation: fixed ±1.5 axes on a square plot without axis labels, so the
-/// data area itself is square.
-fn constellation(ui: &mut Ui, name: &str, points: &Points, color: Color32, side: f32) {
+/// data area itself is square. The ideal points of the signalled modulation are drawn
+/// as small crosses on top of the received cells.
+fn constellation(
+    ui: &mut Ui,
+    name: &str,
+    points: &Points,
+    ideal: &Points,
+    color: Color32,
+    ideal_color: Color32,
+    side: f32,
+) {
     ui.vertical(|ui| {
         ui.label(format!("{name} ({} cells)", points.len()));
         let radius = if points.len() > 3000 { 1.0 } else { 1.6 };
@@ -145,6 +159,14 @@ fn constellation(ui: &mut Ui, name: &str, points: &Points, color: Color32, side:
                         Scatter::new(name.to_string(), PlotPoints::new(points.clone()))
                             .color(color)
                             .radius(radius),
+                    );
+                }
+                if !ideal.is_empty() {
+                    p.points(
+                        Scatter::new("ideal", PlotPoints::new(ideal.clone()))
+                            .shape(MarkerShape::Plus)
+                            .color(ideal_color)
+                            .radius(4.0),
                     );
                 }
             });
@@ -210,12 +232,23 @@ fn impulse(ui: &mut Ui, data: &PlotData, pal: &Palette, height: f32) {
                 [x0, DB_FLOOR - 2.0],
                 [x1.max(x0 + 1e-6), 3.0],
             ));
-            if let Some(g) = data.guard_ms {
+            if let Some((g0, g1)) = data.guard_ms {
                 p.span(
-                    Span::new("guard interval", 0.0..=g)
+                    Span::new("guard interval", g0..=g1)
                         .fill(pal.guard)
                         .border_width(0.0),
                 );
+            }
+            // The estimated extent of the impulse response (the delay spread the
+            // timing tracking works with).
+            if let Some((b, e)) = data.spread_ms {
+                for x in [b, e] {
+                    p.vline(
+                        VLine::new("delay spread", x)
+                            .color(pal.marker)
+                            .style(LineStyle::dashed_dense()),
+                    );
+                }
             }
             p.line(line("power delay profile", &data.pds, pal.pds));
         });

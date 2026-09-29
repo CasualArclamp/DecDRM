@@ -2,9 +2,13 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use decdrm_engine::{Command, Engine, EngineConfig, EngineEvent, InputFormat, InputSpec, RealChannel, ReceiverConfig};
+use decdrm_engine::{
+    Command, Engine, EngineConfig, EngineEvent, InputFormat, InputSpec, LogConfig, RealChannel, ReceiverConfig,
+};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+mod tx;
 
 #[derive(Parser)]
 #[command(name = "decdrm", version, about = "Digital Radio Mondiale (DRM30) receiver")]
@@ -17,6 +21,8 @@ struct Cli {
 enum Cmd {
     /// Receive from a recording or a sound card.
     Rx(RxArgs),
+    /// Transmit: run the station described by a TOML file.
+    Tx(tx::TxArgs),
     /// List sound-card input and output devices.
     Devices,
 }
@@ -65,6 +71,13 @@ struct RxArgs {
     /// Short id (0-3) of the service to decode (default: first audio service).
     #[arg(long)]
     service: Option<u8>,
+    /// Reception log: metrics rows (and, for JSON Lines, events such as text
+    /// messages and data objects). `.csv` → CSV, otherwise JSON Lines.
+    #[arg(long, value_name = "FILE")]
+    log: Option<PathBuf>,
+    /// Seconds of signal between log rows.
+    #[arg(long, default_value_t = 1.0, value_name = "SECS")]
+    log_interval: f64,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -90,6 +103,7 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Devices => devices(),
         Cmd::Rx(args) => rx(args),
+        Cmd::Tx(args) => tx::run(args),
     }
 }
 
@@ -129,6 +143,7 @@ fn rx(a: RxArgs) -> Result<()> {
         output_device: a.output_device.clone(),
         record_audio: a.out.clone(),
         data_dir: a.data_dir.clone(),
+        log: a.log.clone().map(|p| LogConfig { interval_s: a.log_interval, ..LogConfig::new(p) }),
     });
     if let Some(id) = a.service {
         engine.command(Command::SelectService(id));
@@ -138,6 +153,7 @@ fn rx(a: RxArgs) -> Result<()> {
     // stops when its handle is dropped at the end of main).
     let started = Instant::now();
     let mut next_status = a.status_every;
+    let mut afs_shown: Vec<String> = Vec::new();
     loop {
         match engine.recv_event(Duration::from_millis(200)) {
             Some(EngineEvent::Log(l)) => println!("{l}"),
@@ -151,12 +167,16 @@ fn rx(a: RxArgs) -> Result<()> {
             }
             None => {}
         }
-        if a.status_every > 0.0 {
-            let s = engine.snapshot();
-            if s.input.position_s >= next_status {
-                next_status += a.status_every;
-                print_status(&s);
+        let s = engine.snapshot();
+        if s.afs != afs_shown {
+            for line in &s.afs {
+                println!("AFS: {line}");
             }
+            afs_shown = s.afs.clone();
+        }
+        if a.status_every > 0.0 && s.input.position_s >= next_status {
+            next_status += a.status_every;
+            print_status(&s);
         }
     }
     let s = engine.snapshot();
@@ -169,6 +189,15 @@ fn rx(a: RxArgs) -> Result<()> {
         s.rx.fac_bad,
         s.rx.sdc_ok,
         s.rx.sdc_bad
+    );
+    println!(
+        "MSC frames {} (ok {} bad {}); audio {}: {} frames ok, {} concealed",
+        s.msc.frames,
+        s.msc.ok,
+        s.msc.bad,
+        if s.audio.codec.is_empty() { "-" } else { &s.audio.codec },
+        s.audio.frames_ok,
+        s.audio.frames_bad
     );
     engine.command(Command::Stop);
     Ok(())
@@ -191,6 +220,9 @@ fn print_status(s: &decdrm_engine::Snapshot) {
         r.delay_ms,
         r.sro_hz
     );
+    if let Some(t) = &s.time_utc {
+        println!("          broadcast time {t}");
+    }
     for sv in &s.services {
         println!(
             "          service {} id {:06X} {} {}",

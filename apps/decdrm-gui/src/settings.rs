@@ -254,20 +254,21 @@ impl Settings {
                 channels: self.format.is_iq().then_some(2),
             },
         };
-        // Start from the engine's own constructor and overwrite fields, rather than
-        // writing a struct literal: a literal must name every field, so it would stop
-        // compiling whenever the engine gains a new option.
-        let mut cfg = EngineConfig::file(PathBuf::new());
-        cfg.input = input;
-        cfg.receiver = ReceiverConfig {
-            input: self.input_format(),
-            flip: self.flip,
-            auto_flip: self.auto_flip,
-            ..ReceiverConfig::default()
-        };
-        cfg.play_audio = self.play_audio;
-        cfg.output_device = self.output_device.clone();
-        Ok(cfg)
+        // `..EngineConfig::default()` ("struct update syntax") takes every field not
+        // named here from the engine's defaults, so this keeps compiling when the
+        // engine gains new options.
+        Ok(EngineConfig {
+            input,
+            receiver: ReceiverConfig {
+                input: self.input_format(),
+                flip: self.flip,
+                auto_flip: self.auto_flip,
+                ..ReceiverConfig::default()
+            },
+            play_audio: self.play_audio,
+            output_device: self.output_device.clone(),
+            ..EngineConfig::default()
+        })
     }
 
     /// One-line description of the selected source for the log.
