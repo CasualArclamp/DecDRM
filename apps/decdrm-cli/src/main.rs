@@ -6,6 +6,7 @@ use decdrm_engine::{
     Command, Engine, EngineConfig, EngineEvent, InputFormat, InputSpec, LogConfig, RealChannel, ReceiverConfig,
 };
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 mod tx;
@@ -98,8 +99,24 @@ enum Channel {
     Diff,
 }
 
+/// Set by Ctrl-C: long runs stop cleanly, so WAV/FLAC files and logs are finalised.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether Ctrl-C was pressed.
+pub(crate) fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::Relaxed)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // The first Ctrl-C asks the running command to stop; a second one quits at once.
+    let _ = ctrlc::set_handler(|| {
+        if INTERRUPTED.swap(true, Ordering::SeqCst) {
+            std::process::exit(130);
+        }
+        eprintln!("
+stopping (Ctrl-C again to quit immediately)");
+    });
     match cli.cmd {
         Cmd::Devices => devices(),
         Cmd::Rx(args) => rx(args),
@@ -154,7 +171,13 @@ fn rx(a: RxArgs) -> Result<()> {
     let started = Instant::now();
     let mut next_status = a.status_every;
     let mut afs_shown: Vec<String> = Vec::new();
+    let mut stop_sent = false;
     loop {
+        if interrupted() && !stop_sent {
+            // The engine finishes the audio file and the log, then reports Stopped.
+            engine.command(Command::Stop);
+            stop_sent = true;
+        }
         match engine.recv_event(Duration::from_millis(200)) {
             Some(EngineEvent::Log(l)) => println!("{l}"),
             Some(EngineEvent::Text(t)) => println!("text: {t}"),

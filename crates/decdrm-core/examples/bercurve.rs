@@ -6,13 +6,14 @@
 //! noise in the nominal bandwidth).
 //!
 //! `cargo run --release -p decdrm-core --example bercurve -- CHANNEL MODE SNR... [--secs S]
-//!  [--so N] [--qam 16|64] [--prot P] [--iter I] [--seed N] [--short]`
+//!  [--so N] [--qam 16|64] [--prot P] [--iter I] [--seed N] [--short] [--euclid]`
 //!
 //! e.g. `bercurve 1 A 14 15 16 17` or `bercurve 3 B 22 24 26 --secs 60`.
 
 use decdrm_core::channel::{ChannelConfig, ChannelSimulator, Rng};
 use decdrm_core::fac::{ChannelParams, Fac, Interleaving, MscMode, SdcMode, ServiceParams};
 use decdrm_core::fec::mlc::MscProtection;
+use decdrm_core::fec::qam::MetricKind;
 use decdrm_core::params::{RobustnessMode, SpectrumOccupancy};
 use decdrm_core::rx::{InputFormat, MscConfig, Receiver, ReceiverConfig, ReceiverEvent};
 use decdrm_core::tx::output::{OutputConfig, OutputStage};
@@ -33,6 +34,7 @@ struct Args {
     iter: usize,
     seed: u64,
     short: bool,
+    euclid: bool,
 }
 
 fn parse() -> Args {
@@ -46,7 +48,7 @@ fn parse() -> Args {
         Some("D") => RobustnessMode::D,
         other => panic!("mode A..D, got {other:?}"),
     };
-    let mut args = Args { channel, mode, snrs: Vec::new(), secs: 30.0, so: 3, qam: 64, prot: 1, iter: 2, seed: 1, short: false };
+    let mut args = Args { channel, mode, snrs: Vec::new(), secs: 30.0, so: 3, qam: 64, prot: 1, iter: 2, seed: 1, short: false, euclid: false };
     while let Some(s) = it.next() {
         let mut val = || it.next().expect("value").clone();
         match s.as_str() {
@@ -57,6 +59,7 @@ fn parse() -> Args {
             "--iter" => args.iter = val().parse().unwrap(),
             "--seed" => args.seed = val().parse().unwrap(),
             "--short" => args.short = true,
+            "--euclid" => args.euclid = true,
             v => args.snrs.push(v.parse().expect("SNR in dB")),
         }
     }
@@ -116,6 +119,7 @@ fn main() {
             input: InputFormat::Iq { swap: false },
             channels: 2,
             msc_iterations: a.iter,
+            metric: if a.euclid { MetricKind::Euclidean } else { MetricKind::DreamLinear },
             ..Default::default()
         });
         rx.set_msc_config(Some(MscConfig {

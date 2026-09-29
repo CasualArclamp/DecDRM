@@ -16,4 +16,5 @@ decdrm-engine = { path = "../../crates/decdrm-engine" }
 decdrm-io = { path = "../../crates/decdrm-io" }
 decdrm-station = { path = "../../crates/decdrm-station" }
 clap = { version = "4.6", features = ["derive"] }
+ctrlc = "3.5"
 anyhow.workspace = true

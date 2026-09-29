@@ -57,6 +57,7 @@ pub fn run(a: TxArgs) -> Result<()> {
         match frames {
             Some(n) if station.status().frames >= n => break,
             None if station.inputs_finished() => break,
+            _ if crate::interrupted() => break,
             _ => {}
         }
         station.transmit_frame()?;
