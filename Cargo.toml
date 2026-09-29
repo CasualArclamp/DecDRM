@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/CasualArclamp/DecDRM"
+rust-version = "1.85"
+
+[workspace.dependencies]
+num-complex = "0.4.6"
+rustfft = "6.4"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+
+# DSP code is unusably slow unoptimised; keep debug builds fast enough to decode
+# real recordings in tests while still compiling quickly.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+debug = "line-tables-only"

@@ -1,0 +1,14 @@
+[package]
+name = "decdrm-data"
+description = "DRM data applications: packet mode, MOT, Journaline, EPG, BWS, TPEG"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# Pure-Rust (miniz_oxide) deflate/gzip: gzip-compressed MOT bodies and directories,
+# deflate-compressed Journaline NML bodies.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }

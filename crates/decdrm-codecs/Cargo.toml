@@ -1,0 +1,13 @@
+[package]
+name = "decdrm-codecs"
+description = "Safe audio codec wrappers (FDK-AAC for DRM AAC/xHE-AAC, Opus)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decdrm-fdk-sys = { path = "../decdrm-fdk-sys" }
+decdrm-opus-sys = { path = "../decdrm-opus-sys" }
+thiserror = "2"

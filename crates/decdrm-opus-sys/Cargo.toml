@@ -1,0 +1,16 @@
+[package]
+name = "decdrm-opus-sys"
+description = "Build and raw FFI bindings for the vendored libopus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# The C sources live in the workspace-level `third_party/opus` submodule.
+links = "opus"
+build = "build.rs"
+
+[dependencies]
+
+[build-dependencies]
+cmake = "0.1.54"

@@ -1,0 +1,17 @@
+[package]
+name = "decdrm-core"
+description = "DRM30 physical layer, FEC, multiplex and transmitter chain (pure Rust)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+num-complex.workspace = true
+rustfft.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+claxon = "0.4"

@@ -1,0 +1,8 @@
+[submodule "third_party/fdk-aac"]
+	path = third_party/fdk-aac
+	url = https://github.com/mstorsjo/fdk-aac.git
+	shallow = true
+[submodule "third_party/opus"]
+	path = third_party/opus
+	url = https://github.com/xiph/opus.git
+	shallow = true

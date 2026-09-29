@@ -1,0 +1,15 @@
+# Build output
+/target/
+**/*.rs.bk
+
+# Local-only material (large or third-party docs, not redistributed)
+/samples/
+/reference/
+/out/
+
+# Editor/OS noise
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
