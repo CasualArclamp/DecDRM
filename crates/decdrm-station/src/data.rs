@@ -8,7 +8,8 @@
 //! * Journaline — pages from a TOML/JSON page file ([`JournalineFile`]).
 //! * EPG — a schedule (TS 102 818 `epg`/`schedule`/`programme`) from inline or file
 //!   programmes, binary encoded (TS 102 371) in a directory-mode MOT carousel with
-//!   ScopeStart/ScopeEnd/ScopeId (the service id).
+//!   ScopeStart/ScopeEnd/ScopeId (the described service, see
+//!   [`StationConfig::epg_scope`]).
 
 use crate::config::{AppKind, AppSettings, EpgFile, EpgProgramme, JournalineFile, JournalinePage, JournalineRow, StationConfig};
 use decdrm_data::encoder::DataUnitSource;
@@ -81,9 +82,9 @@ pub(crate) fn check_content(cfg: &StationConfig, app: &AppSettings) -> Result<()
     Ok(())
 }
 
-/// The carousel of one application. `service_id` is the owning service's id (EPG
-/// ScopeId).
-pub(crate) fn build_source(cfg: &StationConfig, app: &AppSettings, service_id: u32) -> Result<Source, String> {
+/// The carousel of one application. `epg_scope` is the id of the service an EPG
+/// describes (its ScopeId, [`StationConfig::epg_scope`]).
+pub(crate) fn build_source(cfg: &StationConfig, app: &AppSettings, epg_scope: u32) -> Result<Source, String> {
     let segment = |mot: &mut MotEncoder| -> Result<(), String> {
         if let Some(s) = app.segment_size {
             mot.set_segment_size(s).map_err(|e| e.to_string())?;
@@ -119,7 +120,7 @@ pub(crate) fn build_source(cfg: &StationConfig, app: &AppSettings, service_id: u
         }
         AppKind::Epg => {
             let programmes = epg_programmes(cfg, app)?;
-            let (header, body) = epg_object(&programmes, service_id)?;
+            let (header, body) = epg_object(&programmes, epg_scope)?;
             let mut mot = MotEncoder::directory_mode();
             segment(&mut mot)?;
             mot.add_object(header, body).map_err(|e| e.to_string())?;

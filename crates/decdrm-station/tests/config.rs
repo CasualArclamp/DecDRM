@@ -56,6 +56,8 @@ fn example_configuration_is_valid() {
     assert_eq!(*packet_len, 48);
     assert_eq!(apps.iter().map(|a| a.packet_id).collect::<Vec<_>>(), [0, 1]);
     assert_eq!(plan.services[1].apps.iter().map(|a| a.kind).collect::<Vec<_>>(), [AppKind::Journaline, AppKind::Epg]);
+    // The news service carries the guide of the radio service.
+    assert_eq!((cfg.epg_scope(0), cfg.epg_scope(1)), (0xD0D001, 0xD0D001));
     // Round trip through TOML text.
     let again = StationConfig::from_toml_str(&cfg.to_toml_string().unwrap()).unwrap();
     assert_eq!(again.services, cfg.services);

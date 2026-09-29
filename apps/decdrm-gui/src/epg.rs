@@ -445,9 +445,10 @@ mod tests {
         );
         assert_eq!(fmt_date(s.programmes[0].start), "Tue 29 Sep 2026");
         // The station names no service in the XML; the object's name carries the id of
-        // the service that lists the EPG application (the example's news service).
+        // the service the guide describes: the example's radio service (its news
+        // service carries the guide).
         assert_eq!(s.service_scope, None);
-        assert_eq!(scope_id_from_name(&name), Some(0xD0D002), "{name}");
+        assert_eq!(scope_id_from_name(&name), Some(0xD0D001), "{name}");
     }
 
     #[test]

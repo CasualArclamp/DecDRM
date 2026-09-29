@@ -205,7 +205,8 @@ impl Station {
             for r in apps {
                 let service = &cfg.services[r.service];
                 let app = service.applications().nth(r.index).expect("valid application index");
-                let source = crate::data::build_source(&cfg, app, service.id).map_err(|message| StationError::Data {
+                let scope = if app.kind == AppKind::Epg { cfg.epg_scope(r.service) } else { service.id };
+                let source = crate::data::build_source(&cfg, app, scope).map_err(|message| StationError::Data {
                     what: format!("{} of {}", app.kind, names[r.service]),
                     message,
                 })?;

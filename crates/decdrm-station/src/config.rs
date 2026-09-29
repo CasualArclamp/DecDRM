@@ -86,6 +86,16 @@ impl StationConfig {
             _ => path.to_path_buf(),
         }
     }
+
+    /// Id of the service whose schedule an EPG application of service `owner`
+    /// describes (the object's ScopeId, TS 102 371): the owner if it is an audio
+    /// service, else the first audio service (a data service carrying the guide of the
+    /// station's programme), and the owner in a station without audio services.
+    pub fn epg_scope(&self, owner: usize) -> u32 {
+        let own = &self.services[owner];
+        let described = if own.is_audio() { own } else { self.services.iter().find(|s| s.is_audio()).unwrap_or(own) };
+        described.id & 0xFF_FFFF
+    }
 }
 
 /// A parse error with the (line, column) where the TOML parser stopped.
