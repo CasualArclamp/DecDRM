@@ -40,6 +40,9 @@ pub struct MscFrame {
     pub hpp_bits: usize,
     /// Mean Viterbi path metric of the last level (reliability hint).
     pub path_metric: Real,
+    /// False while the long cell interleaver is still filling after a (re)start:
+    /// part of the cells were erasures, so decoded content is unreliable.
+    pub complete: bool,
 }
 
 /// Plot data captured from the symbol chain (cheap to clone on demand).
@@ -105,6 +108,8 @@ pub(super) struct SymbolChain {
     msc_collecting: bool,
     /// Frames were lost: restart the cell deinterleaver before the next frame.
     msc_gap: bool,
+    /// Frames pushed into the deinterleaver since it was (re)started.
+    msc_frames_since_reset: usize,
     /// SDC collection is aligned to a super-frame start.
     sf_synced: bool,
     msc: Option<(MscConfig, CellDeinterleaver, MlcDecoder)>,
@@ -140,6 +145,7 @@ impl SymbolChain {
             msc_offset: msc_offsets(&map),
             msc_collecting: false,
             msc_gap: true,
+            msc_frames_since_reset: 0,
             sf_synced: false,
             msc: None,
             msc_iterations: cfg.msc_iterations,
@@ -235,6 +241,7 @@ impl SymbolChain {
                 dec.metric = metric;
                 self.chanest.msc_mapping = Some(c.mode.mapping());
                 self.msc = Some((c, CellDeinterleaver::new(n_mux, depth), dec));
+                self.msc_frames_since_reset = 0;
             }
         }
     }
@@ -447,7 +454,10 @@ impl SymbolChain {
         let (_, deint, dec) = self.msc.as_mut()?;
         if gap {
             *deint = CellDeinterleaver::new(frame.len(), deint.depth());
+            self.msc_frames_since_reset = 0;
         }
+        self.msc_frames_since_reset += 1;
+        let complete = self.msc_frames_since_reset >= deint.depth();
         let deint_cells = deint.push(&frame)?;
         let mut bits = Vec::new();
         let info = dec.decode(&deint_cells, &mut bits);
@@ -461,6 +471,7 @@ impl SymbolChain {
             bits: rest,
             hpp_bits,
             path_metric: info.path_metrics.last().copied().unwrap_or(0.0),
+            complete,
         })
     }
 }

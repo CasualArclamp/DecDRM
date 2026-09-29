@@ -1,26 +1,31 @@
 //! Loopback tests: DecDRM transmitter → (channel simulator) → output stage (real IF
 //! or I/Q `f32`) → receiver.
 //!
-//! * `every_layout_*`: FAC, mode/occupancy detection and SDC CRCs for every valid
-//!   robustness mode / spectrum occupancy combination, noiseless.
+//! * `every_layout_*`: FAC decoding, mode/occupancy detection and SDC CRCs for every
+//!   valid robustness mode / spectrum occupancy combination, noiseless, over I/Q
+//!   and real IF.
 //! * `msc_bit_exact_*`: MSC multiplex frames recovered bit-exactly for 16-QAM,
-//!   64-QAM SM, HMsym and HMmix with short and long interleaving.
-//! * `robustness_*`: AWGN, DRM channel models, frequency and sample-rate offsets.
-//!   These print a report and only assert the easy cases; run with
-//!   `cargo test -p decdrm-core --test loopback -- --nocapture` to see the tables.
-//!   The long sweeps are `#[ignore]`d (`-- --ignored` runs them).
+//!   64-QAM SM, HMsym and HMmix with short and long interleaving (incl. UEP).
+//! * `robustness_*`: AWGN, DRM channel models 1–4, frequency and sample-rate
+//!   offsets. These print a report and only assert easy, high-SNR cases. The long
+//!   sweeps (SNR sweeps, channels 5/6, other layouts) are `#[ignore]`d; run them with
+//!   `cargo test -p decdrm-core --test loopback -- --ignored --nocapture`.
 //!
-//! Everything is seeded, so results are reproducible run to run.
+//! Use `--nocapture` to see the result tables. Everything is seeded, so results are
+//! reproducible run to run.
 
 use decdrm_core::channel::{ChannelConfig, ChannelModel, ChannelSimulator, Rng};
 use decdrm_core::fac::{ChannelParams, Fac, Interleaving, MscMode, SdcMode, ServiceParams};
 use decdrm_core::fec::mlc::MscProtection;
 use decdrm_core::params::{ChannelLayout, RobustnessMode, SAMPLE_RATE, SAMPLES_PER_FRAME, SpectrumOccupancy};
 use decdrm_core::rx::{InputFormat, MscConfig, RealChannel, Receiver, ReceiverConfig, ReceiverEvent};
-use decdrm_core::tx::output::{OutputConfig, OutputFormat, OutputStage, suggested_if_hz};
+use decdrm_core::tx::output::{OutputConfig, OutputStage, suggested_if_hz};
 use decdrm_core::tx::{Transmitter, TxConfig};
 use decdrm_core::{Cplx, Real};
 use std::fmt::Write as _;
+
+/// Seconds per transmission frame.
+const FRAME_S: Real = SAMPLES_PER_FRAME as Real / SAMPLE_RATE as Real;
 
 /// How the transmitter output reaches the receiver.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -44,6 +49,7 @@ impl Link {
 /// One loopback run.
 #[derive(Debug, Clone)]
 struct Scenario {
+    name: String,
     tx: TxConfig,
     link: Link,
     channel: Option<ChannelConfig>,
@@ -55,7 +61,61 @@ struct Scenario {
 
 impl Scenario {
     fn new(tx: TxConfig, link: Link, seconds: Real) -> Self {
-        Self { tx, link, channel: None, seconds, decode_msc: false, seed: 1 }
+        Self { name: layout_name(&tx), tx, link, channel: None, seconds, decode_msc: false, seed: 1 }
+    }
+}
+
+/// Tracks which of the transmitted items (FACs, SDC blocks, MSC frames) the
+/// receiver delivered, in order.
+#[derive(Debug, Clone, Default)]
+struct Matches {
+    /// Transmitted index of every delivered item that matched.
+    indices: Vec<usize>,
+    /// Delivered items that match nothing that was sent.
+    wrong: usize,
+    /// A delivered item after the first match that was not the successor of the
+    /// previous one (a gap, a repeat or a wrong item).
+    breaks: usize,
+    /// Number of matched items before each break (1 = between the first and the
+    /// second item).
+    break_at: Vec<usize>,
+    /// Transmitter frame being pushed when each matched item arrived, minus the
+    /// frame that completed it (for MSC frames: the frame that completed the
+    /// multiplex frame D - 1 later, which the deinterleaver needs).
+    lags: Vec<usize>,
+}
+
+impl Matches {
+    fn record(&mut self, found: Option<usize>, push_frame: usize, sent_frame: impl Fn(usize) -> usize) {
+        match found {
+            Some(j) => {
+                if self.indices.last().is_some_and(|&l| l + 1 != j) {
+                    self.breaks += 1;
+                    self.break_at.push(self.indices.len());
+                }
+                self.indices.push(j);
+                self.lags.push(push_frame.saturating_sub(sent_frame(j)));
+            }
+            None => {
+                self.wrong += 1;
+                if !self.indices.is_empty() {
+                    self.breaks += 1;
+                    self.break_at.push(self.indices.len());
+                }
+            }
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.indices.len()
+    }
+
+    fn lag_range(&self) -> String {
+        match (self.lags.iter().min(), self.lags.iter().max()) {
+            (Some(a), Some(b)) if a == b => format!("{a}"),
+            (Some(a), Some(b)) => format!("{a}-{b}"),
+            _ => "-".into(),
+        }
     }
 }
 
@@ -66,28 +126,30 @@ struct Outcome {
     signal_found: Option<(Real, bool)>,
     modes: Vec<RobustnessMode>,
     restarts: usize,
-    fac_ok: usize,
+    fac: Matches,
     fac_bad: usize,
-    /// CRC-valid FACs that differ from every FAC sent.
-    fac_wrong: usize,
-    /// Time of the first good FAC, s.
-    first_fac_s: Option<Real>,
+    /// FAC CRC failures after the first good FAC.
+    fac_bad_after_lock: usize,
+    /// Pushed frame during which the first good FAC arrived.
+    first_fac_frame: Option<usize>,
     occupancies: Vec<u8>,
-    sdc_ok: usize,
+    sdc: Matches,
     sdc_bad: usize,
-    /// CRC-valid SDC blocks whose content was never sent.
-    sdc_wrong: usize,
+    /// SDC CRC failures after the first good SDC block.
+    sdc_bad_after_ok: usize,
+    msc: Matches,
     msc_frames: usize,
-    msc_matched: usize,
-    /// Matched frames form one run of consecutive transmitted frames.
-    msc_consecutive: bool,
-    /// Transmitter frames between sending a multiplex frame and its decoding event.
-    msc_lags: Vec<usize>,
     /// Receiver status at the end.
     snr_db: Option<Real>,
     sro_hz: Real,
     dc_hz: Option<Real>,
     clipped: u64,
+}
+
+impl Outcome {
+    fn first_fac_s(&self) -> Option<Real> {
+        self.first_fac_frame.map(|f| (f + 1) as Real * FRAME_S)
+    }
 }
 
 fn test_fac(rng: &mut Rng) -> Fac {
@@ -107,6 +169,7 @@ fn test_fac(rng: &mut Rng) -> Fac {
             toggle: rng.bit() == 1,
         },
         service: ServiceParams {
+            // Random 24-bit service ID: makes every frame's FAC unique.
             service_id: (rng.next_u64() & 0xFF_FFFF) as u32,
             short_id: 0,
             audio_ca: false,
@@ -134,6 +197,12 @@ fn output_for(layout: ChannelLayout, link: Link) -> OutputStage {
     OutputStage::new(layout, cfg).expect("signal fits the output band")
 }
 
+/// Transmitter frame that carries the end of multiplex frame `j` (multiplex frame
+/// 3s+0 ends in transmission frame 3s+1, 3s+1 and 3s+2 end in 3s+2).
+fn mux_end_frame(j: usize) -> usize {
+    if j % 3 == 0 { j + 1 } else { j - j % 3 + 2 }
+}
+
 fn run(sc: &Scenario) -> Outcome {
     let mut tx = Transmitter::new(sc.tx).expect("valid transmitter configuration");
     let layout = tx.layout();
@@ -148,14 +217,14 @@ fn run(sc: &Scenario) -> Outcome {
             interleaving: sc.tx.interleaving,
         }));
     }
+    let depth = tx.interleaver_depth();
     let mut rng = Rng::new(sc.seed);
-    let frames = (sc.seconds * Real::from(SAMPLE_RATE) / SAMPLES_PER_FRAME as Real).ceil() as usize;
+    let frames = (sc.seconds / FRAME_S).ceil() as usize;
     let cap = tx.msc_capacity();
-    let mut o = Outcome { frames, msc_consecutive: true, ..Default::default() };
+    let mut o = Outcome { frames, ..Default::default() };
     let mut sent_fac: Vec<Fac> = Vec::new();
     let mut sent_sdc: Vec<Vec<u8>> = Vec::new();
     let mut sent_msc: Vec<Vec<u8>> = Vec::new();
-    let mut last_match: Option<usize> = None;
     let mut chan_out: Vec<Cplx> = Vec::new();
     let mut pcm: Vec<f32> = Vec::new();
 
@@ -180,51 +249,45 @@ fn run(sc: &Scenario) -> Outcome {
             None => out_stage.process(&baseband, &mut pcm),
         }
 
-        let t = (f + 1) as Real * SAMPLES_PER_FRAME as Real / Real::from(SAMPLE_RATE);
         for ev in rx.push(&pcm) {
             match ev {
                 ReceiverEvent::SignalFound { dc_hz, inverted } => o.signal_found = Some((dc_hz, inverted)),
                 ReceiverEvent::ModeDetected(m) => o.modes.push(m),
                 ReceiverEvent::Restarted => o.restarts += 1,
                 ReceiverEvent::Fac(fac) => {
-                    o.fac_ok += 1;
-                    o.first_fac_s.get_or_insert(t);
+                    o.first_fac_frame.get_or_insert(f);
                     let so = fac.channel.occupancy.value();
                     if !o.occupancies.contains(&so) {
                         o.occupancies.push(so);
                     }
-                    if !sent_fac.contains(&fac) {
-                        o.fac_wrong += 1;
+                    o.fac.record(sent_fac.iter().position(|s| *s == fac), f, |j| j);
+                }
+                ReceiverEvent::FacError => {
+                    o.fac_bad += 1;
+                    if o.first_fac_frame.is_some() {
+                        o.fac_bad_after_lock += 1;
                     }
                 }
-                ReceiverEvent::FacError => o.fac_bad += 1,
                 ReceiverEvent::Sdc(b) => {
                     if b.crc_ok {
-                        o.sdc_ok += 1;
-                        if b.afs_index != sc.tx.afs_index || !sent_sdc.contains(&b.data) {
-                            o.sdc_wrong += 1;
-                        }
+                        let found = (b.afs_index == sc.tx.afs_index)
+                            .then(|| sent_sdc.iter().position(|s| *s == b.data))
+                            .flatten();
+                        o.sdc.record(found, f, |j| 3 * j);
                     } else {
                         o.sdc_bad += 1;
+                        if o.sdc.count() > 0 {
+                            o.sdc_bad_after_ok += 1;
+                        }
                     }
                 }
                 ReceiverEvent::Msc(m) => {
                     o.msc_frames += 1;
                     let mut all = m.vspp.clone();
                     all.extend_from_slice(&m.bits);
-                    if let Some(j) = sent_msc.iter().position(|s| *s == all) {
-                        o.msc_matched += 1;
-                        o.msc_lags.push(f - j);
-                        if last_match.is_some_and(|l| l + 1 != j) {
-                            o.msc_consecutive = false;
-                        }
-                        last_match = Some(j);
-                    } else if last_match.is_some() {
-                        // A miss after the first match breaks the run.
-                        o.msc_consecutive = false;
-                    }
+                    o.msc.record(sent_msc.iter().position(|s| *s == all), f, |j| mux_end_frame(j + depth - 1));
                 }
-                // Any events added to the receiver later are irrelevant here.
+                // Events the receiver may add later are irrelevant here.
                 #[allow(unreachable_patterns)]
                 _ => {}
             }
@@ -248,66 +311,111 @@ fn fmt_opt(v: Option<Real>, prec: usize) -> String {
 
 fn header() -> String {
     format!(
-        "{:<8} {:<8} {:>9} {:>10} {:>6} {:>8} {:>10} {:>9} {:>9} {:>7} {:>7}",
-        "layout", "link", "signal", "modes", "FAC s", "FAC ok", "bad/wrong", "SDC ok", "bad/wrong", "SNR dB", "restart"
+        "{:<22} {:<5} {:>7} {:>6} {:>6} {:>8} {:>7} {:>7} {:>7} {:>9} {:>6} {:>7} {:>7} {:>3}",
+        "scenario",
+        "link",
+        "DC Hz",
+        "modes",
+        "FAC s",
+        "FAC ok",
+        "bad",
+        "SDC ok",
+        "bad",
+        "MSC ok",
+        "lag",
+        "SNR",
+        "SRO Hz",
+        "rst"
     )
 }
 
 fn row(sc: &Scenario, o: &Outcome) -> String {
-    let modes: String = o.modes.iter().map(|m| m.to_string()).collect::<Vec<_>>().join("");
+    let mut modes: String = o.modes.iter().map(|m| m.to_string()).collect();
+    if modes.is_empty() {
+        modes = "-".into();
+    }
     format!(
-        "{:<8} {:<8} {:>9} {:>10} {:>6} {:>5}/{:<2} {:>6}/{:<3} {:>9} {:>5}/{:<3} {:>7} {:>7}",
-        layout_name(&sc.tx),
+        "{:<22} {:<5} {:>7} {:>6} {:>6} {:>5}/{:<2} {:>3}/{:<3} {:>7} {:>3}/{:<3} {:>4}/{:<4} {:>6} {:>7} {:>7.2} {:>3}",
+        sc.name,
         sc.link.name(),
         o.signal_found.map_or("no".into(), |(f, inv)| format!("{f:.0}{}", if inv { "i" } else { "" })),
-        if modes.is_empty() { "-".into() } else { modes },
-        fmt_opt(o.first_fac_s, 1),
-        o.fac_ok,
+        modes,
+        fmt_opt(o.first_fac_s(), 1),
+        o.fac.count(),
         o.frames,
         o.fac_bad,
-        o.fac_wrong,
-        o.sdc_ok,
+        o.fac_bad_after_lock,
+        o.sdc.count(),
         o.sdc_bad,
-        o.sdc_wrong,
+        o.sdc_bad_after_ok,
+        o.msc.count(),
+        o.msc_frames,
+        o.msc.lag_range(),
         fmt_opt(o.snr_db, 1),
+        o.sro_hz,
         o.restarts,
     )
 }
 
-/// Problems of a basic (noiseless) FAC/SDC loopback; empty if it passed.
-fn check_basic(sc: &Scenario, o: &Outcome) -> Vec<String> {
+/// Longest acceptable time to the first FAC in a clean channel, s.
+const MAX_ACQUISITION_S: Real = 4.5;
+
+/// Problems of a noiseless FAC/SDC loopback; empty if it passed.
+fn check_clean(sc: &Scenario, o: &Outcome) -> Vec<String> {
     let mut p = Vec::new();
-    if o.signal_found.is_none() {
-        p.push("never found the signal".to_string());
+    match o.signal_found {
+        None => p.push("never found the signal".to_string()),
+        Some((_, true)) => p.push("found the signal spectrally inverted".to_string()),
+        _ => {}
     }
     if !o.modes.contains(&sc.tx.mode) {
-        p.push(format!("mode {} never detected (got {:?})", sc.tx.mode, o.modes));
+        p.push(format!("mode {} never detected", sc.tx.mode));
     }
-    if o.fac_ok == 0 {
-        p.push("no FAC decoded".into());
-    } else if o.fac_ok + 8 < o.frames {
-        p.push(format!("only {} of {} FACs decoded", o.fac_ok, o.frames));
+    if o.modes.iter().any(|&m| m != sc.tx.mode) {
+        p.push(format!("wrong mode detected ({:?})", o.modes));
     }
-    if o.fac_bad > 2 {
-        p.push(format!("{} FAC CRC errors", o.fac_bad));
+    match o.first_fac_s() {
+        None => p.push("no FAC decoded".into()),
+        Some(t) if t > MAX_ACQUISITION_S => p.push(format!("first FAC only after {t:.1} s")),
+        _ => {}
     }
-    if o.fac_wrong > 0 {
-        p.push(format!("{} FACs with wrong content", o.fac_wrong));
+    if o.fac.wrong > 0 {
+        p.push(format!("{} FACs with wrong content", o.fac.wrong));
+    }
+    // Tolerated: one missing FAC right after the first one. The receiver starts
+    // with an SO3 carrier layout and, when the first FAC announces another
+    // occupancy, rebuilds its channel estimator, losing the next frame (see
+    // `known_issue_no_frame_lost_at_occupancy_change`).
+    if o.fac.break_at.iter().any(|&at| at != 1) {
+        p.push(format!("FAC sequence broken after {:?} FACs", o.fac.break_at));
+    }
+    // Every frame after the first good FAC must decode (the last one or two frames may
+    // still be in the receiver's pipeline at the end).
+    if let Some(&last) = o.fac.indices.last()
+        && last + 3 < o.frames
+    {
+        p.push(format!("FACs stopped after frame {last}"));
+    }
+    if o.fac_bad_after_lock > 0 {
+        p.push(format!("{} FAC CRC errors after lock", o.fac_bad_after_lock));
     }
     if o.occupancies.iter().any(|&so| so != sc.tx.occupancy.value()) {
         p.push(format!("wrong occupancy in FAC: {:?}", o.occupancies));
     }
-    if o.sdc_ok < 2 {
-        p.push(format!("only {} SDC blocks with good CRC", o.sdc_ok));
+    if o.sdc.count() < 2 {
+        p.push(format!("only {} SDC blocks with good CRC", o.sdc.count()));
     }
-    if o.sdc_bad > 0 {
-        p.push(format!("{} SDC CRC errors", o.sdc_bad));
+    if o.sdc.wrong > 0 || o.sdc.breaks > 0 {
+        p.push(format!("{} SDC blocks with wrong content, {} gaps", o.sdc.wrong, o.sdc.breaks));
     }
-    if o.sdc_wrong > 0 {
-        p.push(format!("{} SDC blocks with wrong content", o.sdc_wrong));
+    if o.sdc_bad_after_ok > 0 {
+        p.push(format!("{} SDC CRC errors after the first good block", o.sdc_bad_after_ok));
     }
     if o.restarts > 0 {
         p.push(format!("{} restarts", o.restarts));
+    }
+    if o.clipped > 0 {
+        p.push(format!("{} output samples clipped", o.clipped));
     }
     p
 }
@@ -324,31 +432,46 @@ fn all_layouts() -> Vec<ChannelLayout> {
     v
 }
 
-/// Run every layout over `link` and fail with a table if any combination fails.
-fn every_layout(link: Link) {
+/// Run scenarios, print a table and return it with the failures found by `check`.
+fn run_all(title: &str, scenarios: &[Scenario], check: impl Fn(&Scenario, &Outcome) -> Vec<String>) -> (String, Vec<String>) {
     let mut report = String::new();
     let mut failures = Vec::new();
-    writeln!(report, "{}", header()).unwrap();
-    for (i, l) in all_layouts().into_iter().enumerate() {
-        let tx = TxConfig {
-            mode: l.mode,
-            occupancy: l.occupancy,
-            // Alternate the SDC constellation and interleaving across layouts.
-            sdc_mode: if i % 2 == 0 { SdcMode::Qam16 } else { SdcMode::Qam4 },
-            interleaving: if i % 3 == 0 { Interleaving::Short } else { Interleaving::Long },
-            afs_index: (i % 16) as u8,
-            ..Default::default()
-        };
-        let sc = Scenario { seed: 100 + i as u64, ..Scenario::new(tx, link, 6.0) };
-        let o = run(&sc);
-        writeln!(report, "{}", row(&sc, &o)).unwrap();
-        let problems = check_basic(&sc, &o);
+    writeln!(report, "\n{title}\n{}", header()).unwrap();
+    for sc in scenarios {
+        let o = run(sc);
+        writeln!(report, "{}", row(sc, &o)).unwrap();
+        let problems = check(sc, &o);
         if !problems.is_empty() {
-            failures.push(format!("{} over {}: {}", layout_name(&sc.tx), link.name(), problems.join("; ")));
+            failures.push(format!("{} over {}: {}", sc.name, sc.link.name(), problems.join("; ")));
         }
     }
     println!("{report}");
-    assert!(failures.is_empty(), "\n{report}\nfailing combinations:\n  {}\n", failures.join("\n  "));
+    if !failures.is_empty() {
+        println!("failing:\n  {}", failures.join("\n  "));
+    }
+    (report, failures)
+}
+
+/// Every layout over `link`; fails with the table if any combination fails.
+fn every_layout(link: Link) {
+    let scenarios: Vec<Scenario> = all_layouts()
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let tx = TxConfig {
+                mode: l.mode,
+                occupancy: l.occupancy,
+                // Alternate the SDC constellation and interleaving across layouts.
+                sdc_mode: if i % 2 == 0 { SdcMode::Qam16 } else { SdcMode::Qam4 },
+                interleaving: if i % 3 == 0 { Interleaving::Short } else { Interleaving::Long },
+                afs_index: (i % 16) as u8,
+                ..Default::default()
+            };
+            Scenario { seed: 100 + i as u64, ..Scenario::new(tx, link, 8.0) }
+        })
+        .collect();
+    let (report, failures) = run_all(&format!("Every layout, noiseless, {}", link.name()), &scenarios, check_clean);
+    assert!(failures.is_empty(), "{report}\nfailing combinations:\n  {}\n", failures.join("\n  "));
 }
 
 #[test]
@@ -361,50 +484,312 @@ fn every_layout_real_if() {
     every_layout(Link::RealIf);
 }
 
+/// I/Q with the DC carrier away from 0 Hz (as Dream's I/Q output, which keeps its
+/// 6 kHz IF).
 #[test]
-#[ignore]
-fn dbg_a_so0() {
-    for link in [Link::Iq(0.0), Link::RealIf] {
-        for (m, so) in [(RobustnessMode::A, SpectrumOccupancy::SO_0), (RobustnessMode::A, SpectrumOccupancy::SO_1), (RobustnessMode::B, SpectrumOccupancy::SO_0), (RobustnessMode::A, SpectrumOccupancy::SO_2)] {
-            let mut firsts = Vec::new();
-            for seed in 0..12u64 {
-                let tx = TxConfig { mode: m, occupancy: so, ..Default::default() };
-                let sc = Scenario { seed: 1000 + seed, ..Scenario::new(tx, link, 12.0) };
-                let o = run(&sc);
-                firsts.push(format!("{}({}/{} bad{} r{})", fmt_opt(o.first_fac_s, 1), o.fac_ok, o.frames, o.fac_bad, o.restarts));
-            }
-            println!("{m}/SO{} {}: first FAC s: {}", so.value(), link.name(), firsts.join(" "));
-        }
+fn every_layout_iq_offset() {
+    every_layout(Link::Iq(6000.0));
+}
+
+// ---------------------------------------------------------------------------------
+// MSC bit-exact loopback
+// ---------------------------------------------------------------------------------
+
+fn msc_scenario(msc_mode: MscMode, interleaving: Interleaving, part_a_bytes: usize, hierarchical: usize) -> Scenario {
+    let tx = TxConfig {
+        mode: RobustnessMode::B,
+        occupancy: SpectrumOccupancy::SO_3,
+        msc_mode,
+        interleaving,
+        protection: MscProtection { part_a: 0, part_b: 1, hierarchical },
+        part_a_bytes,
+        ..Default::default()
+    };
+    let name = format!(
+        "{:?} {} A={}",
+        msc_mode,
+        if interleaving == Interleaving::Long { "long" } else { "short" },
+        part_a_bytes
+    );
+    Scenario { name, decode_msc: true, seed: 7 + part_a_bytes as u64, ..Scenario::new(tx, Link::Iq(0.0), 12.0) }
+}
+
+/// Problems of a noiseless MSC loopback.
+fn check_msc(sc: &Scenario, o: &Outcome) -> Vec<String> {
+    let mut p = check_clean(sc, o);
+    let depth = if sc.tx.interleaving == Interleaving::Long { 5 } else { 1 };
+    // After acquisition (≤ 4.5 s), super-frame alignment and the interleaver filling
+    // there must be at least this many good frames in 12 s.
+    let want = if depth == 5 { 12 } else { 16 };
+    if o.msc.count() < want {
+        p.push(format!("only {} of {} MSC frames bit-exact (want ≥ {want})", o.msc.count(), o.msc_frames));
     }
+    if o.msc.breaks > 0 {
+        p.push(format!("{} breaks in the MSC frame sequence", o.msc.breaks));
+    }
+    // Multiplex frame j can be decoded once multiplex frame j + D − 1 has been
+    // received; the event must come in the transmitter frame that completes it or,
+    // through the receiver's pipeline delay, the next one.
+    if o.msc.lags.iter().any(|&l| l > 1) {
+        p.push(format!("MSC frames arrive {} frames after the interleaver allows (expected 0-1)", o.msc.lag_range()));
+    }
+    if let Some(&last) = o.msc.indices.last()
+        && last + depth + 3 < o.frames
+    {
+        p.push(format!("MSC frames stopped after multiplex frame {last}"));
+    }
+    p
+}
+
+fn msc_bit_exact(interleaving: Interleaving) {
+    let scenarios = vec![
+        msc_scenario(MscMode::Qam16Sm, interleaving, 0, 0),
+        msc_scenario(MscMode::Qam16Sm, interleaving, 60, 0),
+        msc_scenario(MscMode::Qam64Sm, interleaving, 0, 0),
+        msc_scenario(MscMode::Qam64Sm, interleaving, 90, 0),
+        msc_scenario(MscMode::Qam64HmSym, interleaving, 0, 1),
+        msc_scenario(MscMode::Qam64HmSym, interleaving, 50, 2),
+        msc_scenario(MscMode::Qam64HmMix, interleaving, 0, 0),
+        msc_scenario(MscMode::Qam64HmMix, interleaving, 40, 3),
+    ];
+    let title = format!("MSC bit-exact loopback, B/SO3 I/Q, {interleaving:?} interleaving");
+    let (report, failures) = run_all(&title, &scenarios, check_msc);
+    assert!(failures.is_empty(), "{report}\nfailing:\n  {}\n", failures.join("\n  "));
 }
 
 #[test]
-#[ignore]
-fn dbg_timeline() {
-    let seed: u64 = std::env::var("DBG_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(1001);
-    let so: u8 = std::env::var("DBG_SO").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let mode = match std::env::var("DBG_MODE").as_deref() { Ok("B") => RobustnessMode::B, Ok("C") => RobustnessMode::C, Ok("D") => RobustnessMode::D, _ => RobustnessMode::A };
-    let txc = TxConfig { mode, occupancy: SpectrumOccupancy::new(so).unwrap(), ..Default::default() };
-    let mut tx = Transmitter::new(txc).unwrap();
-    let layout = tx.layout();
-    let mut out_stage = output_for(layout, Link::Iq(0.0));
-    let mut rx = receiver_for(Link::Iq(0.0));
-    let mut rng = Rng::new(seed);
-    let cap = tx.msc_capacity();
-    for f in 0..15 {
-        let fac = test_fac(&mut rng);
-        let msc = rng.bits(cap.total_bits());
-        let sdc = (tx.frame_index() == 0).then(|| rng.bytes(tx.sdc_capacity_bytes()));
-        let bb = tx.transmit_frame(&fac, &msc, sdc.as_deref()).unwrap();
-        let mut pcm = Vec::new();
-        out_stage.process(&bb, &mut pcm);
-        for chunk in pcm.chunks(2 * 1920) {
-            for ev in rx.push(chunk) {
-                let s = match ev { ReceiverEvent::Fac(f) => format!("FAC frame {}", f.channel.frame_index), e => format!("{e:?}").chars().take(100).collect() };
-                println!("  frame {f:2}: {s}");
-            }
-        }
-        let st = rx.status();
-        println!("frame {f:2} end: state {:?} mode {:?} so {:?} fsync {:?} dc {:?} scores {:?}", st.state, st.mode, st.occupancy.map(|o| o.value()), st.frame_sync, st.dc_frequency_hz, rx.mode_scores());
+fn msc_bit_exact_short_interleaving() {
+    msc_bit_exact(Interleaving::Short);
+}
+
+#[test]
+fn msc_bit_exact_long_interleaving() {
+    msc_bit_exact(Interleaving::Long);
+}
+
+/// 64-QAM MSC over every layout (real IF), a slower complement to the B/SO3 tests.
+#[test]
+#[ignore = "long: 16 layouts × 12 s with MSC decoding"]
+fn msc_bit_exact_every_layout() {
+    let scenarios: Vec<Scenario> = all_layouts()
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let msc_mode = [MscMode::Qam64Sm, MscMode::Qam16Sm, MscMode::Qam64HmMix, MscMode::Qam64HmSym][i % 4];
+            let tx = TxConfig {
+                mode: l.mode,
+                occupancy: l.occupancy,
+                msc_mode,
+                interleaving: if i % 2 == 0 { Interleaving::Long } else { Interleaving::Short },
+                ..Default::default()
+            };
+            let name = format!("{} {:?}", layout_name(&tx), msc_mode);
+            Scenario { name, decode_msc: true, seed: 300 + i as u64, ..Scenario::new(tx, Link::RealIf, 12.0) }
+        })
+        .collect();
+    let (report, failures) = run_all("MSC bit-exact loopback, every layout, real IF", &scenarios, check_msc);
+    assert!(failures.is_empty(), "{report}\nfailing:\n  {}\n", failures.join("\n  "));
+}
+
+// ---------------------------------------------------------------------------------
+// Robustness smoke tests
+// ---------------------------------------------------------------------------------
+
+/// Mode B / 10 kHz, 64-QAM (protection level 1) or 16-QAM, long interleaving,
+/// through a channel.
+fn impaired(name: &str, tx: TxConfig, link: Link, channel: ChannelConfig, seconds: Real) -> Scenario {
+    Scenario {
+        name: name.to_string(),
+        channel: Some(channel),
+        decode_msc: true,
+        seed: 11,
+        ..Scenario::new(tx, link, seconds)
     }
+}
+
+fn b_so3(msc_mode: MscMode) -> TxConfig {
+    TxConfig { msc_mode, ..Default::default() }
+}
+
+/// Assert only that FACs and MSC frames flow after acquisition.
+fn check_decodes(_sc: &Scenario, o: &Outcome) -> Vec<String> {
+    let mut p = Vec::new();
+    if o.first_fac_s().is_none_or(|t| t > 6.0) {
+        p.push(format!("first FAC at {:?} s", o.first_fac_s()));
+    }
+    if o.fac.count() + 20 < o.frames {
+        p.push(format!("only {} of {} FACs", o.fac.count(), o.frames));
+    }
+    if o.msc.count() < 5 {
+        p.push(format!("only {} MSC frames bit-exact", o.msc.count()));
+    }
+    p
+}
+
+fn no_check(_: &Scenario, _: &Outcome) -> Vec<String> {
+    Vec::new()
+}
+
+#[test]
+fn robustness_awgn() {
+    let scenarios: Vec<Scenario> = [30.0, 20.0, 16.0, 13.0, 10.0, 7.0]
+        .into_iter()
+        .map(|snr| impaired(&format!("AWGN {snr} dB 64-QAM"), b_so3(MscMode::Qam64Sm), Link::Iq(0.0), ChannelConfig::awgn(snr), 15.0))
+        .collect();
+    // Only the 30 dB case is asserted.
+    let (report, failures) = run_all("AWGN, B/SO3, 64-QAM SM prot. 1, long interleaving", &scenarios, |sc, o| {
+        if sc.name.starts_with("AWGN 30") { check_decodes(sc, o) } else { Vec::new() }
+    });
+    assert!(failures.is_empty(), "{report}\n{}", failures.join("\n"));
+}
+
+#[test]
+fn robustness_channel_models_1_to_4() {
+    let scenarios: Vec<Scenario> = (1..=4)
+        .map(|n| {
+            let ch = ChannelConfig { seed: 20 + u64::from(n), ..ChannelConfig::drm(n, 25.0).unwrap() };
+            let name = format!("ch{n} {} 25 dB", ChannelModel::drm_name(n));
+            impaired(&name, b_so3(MscMode::Qam16Sm), Link::Iq(0.0), ch, 20.0)
+        })
+        .collect();
+    // Only channel 1 (AWGN at 25 dB) is asserted.
+    let (report, failures) = run_all("DRM channels 1-4, B/SO3, 16-QAM prot. 1, long interleaving", &scenarios, |sc, o| {
+        if sc.name.starts_with("ch1 ") { check_decodes(sc, o) } else { Vec::new() }
+    });
+    assert!(failures.is_empty(), "{report}\n{}", failures.join("\n"));
+}
+
+#[test]
+fn robustness_offsets() {
+    let tx = b_so3(MscMode::Qam64Sm);
+    let with = |freq: Real, ppm: Real| ChannelConfig {
+        freq_offset_hz: freq,
+        sample_rate_offset_ppm: ppm,
+        ..ChannelConfig::awgn(30.0)
+    };
+    let scenarios = vec![
+        impaired("+40 Hz, 30 dB", tx, Link::Iq(0.0), with(40.0, 0.0), 15.0),
+        impaired("-123.4 Hz, 30 dB", tx, Link::RealIf, with(-123.4, 0.0), 15.0),
+        impaired("+50 ppm, 30 dB", tx, Link::Iq(0.0), with(0.0, 50.0), 20.0),
+        impaired("-50 ppm, 30 dB", tx, Link::RealIf, with(0.0, -50.0), 20.0),
+        impaired("+40 Hz +50 ppm, 30 dB", tx, Link::Iq(0.0), with(40.0, 50.0), 20.0),
+    ];
+    let (report, failures) = run_all("Frequency / sample-rate offsets, B/SO3, 64-QAM, AWGN 30 dB", &scenarios, check_decodes);
+    assert!(failures.is_empty(), "{report}\n{}", failures.join("\n"));
+}
+
+/// SNR sweeps for FAC/SDC/MSC thresholds per mode.
+#[test]
+#[ignore = "long: SNR sweep over several layouts"]
+fn robustness_awgn_sweep() {
+    let mut scenarios = Vec::new();
+    for (mode, so) in [
+        (RobustnessMode::A, SpectrumOccupancy::SO_0),
+        (RobustnessMode::A, SpectrumOccupancy::SO_3),
+        (RobustnessMode::B, SpectrumOccupancy::SO_3),
+        (RobustnessMode::C, SpectrumOccupancy::SO_3),
+        (RobustnessMode::D, SpectrumOccupancy::SO_5),
+    ] {
+        for snr in [25.0, 16.0, 12.0, 9.0, 6.0, 3.0] {
+            let tx = TxConfig { mode, occupancy: so, msc_mode: MscMode::Qam16Sm, ..Default::default() };
+            let name = format!("{} {snr} dB 16-QAM", layout_name(&tx));
+            scenarios.push(impaired(&name, tx, Link::RealIf, ChannelConfig::awgn(snr), 20.0));
+        }
+    }
+    run_all("AWGN sweep, 16-QAM prot. 1, long interleaving, real IF", &scenarios, no_check);
+}
+
+/// The harsher channel models with the robustness modes meant for them.
+#[test]
+#[ignore = "long: fading channels 3-6 with modes B-D"]
+fn robustness_channel_models_5_6() {
+    let mut scenarios = Vec::new();
+    for (n, mode, so) in [
+        (3, RobustnessMode::B, SpectrumOccupancy::SO_3),
+        (4, RobustnessMode::B, SpectrumOccupancy::SO_3),
+        (5, RobustnessMode::C, SpectrumOccupancy::SO_3),
+        (5, RobustnessMode::D, SpectrumOccupancy::SO_3),
+        (6, RobustnessMode::D, SpectrumOccupancy::SO_3),
+    ] {
+        for snr in [30.0, 20.0] {
+            let tx = TxConfig { mode, occupancy: so, msc_mode: MscMode::Qam16Sm, ..Default::default() };
+            let ch = ChannelConfig { seed: 40 + u64::from(n), ..ChannelConfig::drm(n, snr).unwrap() };
+            let name = format!("ch{n} {} {snr} dB", layout_name(&tx));
+            scenarios.push(impaired(&name, tx, Link::Iq(0.0), ch, 30.0));
+        }
+    }
+    run_all("DRM channels 3-6, 16-QAM prot. 1, long interleaving", &scenarios, no_check);
+}
+
+// ---------------------------------------------------------------------------------
+// Known receiver issues (found with these loopback tests). Each test states the
+// expected behaviour and is ignored until the receiver is fixed; run them with
+// `cargo test -p decdrm-core --test loopback known_issue -- --ignored --nocapture`.
+// ---------------------------------------------------------------------------------
+
+/// After the first FAC of a signal whose occupancy is not SO3, the receiver
+/// (which starts with an SO3 layout) calls `SymbolChain::reconfigure`, which
+/// rebuilds the `ChannelEstimator`. The symbols buffered in the old estimator and
+/// the new one's start-up delay are lost, so `demap` never sees symbol 0 of the
+/// next frame and its frame counter lags by one frame until the next FAC forces a
+/// resync. Symptom: the FAC of the next frame and the SDC block of the super frame
+/// that starts next are never delivered (no CRC error, just missing).
+#[test]
+#[ignore = "known receiver issue: a FAC and an SDC block are lost when the occupancy differs from SO3"]
+fn known_issue_no_frame_lost_at_occupancy_change() {
+    let mut failures = Vec::new();
+    for so in [0, 1, 2, 4, 5] {
+        let tx = TxConfig { occupancy: SpectrumOccupancy::new(so).unwrap(), ..Default::default() };
+        let sc = Scenario { seed: 3, ..Scenario::new(tx, Link::Iq(0.0), 8.0) };
+        let o = run(&sc);
+        let first_fac = o.fac.indices.first().copied();
+        // The first super frame starting after the first decoded FAC.
+        let want_sdc = first_fac.map(|j| j / 3 + 1);
+        if o.fac.breaks > 0 || o.sdc.indices.first().copied() != want_sdc {
+            failures.push(format!(
+                "B/SO{so}: FAC breaks after {:?} FACs (first FAC frame {first_fac:?}); first SDC block {:?}, expected {want_sdc:?}",
+                o.fac.break_at,
+                o.sdc.indices.first()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "\n  {}", failures.join("\n  "));
+}
+
+/// The sample-rate-offset acquisition (`rx/chanest/track.rs`, end of the 4 s
+/// acquisition) measures the drift of the *integer* index of the strongest
+/// impulse-response bin. One impulse-response bin is fft_size/num_carriers samples
+/// (≈ 4.9 samples in mode B/SO3), so a single bin flip within the 4 s window —
+/// which happens on a clean signal when the timing tracking nudges the window —
+/// yields a spurious correction of ≈ 1.3 Hz (28 ppm), which then decays only very
+/// slowly. Expected: |SRO| well below 0.3 Hz for a signal without sample-rate offset.
+#[test]
+#[ignore = "known receiver issue: spurious ~1.3 Hz SRO estimate on a clean signal"]
+fn known_issue_no_spurious_sro_on_clean_signal() {
+    let tx = TxConfig { interleaving: Interleaving::Short, ..Default::default() };
+    let sc = Scenario { name: "B/SO3 64-QAM short".into(), decode_msc: true, seed: 7, ..Scenario::new(tx, Link::Iq(0.0), 12.0) };
+    let o = run(&sc);
+    println!("{}\n{}", header(), row(&sc, &o));
+    assert!(o.sro_hz.abs() < 0.3, "SRO estimate {:.3} Hz on a signal without sample-rate offset", o.sro_hz);
+}
+
+/// Robustness-mode detection for mode A with 4.5 kHz occupancy is marginal: the
+/// best/second-best score ratio of a clean A/SO0 signal is only ~4.5–7 (mode B
+/// second, same 37.5 Hz symbol rate) against `RM_RELIABILITY` = 8, so detection
+/// waits for a favourable fluctuation. Mode A/SO3 has a ratio of ~20. Expected:
+/// the first FAC of a clean A/SO0 signal as fast as for other mode A layouts
+/// (2.0 s); observed 2.0–4.0 s, and several seconds more at low SNR.
+#[test]
+#[ignore = "known receiver issue: slow mode detection for mode A / SO0"]
+fn known_issue_fast_mode_a_so0_acquisition() {
+    let mut frames = Vec::new();
+    for seed in 0..12 {
+        let tx = TxConfig { mode: RobustnessMode::A, occupancy: SpectrumOccupancy::SO_0, ..Default::default() };
+        let sc = Scenario { seed: 1000 + seed, ..Scenario::new(tx, Link::Iq(0.0), 8.0) };
+        frames.push(run(&sc).first_fac_frame);
+    }
+    let times: Vec<String> = frames.iter().map(|f| f.map_or("-".into(), |f| format!("{:.1}", (f + 1) as Real * FRAME_S))).collect();
+    println!("A/SO0 first FAC after (s): {}", times.join(" "));
+    // 2.4 s = the FAC decoded while the sixth frame is pushed.
+    assert!(frames.iter().all(|f| f.is_some_and(|f| f < 6)), "first FAC after (s): {}", times.join(" "));
 }

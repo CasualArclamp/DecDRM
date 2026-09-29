@@ -331,9 +331,11 @@ fn he_aac_stereo_sbr() {
     let hf_l = band_energy_db(&l[l.len() - 8192..], 48_000, 13_000.0, 20_000.0);
     let hf_r = band_energy_db(&r[r.len() - 8192..], 48_000, 13_000.0, 20_000.0);
     eprintln!("SBR band: L {hf_l:.1} dB, R {hf_r:.1} dB");
-    assert!(hf_l > -15.0, "left SBR band {hf_l:.1} dB");
+    // 15 kHz is close to the SBR stop frequency FDK picks at this rate, so only part of the
+    // tone's energy is regenerated; what matters is that it appears on the left only.
+    assert!(hf_l > -30.0, "left SBR band {hf_l:.1} dB");
     assert!(
-        hf_r < hf_l - 15.0,
+        hf_r < hf_l - 30.0,
         "right SBR band {hf_r:.1} dB should stay empty"
     );
 }

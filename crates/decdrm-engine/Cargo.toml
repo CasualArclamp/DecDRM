@@ -11,6 +11,7 @@ rust-version.workspace = true
 decdrm-core = { path = "../decdrm-core" }
 decdrm-io = { path = "../decdrm-io" }
 decdrm-data = { path = "../decdrm-data" }
+decdrm-codecs = { path = "../decdrm-codecs" }
 crossbeam-channel = "0.5"
 anyhow.workspace = true
 tracing.workspace = true

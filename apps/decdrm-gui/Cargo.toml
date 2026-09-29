@@ -1,0 +1,40 @@
+[package]
+name = "decdrm-gui"
+description = "DecDRM desktop receiver GUI (egui); the transmitter tab follows later"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# eframe/egui 0.36 and egui_plot 0.37 require Rust 1.95, so the GUI cannot keep the
+# workspace MSRV (1.88) that the library crates and the CLI use.
+rust-version = "1.95"
+
+[[bin]]
+name = "decdrm-gui"
+path = "src/main.rs"
+
+[dependencies]
+decdrm-engine = { path = "../../crates/decdrm-engine" }
+decdrm-core = { path = "../../crates/decdrm-core" }
+decdrm-data = { path = "../../crates/decdrm-data" }
+decdrm-io = { path = "../../crates/decdrm-io" }
+anyhow.workspace = true
+# Same features as the CLI, so both share one compiled copy.
+clap = { version = "4.6", features = ["derive"] }
+# The glow (OpenGL) renderer instead of eframe's default wgpu: plenty for 2-D plots and
+# a much smaller build. "x11"/"wayland" only matter on Linux.
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+egui_plot = "0.37.0"
+# Native file dialogs (Win32 on Windows, XDG desktop portal on Linux).
+rfd = "0.17.2"
+# Slideshow images: TS 101 499 only allows JPEG and PNG. PNG also writes screenshots.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+# Settings file.
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1"
+
+# eframe's default feature set turns on winit's defaults; with eframe's defaults off we
+# re-enable them here (Linux only): Wayland and X11 client libraries are then loaded at
+# run time, so building needs no Wayland/X11 development packages.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = "0.30.13"

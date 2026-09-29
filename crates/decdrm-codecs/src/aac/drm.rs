@@ -172,7 +172,6 @@ fn prepare<'a>(info: &IcsInfo, ics: &'a Ics) -> Result<Channel<'a>, CodecError> 
 
     // HCR sections and codewords in the decoder's natural order.
     let mut hsecs: Vec<HcrSection> = Vec::new();
-    let mut tuple = [0i32; 4];
     if !info.is_short() {
         let mut sfb = 0usize;
         for &(c, n) in &sections[0] {
@@ -231,8 +230,8 @@ fn prepare<'a>(info: &IcsInfo, ics: &'a Ics) -> Result<Channel<'a>, CodecError> 
                         let dim = cb_dim(c);
                         let base = w * wlen + unit;
                         for k in (0..4).step_by(dim) {
-                            tuple[..dim].copy_from_slice(&ics.spec[base + k..base + k + dim]);
-                            let (bits, len) = codeword_bits(c, &tuple[..dim])?;
+                            let (bits, len) =
+                                codeword_bits(c, &ics.spec[base + k..base + k + dim])?;
                             hsecs
                                 .last_mut()
                                 .expect("pushed above")

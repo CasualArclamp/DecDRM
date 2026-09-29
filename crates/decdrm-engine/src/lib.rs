@@ -7,6 +7,7 @@
 //! clone) and channel endpoints for commands and events. `crossbeam_channel` is used
 //! because its channels can be polled without blocking from a GUI frame loop.
 
+pub mod audio_out;
 pub mod session;
 pub mod snapshot;
 pub mod source;

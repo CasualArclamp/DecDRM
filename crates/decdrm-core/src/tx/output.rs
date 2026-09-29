@@ -372,6 +372,30 @@ mod tests {
         }
     }
 
+    /// Taking the real part folds the complex spectrum's negative-frequency half onto
+    /// the positive one. Without the channel filter, white noise from the image band
+    /// doubles the in-band noise of a real output (−3 dB SNR); with the filter the
+    /// in-band noise density is that of the complex input.
+    #[test]
+    fn channel_filter_prevents_image_noise_folding() {
+        use crate::channel::Rng;
+        let l = layout(RobustnessMode::B, SpectrumOccupancy::SO_3);
+        let mut rng = Rng::new(8);
+        let x: Vec<Cplx> = (0..48_000).map(|_| rng.complex_gaussian()).collect();
+        let in_band_density = |band_limit: bool| -> Real {
+            let cfg = OutputConfig { band_limit, level_dbfs: -40.0, ..OutputConfig::real(12_000.0) };
+            let mut st = OutputStage::new(l, cfg).unwrap();
+            let mut out = Vec::new();
+            st.process(&x, &mut out);
+            let z: Vec<Cplx> = out.iter().map(|&v| Cplx::new(Real::from(v), 0.0)).collect();
+            let s = spectrum(&z);
+            // 1 Hz bins; the DRM band is 12 kHz ± 4.85 kHz.
+            (8_000..16_000).map(|f| s[f]).sum::<Real>() / 8_000.0 / (st.gain() * st.gain())
+        };
+        let ratio = in_band_density(false) / in_band_density(true);
+        assert!((ratio - 2.0).abs() < 0.15, "unfiltered/filtered in-band noise {ratio}");
+    }
+
     /// The channel filter passes the DRM band and removes noise far outside it.
     #[test]
     fn channel_filter_band_shape() {

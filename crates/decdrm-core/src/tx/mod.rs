@@ -480,10 +480,10 @@ mod tests {
             let cells: Vec<Cplx> = (0..map.num_carriers)
                 .map(|c| spec[map.carrier_index(c).rem_euclid(n as i32) as usize] / n as f64)
                 .collect();
-            for c in 0..map.num_carriers {
+            for (c, &cell) in cells.iter().enumerate() {
                 let ty = map.cell(sf_sym, c);
                 if ty.is_pilot() || ty.is_dc() {
-                    assert!((cells[c] - map.pilot(sf_sym, c)).norm() < 1e-9, "pilot/DC at sym {sf_sym} c {c}");
+                    assert!((cell - map.pilot(sf_sym, c)).norm() < 1e-9, "pilot/DC at sym {sf_sym} c {c}");
                 }
             }
             if sf_sym == 0 {
@@ -604,6 +604,23 @@ mod tests {
         }
     }
 
+    /// `None` at a super-frame start repeats the previous SDC data field; shorter
+    /// data is zero-padded.
+    #[test]
+    fn sdc_none_repeats_previous_data_field() {
+        let mut tx = Transmitter::new(TxConfig { interleaving: Interleaving::Short, ..Default::default() }).unwrap();
+        let bits = vec![0; tx.msc_capacity().total_bits()];
+        let data = [0xA5u8; 10];
+        let mut signal = Vec::new();
+        for f in 0..6 {
+            let sdc = (f == 0).then_some(&data[..]);
+            signal.extend(tx.transmit_frame(&test_fac(), &bits, sdc).unwrap());
+        }
+        let dec = ideal_receive(&tx, &signal);
+        let want = sdc::build_sdc_block(0, &data, tx.sdc_block_bits());
+        assert_eq!(dec.sdc_blocks, vec![want.clone(), want]);
+    }
+
     #[test]
     fn capacities_follow_mlc_parameters() {
         let tx = Transmitter::new(TxConfig { msc_mode: MscMode::Qam64HmSym, ..Default::default() }).unwrap();
@@ -612,7 +629,6 @@ mod tests {
         assert!(cap.vspp_bits > 0);
         assert_eq!(cap.total_bits(), p.total_bits());
         assert_eq!(cap.main_bits(), p.bits_hpp + p.bits_lpp);
-        // Mode B / SO3: N_SDC = 322, 16-QAM R = 0.5 ⇒ L = 2·(2·322 − 12)·(1/3 + 2/3)/2 bits.
         assert_eq!(tx.sdc_block_bits(), tx.sdc_enc.params().total_bits());
         assert_eq!(tx.sdc_capacity_bytes(), (tx.sdc_block_bits() - 20) / 8);
         assert_eq!(tx.mean_power(), tx.cell_map().avg_power_per_symbol);

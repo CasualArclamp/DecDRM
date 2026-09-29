@@ -49,6 +49,22 @@ struct RxArgs {
     /// Print a status line every N seconds of signal (0 = never).
     #[arg(long, default_value_t = 5.0)]
     status_every: f64,
+    /// Play the decoded audio on the default (or --output-device) sound card.
+    /// Implies --realtime for files.
+    #[arg(long)]
+    play: bool,
+    /// Sound-card output device for --play.
+    #[arg(long)]
+    output_device: Option<String>,
+    /// Write the decoded audio to a WAV/FLAC file.
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
+    /// Save slideshow images, websites, EPG and other data objects here.
+    #[arg(long, value_name = "DIR")]
+    data_dir: Option<PathBuf>,
+    /// Short id (0-3) of the service to decode (default: first audio service).
+    #[arg(long)]
+    service: Option<u8>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -90,7 +106,7 @@ fn devices() -> Result<()> {
 
 fn rx(a: RxArgs) -> Result<()> {
     let input = match (&a.file, &a.device, a.default_device) {
-        (Some(p), _, _) => InputSpec::File { path: p.clone(), realtime: a.realtime },
+        (Some(p), _, _) => InputSpec::File { path: p.clone(), realtime: a.realtime || a.play },
         (None, Some(d), _) => InputSpec::Device { name: Some(d.clone()), channels: None },
         (None, None, true) => InputSpec::Device { name: None, channels: None },
         _ => anyhow::bail!("give a file, --device NAME or --default-device"),
@@ -109,11 +125,14 @@ fn rx(a: RxArgs) -> Result<()> {
     let engine = Engine::start(EngineConfig {
         input,
         receiver,
-        play_audio: false,
-        output_device: None,
-        record_audio: None,
-        data_dir: None,
+        play_audio: a.play,
+        output_device: a.output_device.clone(),
+        record_audio: a.out.clone(),
+        data_dir: a.data_dir.clone(),
     });
+    if let Some(id) = a.service {
+        engine.command(Command::SelectService(id));
+    }
 
     // Stop cleanly on Ctrl-C by polling a flag (no extra crates needed: the engine
     // stops when its handle is dropped at the end of main).
