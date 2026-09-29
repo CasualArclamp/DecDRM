@@ -9,7 +9,8 @@ milestone checklist (keep it current).
   `fec/` (CRC, dispersal, interleavers, conv code, Viterbi, QAM metrics, MLC),
   `interleave` (MSC cell interleaver), `fac`, `rx/` (receiver chain), `tx/`, `channel/`,
   `mux/` (SDC, service info, MSC demux, audio super frames, text messages), `dsp/`.
-- `crates/decdrm-codecs` (+ `decdrm-fdk-sys`, `decdrm-opus-sys`) — FDK-AAC / libopus FFI.
+- `crates/decdrm-codecs` (+ `decdrm-fdk-sys`, `decdrm-opus-sys`, `decdrm-xaac-sys`) —
+  FDK-AAC / libopus / libxaac (xHE-AAC encoder, patched at build time) FFI.
 - `crates/decdrm-io` — WAV/FLAC, resampling, sound card (cpal), drift-compensated player.
 - `crates/decdrm-data` — packet mode, MOT, Journaline, EPG, BWS, TPEG.
 - `crates/decdrm-engine` — worker thread: source → `Session` (receiver + multiplex +
@@ -17,8 +18,8 @@ milestone checklist (keep it current).
 - `crates/decdrm-station` — transmitter application layer (TOML station config).
 - `apps/decdrm-cli` (binary `decdrm`: `rx`, `tx`, `devices`), `apps/decdrm-gui` (egui,
   MSRV 1.95 because of eframe).
-- `third_party/` — pinned submodules (fdk-aac v2.0.3, opus v1.6.1); clone with
-  `--recursive`.
+- `third_party/` — pinned submodules (fdk-aac v2.0.3, opus v1.6.1, libxaac v0.1.13);
+  clone with `--recursive`.
 - `samples/` (user recordings) and `reference/` (Dream r1548 source, ETSI PDFs) are
   git-ignored and never committed. `reference/etsi/es_201980v040201p.txt` is the DRM
   spec as text — grep it for clause numbers and tables.

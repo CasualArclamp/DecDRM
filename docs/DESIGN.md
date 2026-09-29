@@ -116,6 +116,10 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       receiver, also live through a virtual audio cable. To do: clock-drift
       compensation between a sound-card input and output.
 - [ ] **M8 TX codecs** — xHE-AAC (libxaac encoder), Opus.
+      *Status:* Opus transmitted by the station; `XheAacEncoder` (libxaac with
+      build-time fixes) round-trips through our framer and FDK with 0 concealment.
+      To do: station integration, framer API (reservoir level per access unit, no
+      silent zero-fill), MPS212 for 4:1 stereo.
 - [ ] **M9 EnCodec** — experimental neural-codec extension (TX + RX).
 - [ ] **M10 Polish** — performance, Linux verification, docs.
       *Status:* manual GitHub Actions workflow (`.github/workflows/linux.yml`) builds

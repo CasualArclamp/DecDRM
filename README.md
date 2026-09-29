@@ -7,7 +7,8 @@ recordings or a live sound card (for example a virtual audio cable fed by a web 
 as a KiwiSDR), and generates DRM signals from a station description. The signal
 processing is a spec-first reimplementation of ETSI ES 201 980 that borrows proven
 algorithms from [Dream](https://sourceforge.net/projects/drm/); audio uses Fraunhofer
-FDK-AAC (AAC, HE-AAC v1/v2, xHE-AAC decoding) and libopus.
+FDK-AAC (AAC, HE-AAC v1/v2, xHE-AAC decoding; AAC/HE-AAC encoding), libxaac (xHE-AAC
+encoding) and libopus.
 
 > **Status:** the receiver decodes audio, text messages and data services from every
 > DRM test recording available here (modes A/B/C, 9–20 kHz, real and I/Q inputs,
@@ -91,7 +92,10 @@ messages, data objects and log lines as events.
 
 ## Licence
 
-GPL-2.0-or-later (it derives from Dream, which is GPL). The vendored FDK-AAC library has
-its own licence (see `third_party/fdk-aac/NOTICE`), which is generally regarded as
-incompatible with the GPL: fine for personal use, but check before distributing
-binaries. AAC and DRM technologies are covered by patents licensed through Via LA.
+GPL-2.0-or-later (it derives from Dream, which is GPL). The vendored libxaac (xHE-AAC
+encoder) is Apache-2.0, which is compatible with GPLv3 but not GPLv2, so binaries that
+include it are distributed under GPL-3.0; its LICENSE and NOTICE must ship with them.
+The vendored FDK-AAC library has its own licence (see `third_party/fdk-aac/NOTICE`),
+which is generally regarded as incompatible with the GPL: fine for personal use, but
+check before distributing binaries. AAC, xHE-AAC (MPEG-D USAC) and DRM technologies are
+covered by patents licensed through Via LA.
