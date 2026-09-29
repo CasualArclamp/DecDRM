@@ -7,7 +7,11 @@ pub fn show(ui: &mut Ui, log: &mut LogBuffer) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("Log").strong());
         ui.label(RichText::new(format!("{} lines", log.len())).weak());
-        if ui.small_button("Copy").on_hover_text("Copy the whole log to the clipboard").clicked() {
+        if ui
+            .small_button("Copy")
+            .on_hover_text("Copy the whole log to the clipboard")
+            .clicked()
+        {
             ui.ctx().copy_text(log.text());
         }
         if ui.small_button("Clear").clicked() {

@@ -975,9 +975,7 @@ fn parse_multiplex(b: &mut Body) -> Result<MultiplexDescription, &'static str> {
     }
     let protection_a = b.u8(2);
     let protection_b = b.u8(2);
-    let streams = (0..b.len / 3)
-        .map(|_| StreamDescription { len_a: b.u(12) as u16, len_b: b.u(12) as u16 })
-        .collect();
+    let streams = (0..b.len / 3).map(|_| StreamDescription { len_a: b.u(12) as u16, len_b: b.u(12) as u16 }).collect();
     b.done()?;
     Ok(MultiplexDescription { protection_a, protection_b, streams })
 }
@@ -1121,11 +1119,8 @@ fn parse_time(b: &mut Body) -> Result<TimeAndDate, &'static str> {
     let mjd = b.u(17);
     let hour = b.u8(5);
     let minute = b.u8(6);
-    let local_offset = if b.len == 4 {
-        Some(LocalTimeOffset { rfu: b.u8(2), negative: b.flag(), half_hours: b.u8(5) })
-    } else {
-        None
-    };
+    let local_offset =
+        if b.len == 4 { Some(LocalTimeOffset { rfu: b.u8(2), negative: b.flag(), half_hours: b.u8(5) }) } else { None };
     b.done()?;
     Ok(TimeAndDate { mjd, hour, minute, local_offset })
 }
@@ -1431,7 +1426,8 @@ fn encode_body(body: &EntityBody, w: &mut BitWriter) -> Result<(), SdcError> {
             }
             let id_bits = other_service_id_bits(o.system_id);
             if id_bits > 0 {
-                let id = o.other_service_id.ok_or(SdcError::InvalidContent("system id requires an other service id"))?;
+                let id =
+                    o.other_service_id.ok_or(SdcError::InvalidContent("system id requires an other service id"))?;
                 bits(w, id, id_bits);
             }
             let fb = 8 * other_service_frequency_bytes(o.system_id) as u32;
@@ -1555,16 +1551,28 @@ mod tests {
                 enhancement_layer: false,
                 short_id_flags: Some(0b0101),
                 region_schedule: Some(RegionSchedule { region_id: 3, schedule_id: 7 }),
-                frequencies: vec![DrmFrequency::from_khz(6075), DrmFrequency::from_khz(15_440), DrmFrequency::from_khz(100_000)],
+                frequencies: vec![
+                    DrmFrequency::from_khz(6075),
+                    DrmFrequency::from_khz(15_440),
+                    DrmFrequency::from_khz(100_000),
+                ],
             }),
         );
         roundtrip(
             false,
-            EntityBody::AfsMultiplex(AfsMultiplex { frequencies: vec![DrmFrequency::from_khz(1440)], ..Default::default() }),
+            EntityBody::AfsMultiplex(AfsMultiplex {
+                frequencies: vec![DrmFrequency::from_khz(1440)],
+                ..Default::default()
+            }),
         );
         roundtrip(
             false,
-            EntityBody::AfsSchedule(AfsSchedule { schedule_id: 15, day_code: 0x7F, start_minute: 1439, duration_minutes: 16383 }),
+            EntityBody::AfsSchedule(AfsSchedule {
+                schedule_id: 15,
+                day_code: 0x7F,
+                start_minute: 1439,
+                duration_minutes: 16383,
+            }),
         );
         roundtrip(
             false,
@@ -1665,7 +1673,9 @@ mod tests {
             })),
         );
         roundtrip(true, EntityBody::FacChannel(None));
-        for (system_id, id) in [(0u8, Some(0x12_3456u32)), (2, None), (4, Some(0xD3C2)), (9, Some(0xE1_C0DE)), (11, Some(0xDEAD_BEEF))] {
+        for (system_id, id) in
+            [(0u8, Some(0x12_3456u32)), (2, None), (4, Some(0xD3C2)), (9, Some(0xE1_C0DE)), (11, Some(0xDEAD_BEEF))]
+        {
             let freqs = if system_id <= 2 { vec![7325, 0x8000 | 9_500] } else { vec![64, 101, 3] };
             roundtrip(
                 true,
@@ -1697,7 +1707,13 @@ mod tests {
         roundtrip(false, EntityBody::PacketFec(PacketStreamFec { stream_id: 3, r: 180, c: 239, packet_length: 255 }));
         roundtrip(
             false,
-            EntityBody::ServiceLinking(ServiceLinking { active: true, hard: true, international: true, lsn: 0xABC, id_list: None }),
+            EntityBody::ServiceLinking(ServiceLinking {
+                active: true,
+                hard: true,
+                international: true,
+                lsn: 0xABC,
+                id_list: None,
+            }),
         );
         roundtrip(
             true,
@@ -1719,7 +1735,10 @@ mod tests {
                 id_list: Some(LinkIdList { qualifier: 3, data: false, ids: vec![0x10_2030] }),
             }),
         );
-        roundtrip(false, EntityBody::Unknown { entity_type: 15, raw: RawBody { first_nibble: 5, bytes: vec![1, 2, 3] } });
+        roundtrip(
+            false,
+            EntityBody::Unknown { entity_type: 15, raw: RawBody { first_nibble: 5, bytes: vec![1, 2, 3] } },
+        );
     }
 
     #[test]
@@ -1785,7 +1804,10 @@ mod tests {
         // language entity: the first two are Invalid, the third still parses.
         let mut data = vec![(3 << 1), 0x13, b'a', b'b', b'c'];
         data.extend([(2 << 1), 0x41, 0xFF, 0xFF]);
-        let lang = SdcEntity::new(false, EntityBody::LanguageCountry(LanguageCountry { short_id: 0, language: *b"eng", country: *b"gb" }));
+        let lang = SdcEntity::new(
+            false,
+            EntityBody::LanguageCountry(LanguageCountry { short_id: 0, language: *b"eng", country: *b"gb" }),
+        );
         data.extend(lang.encode().unwrap());
         let e = parse_sdc(&data);
         assert_eq!(e.len(), 3);

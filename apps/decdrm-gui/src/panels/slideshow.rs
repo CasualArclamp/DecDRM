@@ -14,7 +14,9 @@ pub const MAX_TEXTURE_SIDE: u32 = 2048;
 /// Decode a JPEG/PNG slide into an egui image. The decoder is given size and memory
 /// limits because the bytes come off the air.
 pub fn decode_image(bytes: &[u8]) -> Result<ColorImage, String> {
-    let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|e| e.to_string())?;
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_DECODE_SIDE);
     limits.max_image_height = Some(MAX_DECODE_SIDE);
@@ -69,20 +71,35 @@ impl SlideshowView {
                 }
             });
         }
-        let Some(service) = data.get_mut(id) else { return };
+        let Some(service) = data.get_mut(id) else {
+            return;
+        };
         let show = &mut service.slideshow;
 
         // Navigation row.
         ui.horizontal(|ui| {
             let index = show.current_index().unwrap_or(0);
-            if ui.add_enabled(index > 0, egui::Button::new("◀")).on_hover_text("Older slide").clicked() {
+            if ui
+                .add_enabled(index > 0, egui::Button::new("◀"))
+                .on_hover_text("Older slide")
+                .clicked()
+            {
                 show.step_back();
             }
             ui.label(RichText::new(format!("{} / {}", index + 1, show.len())).monospace());
-            if ui.add_enabled(index + 1 < show.len(), egui::Button::new("▶")).on_hover_text("Newer slide").clicked() {
+            if ui
+                .add_enabled(index + 1 < show.len(), egui::Button::new("▶"))
+                .on_hover_text("Newer slide")
+                .clicked()
+            {
                 show.step_forward();
             }
-            if !show.is_live() && ui.button("Live").on_hover_text("Follow new slides again").clicked() {
+            if !show.is_live()
+                && ui
+                    .button("Live")
+                    .on_hover_text("Follow new slides again")
+                    .clicked()
+            {
                 show.live();
             }
             if !show.pending().is_empty() {
@@ -103,19 +120,35 @@ impl SlideshowView {
             len: slide.data.len(),
         };
         if self.texture.as_ref().is_none_or(|(k, _)| *k != key) {
-            let texture = decode_image(&slide.data)
-                .map(|img| ui.ctx().load_texture(format!("slide-{id}"), img, TextureOptions::LINEAR));
+            let texture = decode_image(&slide.data).map(|img| {
+                ui.ctx()
+                    .load_texture(format!("slide-{id}"), img, TextureOptions::LINEAR)
+            });
             self.texture = Some((key, texture));
         }
-        let caption = if slide.name.is_empty() { slide.mime.clone() } else { slide.name.clone() };
+        let caption = if slide.name.is_empty() {
+            slide.mime.clone()
+        } else {
+            slide.name.clone()
+        };
         let link = slide.click_through_url();
         match &self.texture {
             Some((_, Ok(texture))) => {
-                let avail = ui.available_size() - egui::vec2(0.0, 22.0);
-                ui.add(egui::Image::new(texture).max_size(avail.max(egui::vec2(32.0, 32.0))).maintain_aspect_ratio(true));
+                // Scale to the free space (slides are only 320×240), at most 2×.
+                let avail =
+                    (ui.available_size() - egui::vec2(0.0, 22.0)).max(egui::vec2(32.0, 32.0));
+                ui.add(
+                    egui::Image::new(texture)
+                        .fit_to_exact_size(avail)
+                        .max_size(texture.size_vec2() * 2.0)
+                        .maintain_aspect_ratio(true),
+                );
             }
             Some((_, Err(e))) => {
-                ui.colored_label(ui.visuals().warn_fg_color, format!("Cannot show {caption}: {e}"));
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("Cannot show {caption}: {e}"),
+                );
             }
             None => {}
         }
@@ -135,7 +168,8 @@ mod tests {
     fn png(w: u32, h: u32) -> Vec<u8> {
         let img = image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([x as u8, y as u8, 7, 255]));
         let mut out = Vec::new();
-        img.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        img.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
         out
     }
 

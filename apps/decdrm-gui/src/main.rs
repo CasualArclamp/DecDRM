@@ -26,7 +26,11 @@ use std::path::PathBuf;
 /// Command-line options. All are optional: without them the GUI restores the last
 /// session's settings.
 #[derive(Parser, Debug, Clone, Default)]
-#[command(name = "decdrm-gui", version, about = "DecDRM — Digital Radio Mondiale (DRM30) receiver")]
+#[command(
+    name = "decdrm-gui",
+    version,
+    about = "DecDRM — Digital Radio Mondiale (DRM30) receiver"
+)]
 pub struct Args {
     /// Recording to open (WAV/FLAC). Files with an `IQ` token in the name open as I/Q.
     pub file: Option<PathBuf>,
@@ -66,5 +70,9 @@ fn main() -> eframe::Result {
     };
     // `Box::new(|cc| ..)`: eframe takes the app constructor as a boxed closure and calls
     // it once the window and the rendering context exist.
-    eframe::run_native("DecDRM", options, Box::new(move |cc| Ok(Box::new(app::DecDrmApp::new(cc, args)))))
+    eframe::run_native(
+        "DecDRM",
+        options,
+        Box::new(move |cc| Ok(Box::new(app::DecDrmApp::new(cc, args)))),
+    )
 }

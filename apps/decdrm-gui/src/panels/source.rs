@@ -42,7 +42,10 @@ impl DeviceLists {
     }
 }
 
-fn names(list: decdrm_io::Result<Vec<decdrm_io::DeviceInfo>>, error: &mut Option<String>) -> Vec<String> {
+fn names(
+    list: decdrm_io::Result<Vec<decdrm_io::DeviceInfo>>,
+    error: &mut Option<String>,
+) -> Vec<String> {
     match list {
         Ok(devices) => devices.into_iter().map(|d| d.name).collect(),
         Err(e) => {
@@ -110,7 +113,10 @@ fn file_picker(ui: &mut Ui, settings: &mut Settings) {
         .file
         .as_deref()
         .and_then(Path::file_name)
-        .map_or_else(|| "no recording selected".to_string(), |n| n.to_string_lossy().into_owned());
+        .map_or_else(
+            || "no recording selected".to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
     let label = ui.add(egui::Label::new(RichText::new(name).monospace()).truncate());
     if let Some(path) = &settings.file {
         label.on_hover_text(path.display().to_string());
@@ -120,7 +126,12 @@ fn file_picker(ui: &mut Ui, settings: &mut Settings) {
             .set_title("Open a DRM recording")
             .add_filter("Recordings (WAV, FLAC)", &["flac", "wav"])
             .add_filter("All files", &["*"]);
-        if let Some(dir) = settings.file.as_deref().and_then(Path::parent).filter(|d| d.is_dir()) {
+        if let Some(dir) = settings
+            .file
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|d| d.is_dir())
+        {
             dialog = dialog.set_directory(dir);
         }
         // Rust note: `pick_file` blocks this (UI) thread while the native dialog is
@@ -132,43 +143,65 @@ fn file_picker(ui: &mut Ui, settings: &mut Settings) {
 }
 
 fn device_picker(ui: &mut Ui, settings: &mut Settings, devices: &mut DeviceLists) {
-    let current = settings.input_device.clone().unwrap_or_else(|| "System default".into());
-    ComboBox::from_id_salt("input_device").width(260.0).selected_text(current).show_ui(ui, |ui| {
-        ui.selectable_value(&mut settings.input_device, None, "System default");
-        for name in devices.inputs().to_vec() {
-            ui.selectable_value(&mut settings.input_device, Some(name.clone()), name);
-        }
-    });
-    if ui.small_button("⟳").on_hover_text("Refresh the device list").clicked() {
+    let current = settings
+        .input_device
+        .clone()
+        .unwrap_or_else(|| "System default".into());
+    ComboBox::from_id_salt("input_device")
+        .width(260.0)
+        .selected_text(current)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut settings.input_device, None, "System default");
+            for name in devices.inputs().to_vec() {
+                ui.selectable_value(&mut settings.input_device, Some(name.clone()), name);
+            }
+        });
+    if ui
+        .small_button("⟳")
+        .on_hover_text("Refresh the device list")
+        .clicked()
+    {
         devices.refresh();
     }
 }
 
 fn output_picker(ui: &mut Ui, settings: &mut Settings, devices: &mut DeviceLists) {
-    let current = settings.output_device.clone().unwrap_or_else(|| "Default output".into());
-    ComboBox::from_id_salt("output_device").width(180.0).selected_text(current).show_ui(ui, |ui| {
-        ui.selectable_value(&mut settings.output_device, None, "Default output");
-        for name in devices.outputs().to_vec() {
-            ui.selectable_value(&mut settings.output_device, Some(name.clone()), name);
-        }
-    });
+    let current = settings
+        .output_device
+        .clone()
+        .unwrap_or_else(|| "Default output".into());
+    ComboBox::from_id_salt("output_device")
+        .width(180.0)
+        .selected_text(current)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut settings.output_device, None, "Default output");
+            for name in devices.outputs().to_vec() {
+                ui.selectable_value(&mut settings.output_device, Some(name.clone()), name);
+            }
+        });
 }
 
 fn format_picker(ui: &mut Ui, settings: &mut Settings) {
-    ComboBox::from_id_salt("signal_format").selected_text(settings.format.label()).show_ui(ui, |ui| {
-        for f in SignalFormat::ALL {
-            ui.selectable_value(&mut settings.format, f, f.label());
-        }
-    })
-    .response
-    .on_hover_text("How the samples represent the signal: a real IF / audio signal, or complex I/Q.");
-    if settings.format == SignalFormat::Real {
-        ComboBox::from_id_salt("real_channel").selected_text(settings.real_channel.label()).show_ui(ui, |ui| {
-            for c in ChannelChoice::ALL {
-                ui.selectable_value(&mut settings.real_channel, c, c.label());
+    ComboBox::from_id_salt("signal_format")
+        .selected_text(settings.format.label())
+        .show_ui(ui, |ui| {
+            for f in SignalFormat::ALL {
+                ui.selectable_value(&mut settings.format, f, f.label());
             }
         })
         .response
-        .on_hover_text("Channel carrying the signal (stereo sources).");
+        .on_hover_text(
+            "How the samples represent the signal: a real IF / audio signal, or complex I/Q.",
+        );
+    if settings.format == SignalFormat::Real {
+        ComboBox::from_id_salt("real_channel")
+            .selected_text(settings.real_channel.label())
+            .show_ui(ui, |ui| {
+                for c in ChannelChoice::ALL {
+                    ui.selectable_value(&mut settings.real_channel, c, c.label());
+                }
+            })
+            .response
+            .on_hover_text("Channel carrying the signal (stereo sources).");
     }
 }

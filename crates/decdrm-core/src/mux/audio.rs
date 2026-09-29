@@ -249,7 +249,11 @@ pub fn parse_aac_super_frame(sf: &[u8], fmt: &AacSuperFrameFormat) -> Result<Vec
 /// For AAC the last frame's length is implicit, so the frames must fill the payload
 /// exactly — pad the frames beforehand (between core and SBR data, as an SBR frame is
 /// read from both ends); Dream-Opus frames may leave zero padding at the end.
-pub fn build_aac_super_frame(frames: &[AudioFrame], fmt: &AacSuperFrameFormat, len: usize) -> Result<Vec<u8>, AudioError> {
+pub fn build_aac_super_frame(
+    frames: &[AudioFrame],
+    fmt: &AacSuperFrameFormat,
+    len: usize,
+) -> Result<Vec<u8>, AudioError> {
     let n = fmt.num_frames;
     if frames.len() != n || n == 0 {
         return Err(AudioError::FrameCount { got: frames.len(), want: n });
@@ -620,7 +624,8 @@ mod tests {
     #[test]
     fn aac_layout_matches_table_10_and_dream() {
         // EEP, 5 frames: header of four 12-bit borders, 5 CRC bytes, then the frames.
-        let frames: Vec<AudioFrame> = (0..5).map(|i| AudioFrame::with_crc(vec![0xA0 + i; 3 + usize::from(i)], i)).collect();
+        let frames: Vec<AudioFrame> =
+            (0..5).map(|i| AudioFrame::with_crc(vec![0xA0 + i; 3 + usize::from(i)], i)).collect();
         let fmt = AacSuperFrameFormat::aac(5, StreamLengths { part_a: 0, part_b: 6 + 5 + 25 });
         let sf = build_aac_super_frame(&frames, &fmt, 36).unwrap();
         assert_eq!(&sf[..6], &[0x00, 0x30, 0x07, 0x00, 0xC0, 0x12]); // borders 3, 7, 12, 18

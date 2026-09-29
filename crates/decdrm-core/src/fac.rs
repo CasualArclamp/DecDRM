@@ -79,7 +79,8 @@ pub struct ChannelParams {
     pub enhancement: bool,
     /// Frame index within the super frame (0..=2).
     pub frame_index: u8,
-    /// Identity field value 3: first frame, and the SDC AFS index is valid.
+    /// The SDC AFS index is valid (identity field 0; identity 3 marks the first
+    /// frame with an invalid AFS index). Only meaningful when `frame_index == 0`.
     pub afs_valid: bool,
     pub occupancy: SpectrumOccupancy,
     pub interleaving: Interleaving,
@@ -226,7 +227,7 @@ impl Fac {
             channel: ChannelParams {
                 enhancement,
                 frame_index: if identity == 3 { 0 } else { identity },
-                afs_valid: identity == 3,
+                afs_valid: identity == 0,
                 occupancy,
                 interleaving,
                 msc_mode,
@@ -246,7 +247,11 @@ impl Fac {
         let s = &self.service;
         let mut w = BitWriter::new();
         w.write(u32::from(c.enhancement), 1);
-        let identity = if c.afs_valid && c.frame_index == 0 { 3 } else { u32::from(c.frame_index) };
+        let identity = match c.frame_index {
+            0 if c.afs_valid => 0,
+            0 => 3,
+            i => u32::from(i),
+        };
         w.write(identity, 2);
         w.write(u32::from(c.occupancy.value()), 4);
         w.write(u32::from(c.interleaving == Interleaving::Short), 1);

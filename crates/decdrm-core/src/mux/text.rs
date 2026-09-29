@@ -146,11 +146,7 @@ impl TextMessageDecoder {
         self.in_segment = false;
         let body_len = body_len?;
         let body = self.buf[2..2 + body_len].to_vec();
-        if command {
-            self.command(b0, b1, body)
-        } else {
-            self.text_segment(b0, b1, body)
-        }
+        if command { self.command(b0, b1, body) } else { self.text_segment(b0, b1, body) }
     }
 
     fn command(&mut self, b0: u8, b1: u8, body: Vec<u8>) -> Option<TextEvent> {
@@ -325,7 +321,11 @@ mod tests {
 
     #[test]
     fn roundtrip_single_and_multi_segment() {
-        for text in ["Hi", "Exactly sixteen!", "DecDRM text message test: äöü €, 日本語 and a long tail to fill several segments."] {
+        for text in [
+            "Hi",
+            "Exactly sixteen!",
+            "DecDRM text message test: äöü €, 日本語 and a long tail to fill several segments.",
+        ] {
             let mut enc = TextMessageEncoder::new();
             enc.add_message(text);
             let mut dec = TextMessageDecoder::new();

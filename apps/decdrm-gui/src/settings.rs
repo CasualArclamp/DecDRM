@@ -135,8 +135,14 @@ pub enum PlotTab {
 }
 
 impl PlotTab {
-    pub const ALL: [PlotTab; 6] =
-        [Self::Overview, Self::Spectrum, Self::Constellations, Self::Channel, Self::Impulse, Self::Snr];
+    pub const ALL: [PlotTab; 6] = [
+        Self::Overview,
+        Self::Spectrum,
+        Self::Constellations,
+        Self::Channel,
+        Self::Impulse,
+        Self::Snr,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -233,8 +239,14 @@ impl Settings {
     pub fn engine_config(&self) -> Result<EngineConfig, String> {
         let input = match self.source {
             SourceKind::File => {
-                let path = self.file.clone().ok_or("no recording selected — use “Open…” first")?;
-                InputSpec::File { path, realtime: self.realtime }
+                let path = self
+                    .file
+                    .clone()
+                    .ok_or("no recording selected — use “Open…” first")?;
+                InputSpec::File {
+                    path,
+                    realtime: self.realtime,
+                }
             }
             SourceKind::Device => InputSpec::Device {
                 name: self.input_device.clone(),
@@ -272,10 +284,16 @@ impl Settings {
                     .and_then(Path::file_name)
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "(no file)".into());
-                format!("{name} ({fmt}{})", if self.realtime { ", real time" } else { "" })
+                format!(
+                    "{name} ({fmt}{})",
+                    if self.realtime { ", real time" } else { "" }
+                )
             }
             SourceKind::Device => {
-                format!("{} ({fmt})", self.input_device.as_deref().unwrap_or("default input"))
+                format!(
+                    "{} ({fmt})",
+                    self.input_device.as_deref().unwrap_or("default input")
+                )
             }
         }
     }
@@ -284,7 +302,9 @@ impl Settings {
     /// (DecDRM/Dream recordings of I/Q signals carry an `IQ` token, e.g.
     /// `Test_Mode_B_10kHz_IQ_Pos_26dB_SNR.flac`). Returns the guessed format.
     pub fn open_file(&mut self, path: PathBuf) -> SignalFormat {
-        let iq = path.file_stem().is_some_and(|s| name_has_iq_token(&s.to_string_lossy()));
+        let iq = path
+            .file_stem()
+            .is_some_and(|s| name_has_iq_token(&s.to_string_lossy()));
         self.format = match (iq, self.format) {
             (true, SignalFormat::Real) => SignalFormat::Iq,
             (true, f) => f,
@@ -299,7 +319,8 @@ impl Settings {
 /// `true` if `name` contains `IQ` as a separate token (split at anything that is not a
 /// letter or digit), case-insensitively.
 pub fn name_has_iq_token(name: &str) -> bool {
-    name.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| t.eq_ignore_ascii_case("iq"))
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|t| t.eq_ignore_ascii_case("iq"))
 }
 
 /// Default settings-file location (see the module docs).
@@ -342,17 +363,30 @@ impl SettingsStore {
     pub fn load(path: Option<PathBuf>) -> (Self, Settings, Option<String>) {
         let path = path.or_else(default_config_path);
         let Some(p) = path.clone() else {
-            return (Self { path, saved: None }, Settings::default(), Some("no settings directory found".into()));
+            return (
+                Self { path, saved: None },
+                Settings::default(),
+                Some("no settings directory found".into()),
+            );
         };
         match std::fs::read_to_string(&p) {
             Ok(text) => match parse(&text) {
-                Ok(s) => (Self { path, saved: Some(s.clone()) }, s, None),
+                Ok(s) => (
+                    Self {
+                        path,
+                        saved: Some(s.clone()),
+                    },
+                    s,
+                    None,
+                ),
                 Err(e) => {
                     let warn = format!("ignoring unreadable settings file {}: {e}", p.display());
                     (Self { path, saved: None }, Settings::default(), Some(warn))
                 }
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Self { path, saved: None }, Settings::default(), None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                (Self { path, saved: None }, Settings::default(), None)
+            }
             Err(e) => {
                 let warn = format!("cannot read settings file {}: {e}", p.display());
                 (Self { path, saved: None }, Settings::default(), Some(warn))
@@ -375,7 +409,9 @@ impl SettingsStore {
         if !self.is_dirty(settings) {
             return Ok(());
         }
-        let Some(path) = self.path.clone() else { return Ok(()) };
+        let Some(path) = self.path.clone() else {
+            return Ok(());
+        };
         // Remember the attempt even if it fails, so a read-only directory does not
         // cause a retry (and an error message) on every frame.
         self.saved = Some(settings.clone());
@@ -427,7 +463,10 @@ mod tests {
 
     #[test]
     fn engine_config_mapping() {
-        let mut s = Settings { file: Some("a.flac".into()), ..Settings::default() };
+        let mut s = Settings {
+            file: Some("a.flac".into()),
+            ..Settings::default()
+        };
         let cfg = s.engine_config().unwrap();
         assert!(matches!(cfg.input, InputSpec::File { realtime: true, .. }));
         assert_eq!(cfg.receiver.input, InputFormat::Real(RealChannel::Mix));
@@ -449,7 +488,10 @@ mod tests {
         assert!(cfg.receiver.flip);
 
         s.format = SignalFormat::Real;
-        assert!(matches!(s.engine_config().unwrap().input, InputSpec::Device { channels: None, .. }));
+        assert!(matches!(
+            s.engine_config().unwrap().input,
+            InputSpec::Device { channels: None, .. }
+        ));
 
         let no_file = Settings::default();
         assert!(no_file.engine_config().is_err());
@@ -463,25 +505,47 @@ mod tests {
         assert!(!name_has_iq_token("LIQUID_ModeA")); // only whole tokens count
 
         let mut s = Settings::default();
-        assert_eq!(s.open_file("x/Test_Mode_B_10kHz_IQ_Pos.flac".into()), SignalFormat::Iq);
+        assert_eq!(
+            s.open_file("x/Test_Mode_B_10kHz_IQ_Pos.flac".into()),
+            SignalFormat::Iq
+        );
         s.format = SignalFormat::IqSwapped;
-        assert_eq!(s.open_file("y/Other_IQ.flac".into()), SignalFormat::IqSwapped, "keeps the I/Q flavour");
-        assert_eq!(s.open_file("z/DW_ModeB_10kHz.flac".into()), SignalFormat::Real);
+        assert_eq!(
+            s.open_file("y/Other_IQ.flac".into()),
+            SignalFormat::IqSwapped,
+            "keeps the I/Q flavour"
+        );
+        assert_eq!(
+            s.open_file("z/DW_ModeB_10kHz.flac".into()),
+            SignalFormat::Real
+        );
         assert_eq!(s.source, SourceKind::File);
     }
 
     #[test]
     fn config_paths() {
         let env = |pairs: &'static [(&'static str, &'static str)]| {
-            move |k: &str| pairs.iter().find(|(key, _)| *key == k).map(|(_, v)| OsString::from(*v))
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == k)
+                    .map(|(_, v)| OsString::from(*v))
+            }
         };
         assert_eq!(
             config_path_for(true, env(&[("APPDATA", r"C:\Users\me\AppData\Roaming")])),
-            Some(PathBuf::from(r"C:\Users\me\AppData\Roaming").join("decdrm").join("gui.toml"))
+            Some(
+                PathBuf::from(r"C:\Users\me\AppData\Roaming")
+                    .join("decdrm")
+                    .join("gui.toml")
+            )
         );
         assert_eq!(config_path_for(true, env(&[])), None);
         assert_eq!(
-            config_path_for(false, env(&[("XDG_CONFIG_HOME", "/cfg"), ("HOME", "/home/me")])),
+            config_path_for(
+                false,
+                env(&[("XDG_CONFIG_HOME", "/cfg"), ("HOME", "/home/me")])
+            ),
             Some(PathBuf::from("/cfg/decdrm/gui.toml"))
         );
         assert_eq!(

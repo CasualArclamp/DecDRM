@@ -40,7 +40,8 @@ fn load(path: &Path, max_seconds: f64) -> (Vec<f32>, usize) {
     let ratio = 48_000.0 / f64::from(info.sample_rate);
     let chans: Vec<Vec<f32>> = (0..ch)
         .map(|c| {
-            let x: Vec<crate::Cplx> = (0..frames).map(|i| crate::Cplx::new(f64::from(samples[i * ch + c]), 0.0)).collect();
+            let x: Vec<crate::Cplx> =
+                (0..frames).map(|i| crate::Cplx::new(f64::from(samples[i * ch + c]), 0.0)).collect();
             let mut y = Vec::new();
             crate::dsp::resampler::FracResampler::new().process(&x, ratio, &mut y);
             y.iter().map(|v| v.re as f32).collect()
@@ -333,7 +334,12 @@ fn print_report(name: &str, r: &Report) {
     }
     if let Some(t) = r.ensemble.time() {
         let (y, m, d) = t.date();
-        println!("time: {y:04}-{m:02}-{d:02} {:02}:{:02} UTC, offset {:?} min", t.hour, t.minute, t.local_offset_minutes());
+        println!(
+            "time: {y:04}-{m:02}-{d:02} {:02}:{:02} UTC, offset {:?} min",
+            t.hour,
+            t.minute,
+            t.local_offset_minutes()
+        );
     }
     let afs = r.ensemble.alternative_frequencies();
     if !afs.is_empty() {
@@ -480,7 +486,12 @@ fn multiplex_loopback() {
     // packet data (4 packets of 45 + 3 bytes).
     let streams = [StreamLengths { part_a: 40, part_b: 380 }, StreamLengths { part_a: 0, part_b: 4 * 48 }];
     let mut mux = MultiplexDescription::new_hierarchical(0, 1, 2, 0, &streams);
-    let params = MlcParams::msc(MscMode::Qam64HmSym.mapping(), map.msc_cells_per_frame, mux.protection(true), mux.part_a_bytes(true));
+    let params = MlcParams::msc(
+        MscMode::Qam64HmSym.mapping(),
+        map.msc_cells_per_frame,
+        mux.protection(true),
+        mux.part_a_bytes(true),
+    );
     mux.streams[0].len_b = (params.bits_vspp / 8) as u16;
     let geometry = MscGeometry::from(&params);
 

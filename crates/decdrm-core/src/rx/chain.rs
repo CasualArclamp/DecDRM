@@ -16,6 +16,7 @@ use crate::interleave::CellDeinterleaver;
 use crate::params::{FRAMES_PER_SUPERFRAME, RobustnessMode, SpectrumOccupancy};
 use crate::tables::NUM_FAC_CELLS;
 use crate::{Cplx, Real};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 /// A decoded SDC block (bits after channel decoding, energy dispersal removed).
@@ -93,6 +94,10 @@ pub(super) struct SymbolChain {
     frame: FrameSync,
     chanest: ChannelEstimator,
     cells: Vec<Cplx>,
+    /// The most recent windows given to the channel estimator (samples, timing
+    /// shift, frame symbol index), replayed through a new carrier layout when the
+    /// spectrum occupancy changes so the estimator's delay line is not lost.
+    recent: VecDeque<(Vec<Cplx>, i64, usize)>,
     // Demapper state.
     frame_id: Option<usize>,
     fac_cells: Vec<EqCell>,
@@ -134,6 +139,7 @@ impl SymbolChain {
             frame: FrameSync::new(&map),
             chanest: ChannelEstimator::new(Arc::clone(&map)),
             cells: Vec::new(),
+            recent: VecDeque::new(),
             frame_id: None,
             fac_cells: Vec::with_capacity(NUM_FAC_CELLS),
             last_fac_symbol,
@@ -205,6 +211,19 @@ impl SymbolChain {
             if self.tracking {
                 self.chanest.start_time_wiener_tracking();
             }
+            // Replay the recent windows through the new layout. The new estimator
+            // then continues with the symbol after the last one the old estimator
+            // delivered (its outputs during the replay were already demapped).
+            // Without this, the old delay line is lost, and with it symbol 0 of the
+            // next frame, its FAC and the next SDC block.
+            let mut cells = Vec::new();
+            for (samples, shift, symbol) in &self.recent {
+                self.ofdm.demodulate(samples, &mut cells);
+                let _ = self.chanest.process(&cells, *symbol, *shift);
+            }
+            track_reset(&mut self.chanest);
+            // Timing tracking starts after the replay: its corrections during the
+            // replay could not be applied any more.
             if self.timing_tracking {
                 self.chanest.start_timing_tracking();
             }
@@ -278,9 +297,11 @@ impl SymbolChain {
             self.msc_collecting = false;
             self.msc_gap = true;
             self.sf_synced = false;
+            self.recent.clear();
         }
         let eq = self.chanest.process(&cells, fs.symbol, win.shift);
         self.cells = cells;
+        self.remember(win, fs.symbol);
         let track = self.chanest.last_track;
         if self.chanest.timing_tracking() {
             out.timing_adjust = track.timing_adjust;
@@ -292,6 +313,20 @@ impl SymbolChain {
         self.capture(&eq.cells, eq.symbol, &eq.chan);
         self.demap(&eq.cells, eq.symbol, &mut out.events);
         out
+    }
+
+    /// Keep the window just given to the channel estimator for a possible replay
+    /// (enough for the estimator's warm-up plus its delay line).
+    fn remember(&mut self, win: &SymbolWindow, symbol: usize) {
+        let keep = 2 * self.chanest.delay() + 1;
+        let mut buf = if self.recent.len() >= keep {
+            self.recent.pop_front().map(|(b, _, _)| b).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        buf.clear();
+        buf.extend_from_slice(&win.samples);
+        self.recent.push_back((buf, win.shift, symbol));
     }
 
     /// Keep the latest cells of each channel for constellation plots. Called before
@@ -409,10 +444,10 @@ impl SymbolChain {
         // boundary, so audio can begin up to a super frame earlier after sync.
         let n_mux = map.msc_cells_per_frame;
         let useful = 3 * n_mux;
-        let mut pos = self.msc_offset[sf_sym];
-        for &c in map.msc_carriers(sf_sym) {
+        let first = self.msc_offset[sf_sym];
+        for (pos, &c) in (first..).zip(map.msc_carriers(sf_sym)) {
             if pos < useful {
-                if pos % n_mux == 0 {
+                if pos.is_multiple_of(n_mux) {
                     if self.msc_collecting && !self.msc_cells.is_empty() {
                         // Should not happen with consistent timing; drop the partial frame.
                         self.msc_gap = true;
@@ -430,7 +465,6 @@ impl SymbolChain {
                     }
                 }
             }
-            pos += 1;
         }
     }
 

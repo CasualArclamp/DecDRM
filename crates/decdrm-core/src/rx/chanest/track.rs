@@ -2,6 +2,12 @@
 //! tracking from the estimated impulse response ("energy" method), sample-rate
 //! offset estimation from the drift of the strongest path, and the delay-spread
 //! estimate used to adapt the frequency-direction Wiener filter.
+//!
+//! Unlike Dream, the strongest path is located with sub-bin precision (Gaussian
+//! interpolation of the averaged PDS, plus the fractional part of the timing
+//! corrections) and the drift is a least-squares slope rather than the difference
+//! of two integer bin indices: one impulse-response bin is ~5 samples, so a single
+//! bin flip within the 4 s acquisition would otherwise read as a ~1.3 Hz offset.
 
 use crate::cellmap::CellMap;
 use crate::dsp::fft::Fft;
@@ -17,6 +23,9 @@ const OVER_EST_FACT_MIN_STAT: Real = 4.0;
 const CONTR_SAMP_OFF_INT: Real = 0.001;
 const HIST_LEN_SAM_OFF_S: Real = 30.0;
 const SAM_OFF_ACQ_LEN_S: Real = 4.0;
+/// Larger per-symbol changes of the strongest-path position (IR bins) are treated
+/// as jumps and removed from the drift history.
+const MAX_PEAK_STEP_BINS: Real = 2.0;
 
 /// Outputs of one tracking step.
 #[derive(Debug, Clone, Copy, Default)]
@@ -55,9 +64,11 @@ pub struct PdsTracker {
     len_corr_hist: usize,
     acq_cnt_max: usize,
     acq_cnt: usize,
-    sr_hist: VecDeque<i64>,
+    /// Position of the strongest path in a fixed frame, IR bins, one per symbol.
+    sr_hist: VecDeque<Real>,
+    /// Fill the whole history with the next position (after a restart).
+    sr_fill: bool,
     integ_ti_corrections: i64,
-    old_nonzero_diff: i64,
     sym_len_ir: Real,
     // Delay-spread estimate.
     pub pds_begin: Real,
@@ -102,9 +113,9 @@ impl PdsTracker {
             len_corr_hist,
             acq_cnt_max,
             acq_cnt: acq_cnt_max,
-            sr_hist: VecDeque::from(vec![0; len_corr_hist]),
+            sr_hist: VecDeque::from(vec![0.0; len_corr_hist]),
+            sr_fill: true,
             integ_ti_corrections: 0,
-            old_nonzero_diff: 0,
             sym_len_ir: mode.symbol_len() as Real * n_car as Real / fft_len as Real,
             pds_begin: 0.0,
             pds_end: guard_ir,
@@ -191,19 +202,24 @@ impl PdsTracker {
             .enumerate()
             .max_by(|a, b| a.1.total_cmp(b.1))
             .unwrap_or((0, &0.0));
+        let peak = max_ind as Real + peak_offset(&self.rotated, max_ind);
         self.integ_ti_corrections += int_part;
-        let cur_res = self.integ_ti_corrections + max_ind as i64;
+        // The averaged PDS follows the timing corrections in whole bins; the
+        // estimates also moved by the fractional remainder.
+        let cur_res = self.integ_ti_corrections as Real + self.frac_ti_cor + peak;
+        if std::mem::take(&mut self.sr_fill) {
+            self.sr_hist.iter_mut().for_each(|v| *v = cur_res);
+        }
         self.sr_hist.pop_front();
         self.sr_hist.push_back(cur_res);
         let n = self.len_corr_hist;
+        // A jump (another path became the strongest, or the peak wrapped around the
+        // IR buffer) is removed from the history.
         let new_diff = self.sr_hist[n - 2] - cur_res;
-        if new_diff.abs() > 2 || (self.old_nonzero_diff.signum() != new_diff.signum() && new_diff != 0) {
+        if new_diff.abs() > MAX_PEAK_STEP_BINS {
             for i in 0..n - 1 {
                 self.sr_hist[i] -= new_diff;
             }
-        }
-        if new_diff != 0 {
-            self.old_nonzero_diff = new_diff;
         }
         if self.acq_cnt > 0 {
             self.acq_cnt -= 1;
@@ -211,15 +227,14 @@ impl PdsTracker {
             self.sro_acquisition = false;
             let span = self.acq_cnt_max.saturating_sub(self.sym_delay);
             if span > 1 {
-                let idx = n - span;
-                let off = self.sam_off_hz(cur_res - self.sr_hist[idx], span - 1);
-                out.sro_delta_hz = -off;
+                let slope = ls_slope(self.sr_hist.range(n - span..));
+                out.sro_delta_hz = -self.sam_off_hz(slope);
             }
-            self.sr_hist.iter_mut().for_each(|v| *v = 0);
+            self.sr_fill = true;
             self.integ_ti_corrections = 0;
         } else {
-            let off = self.sam_off_hz(cur_res - self.sr_hist[0], n - 1);
-            out.sro_delta_hz = -CONTR_SAMP_OFF_INT * off;
+            let slope = ls_slope(self.sr_hist.iter());
+            out.sro_delta_hz = -CONTR_SAMP_OFF_INT * self.sam_off_hz(slope);
         }
 
         // Delay spread from noise-corrected cumulative energy.
@@ -265,13 +280,45 @@ impl PdsTracker {
     pub fn reset_sro(&mut self) {
         self.acq_cnt = self.acq_cnt_max;
         self.sro_acquisition = true;
-        self.sr_hist.iter_mut().for_each(|v| *v = 0);
+        self.sr_fill = true;
         self.integ_ti_corrections = 0;
-        self.old_nonzero_diff = 0;
     }
 
-    fn sam_off_hz(&self, diff: i64, len: usize) -> Real {
-        let norm = diff as Real / len as Real / self.sym_len_ir;
+    /// Sample-rate offset (Hz) for a drift of the impulse response of `slope` IR
+    /// bins per symbol.
+    fn sam_off_hz(&self, slope: Real) -> Real {
+        let norm = slope / self.sym_len_ir;
         Real::from(SAMPLE_RATE) * (1.0 - 1.0 / (1.0 + norm))
     }
+}
+
+/// Fractional offset (−0.5..=0.5) of the true maximum from bin `i` of a power
+/// profile, by fitting a parabola to the logarithm of the three bins around it
+/// (exact for a Gaussian main lobe, close for the Hamming-windowed IR).
+fn peak_offset(p: &[Real], i: usize) -> Real {
+    let n = p.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let ln = |v: Real| v.max(1e-30).ln();
+    let (a, b, c) = (ln(p[(i + n - 1) % n]), ln(p[i]), ln(p[(i + 1) % n]));
+    let den = a - 2.0 * b + c;
+    if den >= 0.0 { 0.0 } else { (0.5 * (a - c) / den).clamp(-0.5, 0.5) }
+}
+
+/// Least-squares slope of equally spaced values (units per sample).
+fn ls_slope<'a>(values: impl ExactSizeIterator<Item = &'a Real> + Clone) -> Real {
+    let m = values.len();
+    if m < 2 {
+        return 0.0;
+    }
+    let xm = (m - 1) as Real / 2.0;
+    let ym = values.clone().sum::<Real>() / m as Real;
+    let (mut sxy, mut sxx) = (0.0, 0.0);
+    for (i, &y) in values.enumerate() {
+        let dx = i as Real - xm;
+        sxy += dx * (y - ym);
+        sxx += dx * dx;
+    }
+    sxy / sxx
 }

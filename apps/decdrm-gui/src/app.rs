@@ -13,7 +13,7 @@ use crate::panels::slideshow::SlideshowView;
 use crate::panels::source::{DeviceLists, SourceAction};
 use crate::panels::{self, heading};
 use crate::receiver::{FETCH_INTERVAL, RxSession};
-use crate::settings::{DataTab, SettingsStore, SignalFormat, ThemeChoice, Settings};
+use crate::settings::{DataTab, Settings, SettingsStore, SignalFormat, ThemeChoice};
 use eframe::egui::{self, RichText, Ui};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -61,7 +61,9 @@ impl Automation {
 
     /// Save a delivered screenshot and quit.
     fn handle_screenshot(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.screenshot.clone() else { return };
+        let Some(path) = self.screenshot.clone() else {
+            return;
+        };
         let image = ctx.input(|i| {
             i.raw.events.iter().find_map(|e| match e {
                 egui::Event::Screenshot { image, .. } => Some(image.clone()),
@@ -177,11 +179,13 @@ impl DecDrmApp {
             ui.selectable_value(&mut self.page, Page::Receiver, "Receiver");
             ui.selectable_value(&mut self.page, Page::Transmitter, "Transmitter");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                egui::ComboBox::from_id_salt("theme").selected_text(self.settings.theme.label()).show_ui(ui, |ui| {
-                    for t in ThemeChoice::ALL {
-                        ui.selectable_value(&mut self.settings.theme, t, t.label());
-                    }
-                });
+                egui::ComboBox::from_id_salt("theme")
+                    .selected_text(self.settings.theme.label())
+                    .show_ui(ui, |ui| {
+                        for t in ThemeChoice::ALL {
+                            ui.selectable_value(&mut self.settings.theme, t, t.label());
+                        }
+                    });
                 if self.page == Page::Receiver {
                     ui.toggle_value(&mut self.settings.show_log, "Log");
                 }
@@ -191,8 +195,13 @@ impl DecDrmApp {
 
     fn receiver_page(&mut self, ui: &mut Ui) {
         egui::Panel::top("source_bar").show(ui, |ui| {
-            let action =
-                panels::source::show(ui, &mut self.settings, &mut self.devices, self.rx.is_running(), self.rx.is_stopping());
+            let action = panels::source::show(
+                ui,
+                &mut self.settings,
+                &mut self.devices,
+                self.rx.is_running(),
+                self.rx.is_stopping(),
+            );
             if let Some(n) = &self.notice {
                 ui.colored_label(ui.visuals().warn_fg_color, n);
             }
@@ -246,7 +255,9 @@ impl eframe::App for DecDrmApp {
             self.applied_theme = Some(self.settings.theme);
         }
         // Save changed settings at most once per second.
-        if now.duration_since(self.last_save) >= Duration::from_secs(1) && self.store.is_dirty(&self.settings) {
+        if now.duration_since(self.last_save) >= Duration::from_secs(1)
+            && self.store.is_dirty(&self.settings)
+        {
             if let Err(e) = self.store.save_if_changed(&self.settings) {
                 self.rx.log.push(format!("cannot save settings: {e}"));
             }

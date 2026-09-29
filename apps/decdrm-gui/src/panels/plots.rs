@@ -7,7 +7,10 @@ use super::{Palette, placeholder};
 use crate::plots::{DB_FLOOR, PlotData, Points};
 use crate::settings::PlotTab;
 use eframe::egui::{Color32, Ui};
-use egui_plot::{HLine, HoverPosition, Line, LineStyle, Plot, PlotBounds, PlotPoints, Points as Scatter, Span, VLine};
+use egui_plot::{
+    HLine, HoverPosition, Line, LineStyle, Plot, PlotBounds, PlotPoints, Points as Scatter, Span,
+    VLine,
+};
 
 /// Tab bar plus the selected tab.
 pub fn show(ui: &mut Ui, tab: &mut PlotTab, data: &PlotData) {
@@ -53,17 +56,25 @@ fn base_plot<'a>(id: &str) -> Plot<'a> {
 }
 
 /// Hover label `x unit_x, y unit_y` with the given decimals.
-fn hover_label(ux: &'static str, dx: usize, uy: &'static str, dy: usize) -> impl Fn(&HoverPosition<'_>) -> Option<String> {
+fn hover_label(
+    ux: &'static str,
+    dx: usize,
+    uy: &'static str,
+    dy: usize,
+) -> impl Fn(&HoverPosition<'_>) -> Option<String> {
     move |pos: &HoverPosition<'_>| {
         let p = match pos {
-            HoverPosition::NearDataPoint { position, .. } | HoverPosition::Elsewhere { position } => position,
+            HoverPosition::NearDataPoint { position, .. }
+            | HoverPosition::Elsewhere { position } => position,
         };
         Some(format!("{:.dx$} {ux}\n{:.dy$} {uy}", p.x, p.y))
     }
 }
 
 fn line(name: &str, points: &Points, color: Color32) -> Line<'static> {
-    Line::new(name.to_string(), PlotPoints::new(points.clone())).color(color).width(1.2)
+    Line::new(name.to_string(), PlotPoints::new(points.clone()))
+        .color(color)
+        .width(1.2)
 }
 
 fn spectrum(ui: &mut Ui, data: &PlotData, pal: &Palette, height: f32) {
@@ -77,10 +88,18 @@ fn spectrum(ui: &mut Ui, data: &PlotData, pal: &Palette, height: f32) {
         .show(ui, |p| {
             p.set_plot_bounds(PlotBounds::from_min_max([x0, y0], [x1, y1]));
             if let Some((lo, hi)) = data.band_khz {
-                p.span(Span::new("DRM signal", lo..=hi).fill(pal.band).border_width(0.0));
+                p.span(
+                    Span::new("DRM signal", lo..=hi)
+                        .fill(pal.band)
+                        .border_width(0.0),
+                );
             }
             if let Some(dc) = data.dc_khz {
-                p.vline(VLine::new("DC carrier", dc).color(pal.marker).style(LineStyle::dashed_dense()));
+                p.vline(
+                    VLine::new("DC carrier", dc)
+                        .color(pal.marker)
+                        .style(LineStyle::dashed_dense()),
+                );
             }
             if !data.spectrum.is_empty() {
                 p.line(line("input spectrum", &data.spectrum, pal.spectrum).width(1.0));
@@ -111,17 +130,31 @@ fn constellation(ui: &mut Ui, name: &str, points: &Points, color: Color32, side:
             .label_formatter(hover_label("I", 2, "Q", 2))
             .show(ui, |p| {
                 p.set_plot_bounds(PlotBounds::from_min_max([-1.5, -1.5], [1.5, 1.5]));
-                p.hline(HLine::new("", 0.0).color(Color32::from_gray(128)).width(0.5));
-                p.vline(VLine::new("", 0.0).color(Color32::from_gray(128)).width(0.5));
+                p.hline(
+                    HLine::new("", 0.0)
+                        .color(Color32::from_gray(128))
+                        .width(0.5),
+                );
+                p.vline(
+                    VLine::new("", 0.0)
+                        .color(Color32::from_gray(128))
+                        .width(0.5),
+                );
                 if !points.is_empty() {
-                    p.points(Scatter::new(name.to_string(), PlotPoints::new(points.clone())).color(color).radius(radius));
+                    p.points(
+                        Scatter::new(name.to_string(), PlotPoints::new(points.clone()))
+                            .color(color)
+                            .radius(radius),
+                    );
                 }
             });
     });
 }
 
 fn carrier_bounds(data: &PlotData, points: &Points) -> (f64, f64) {
-    data.carriers.or_else(|| Some((points.first()?[0], points.last()?[0]))).unwrap_or((-100.0, 100.0))
+    data.carriers
+        .or_else(|| Some((points.first()?[0], points.last()?[0])))
+        .unwrap_or((-100.0, 100.0))
 }
 
 fn channel(ui: &mut Ui, data: &PlotData, pal: &Palette) {
@@ -162,7 +195,10 @@ fn impulse(ui: &mut Ui, data: &PlotData, pal: &Palette, height: f32) {
         placeholder(ui, "No impulse response yet.");
         return;
     }
-    let (x0, x1) = (data.pds.first().map_or(0.0, |p| p[0]), data.pds.last().map_or(1.0, |p| p[0]));
+    let (x0, x1) = (
+        data.pds.first().map_or(0.0, |p| p[0]),
+        data.pds.last().map_or(1.0, |p| p[0]),
+    );
     let unit = if data.pds_in_ms { "ms" } else { "samples" };
     base_plot("impulse")
         .height(height)
@@ -170,9 +206,16 @@ fn impulse(ui: &mut Ui, data: &PlotData, pal: &Palette, height: f32) {
         .y_axis_label("dB (rel. peak)")
         .label_formatter(hover_label(unit, 3, "dB", 1))
         .show(ui, |p| {
-            p.set_plot_bounds(PlotBounds::from_min_max([x0, DB_FLOOR - 2.0], [x1.max(x0 + 1e-6), 3.0]));
+            p.set_plot_bounds(PlotBounds::from_min_max(
+                [x0, DB_FLOOR - 2.0],
+                [x1.max(x0 + 1e-6), 3.0],
+            ));
             if let Some(g) = data.guard_ms {
-                p.span(Span::new("guard interval", 0.0..=g).fill(pal.guard).border_width(0.0));
+                p.span(
+                    Span::new("guard interval", 0.0..=g)
+                        .fill(pal.guard)
+                        .border_width(0.0),
+                );
             }
             p.line(line("power delay profile", &data.pds, pal.pds));
         });

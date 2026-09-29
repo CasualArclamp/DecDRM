@@ -396,7 +396,7 @@ pub const BIT_INTERLEAVER_T0: [usize; 2] = [13, 21];
 
 /// Normalised PAM amplitudes per axis. Index bits are the level bits with level 0 as
 /// the most significant bit (e.g. 64-QAM: `idx = y0<<2 | y1<<1 | y2`).
-pub const QAM4: [f64; 2] = [0.707_106_781_1, -0.707_106_781_1];
+pub const QAM4: [f64; 2] = [std::f64::consts::FRAC_1_SQRT_2, -std::f64::consts::FRAC_1_SQRT_2];
 
 pub const QAM16: [f64; 4] = [0.948_683_298_0, -0.316_227_766_0, 0.316_227_766_0, -0.948_683_298_0];
 

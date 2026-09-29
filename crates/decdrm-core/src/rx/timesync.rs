@@ -17,8 +17,16 @@ const DEC: usize = 4;
 const STEP: usize = 4;
 /// Robustness-mode detection observes this many symbols.
 const RM_BLOCKS: usize = 16;
-/// Required ratio between best and second-best mode score.
-const RM_RELIABILITY: Real = 8.0;
+/// Required ratio between best and second-best mode score (Dream: 8). Measured on
+/// the loopback: the true mode always scores highest down to 5 dB SNR, clean mode A
+/// with 4.5 kHz occupancy reaches only ~7, and noise alone rarely passes 6.
+const RM_RELIABILITY: Real = 6.0;
+/// A longer observation for weak or narrow signals, with a lower threshold. Mode A
+/// has only a 1/10 guard duty cycle, so with 4.5/5 kHz occupancy its 16-symbol score
+/// is barely above the estimation noise of the other modes (ratio ~4–7 on a clean
+/// signal); 48 symbols reduce that noise by √3.
+const RM_BLOCKS_LONG: usize = 48;
+const RM_RELIABILITY_LONG: Real = 5.0;
 /// Low-pass for the acquired timing (per candidate).
 const LAMBDA_START: Real = 0.99;
 /// Candidates further than this from the current estimate count as outliers.
@@ -79,8 +87,17 @@ pub struct TimeSync {
 
     // Mode detection.
     mode_acq: bool,
+    /// Normalised guard correlation of each mode, one value per evaluation (the
+    /// last `rm_len_long` evaluations).
     rm_buf: [VecDeque<Real>; 4],
+    /// Sliding DFT at each mode's symbol rate over the last `rm_len` / `rm_len_long`
+    /// evaluations.
+    rm_acc: [Cplx; 4],
+    rm_acc_long: [Cplx; 4],
+    /// Evaluations since mode detection (re)started (phase reference of the DFT).
+    rm_count: usize,
     rm_len: usize,
+    rm_len_long: usize,
     rm_init: usize,
     /// Mode that has been winning reliably, and for how many evaluations.
     rm_candidate: Option<RobustnessMode>,
@@ -129,7 +146,11 @@ impl TimeSync {
             dec_active: false,
             mode_acq: true,
             rm_buf: Default::default(),
+            rm_acc: [Cplx::new(0.0, 0.0); 4],
+            rm_acc_long: [Cplx::new(0.0, 0.0); 4],
+            rm_count: 0,
             rm_len: 0,
+            rm_len_long: 0,
             rm_init: 0,
             rm_candidate: None,
             rm_streak: 0,
@@ -164,7 +185,12 @@ impl TimeSync {
         self.fft_len = mode.fft_size();
         self.sym_len = mode.symbol_len();
         let g = geom(mode);
-        self.rm_len = RM_BLOCKS * g.ts / STEP;
+        let rm_len = RM_BLOCKS * g.ts / STEP;
+        if rm_len != self.rm_len {
+            self.reset_mode_detection();
+        }
+        self.rm_len = rm_len;
+        self.rm_len_long = RM_BLOCKS_LONG * g.ts / STEP;
         self.maxdet_len = g.ts / STEP;
         self.ma_len = (g.g / STEP).max(1);
         self.corr_av = vec![0.0; self.maxdet_len];
@@ -184,13 +210,20 @@ impl TimeSync {
     /// Restart everything including robustness-mode detection.
     pub fn restart(&mut self, mode: RobustnessMode) {
         self.mode_acq = true;
+        self.reset_mode_detection();
+        self.configure(mode);
+    }
+
+    fn reset_mode_detection(&mut self) {
         for b in &mut self.rm_buf {
             b.clear();
         }
+        self.rm_acc = [Cplx::new(0.0, 0.0); 4];
+        self.rm_acc_long = [Cplx::new(0.0, 0.0); 4];
+        self.rm_count = 0;
         self.rm_init = 0;
         self.rm_candidate = None;
         self.rm_streak = 0;
-        self.configure(mode);
     }
 
     /// Stop the guard-correlation based timing updates (tracking takes over).
@@ -279,19 +312,13 @@ impl TimeSync {
                 // Mode detection uses the normalised coefficient: the ML metric also
                 // carries the symbol-periodic power fluctuation of the pilots, which
                 // makes modes A and B (same 37.5 Hz symbol rate) hard to tell apart.
-                for (m, &v) in rho.iter().enumerate() {
-                    let b = &mut self.rm_buf[m];
-                    b.push_back(v);
-                    while b.len() > self.rm_len {
-                        b.pop_front();
-                    }
-                }
+                self.push_mode_values(&geoms, &rho);
                 self.rm_init += 1;
                 if self.rm_init >= self.rm_len + RM_BLOCKS {
                     // Unlike Dream (first reliable result wins) require the same mode
                     // to win for a whole symbol, which rejects transients such as a
                     // signal starting in the middle of the observation window.
-                    match self.detect_mode(&geoms) {
+                    match self.detect_mode() {
                         Some((mode, rel)) if self.rm_candidate == Some(mode) => {
                             self.rm_streak += 1;
                             if self.rm_streak >= geom(mode).ts / STEP {
@@ -325,24 +352,53 @@ impl TimeSync {
         }
     }
 
+    /// Add one normalised guard correlation per mode to the sliding DFTs.
+    fn push_mode_values(&mut self, geoms: &[Geom; 4], rho: &[Real; 4]) {
+        // exp(-j2π·f·n) at each mode's symbol rate f = STEP/ts cycles per evaluation,
+        // with the phase computed exactly from n mod ts.
+        let phasor = |g: &Geom, n: usize| {
+            let k = (n * STEP) % g.ts;
+            Cplx::from_polar(1.0, -2.0 * std::f64::consts::PI * k as Real / g.ts as Real)
+        };
+        let n = self.rm_count;
+        for (m, g) in geoms.iter().enumerate() {
+            let v = rho[m];
+            let b = &mut self.rm_buf[m];
+            b.push_back(v);
+            self.rm_acc[m] += v * phasor(g, n);
+            self.rm_acc_long[m] += v * phasor(g, n);
+            if b.len() > self.rm_len {
+                // The value leaving the short window.
+                let old = b[b.len() - 1 - self.rm_len];
+                self.rm_acc[m] -= old * phasor(g, n - self.rm_len);
+            }
+            if b.len() > self.rm_len_long {
+                let old = b.pop_front().unwrap_or(0.0);
+                self.rm_acc_long[m] -= old * phasor(g, n - self.rm_len_long);
+            }
+        }
+        self.rm_count += 1;
+    }
+
     /// Score each mode by the strength of the symbol-rate periodicity of its guard
     /// correlation (Dream correlates with a cosine; we use the complex exponential
-    /// at the exact symbol rate, which does not depend on the timing phase).
-    fn detect_mode(&mut self, geoms: &[Geom; 4]) -> Option<(RobustnessMode, Real)> {
-        let mut scores = [0.0; 4];
-        for (m, g) in geoms.iter().enumerate() {
-            let f = STEP as Real / g.ts as Real; // cycles per evaluation
-            let mut acc = Cplx::new(0.0, 0.0);
-            for (j, &v) in self.rm_buf[m].iter().enumerate() {
-                acc += Cplx::from_polar(v, -2.0 * std::f64::consts::PI * f * j as Real);
-            }
-            scores[m] = acc.norm() / self.rm_buf[m].len().max(1) as Real;
+    /// at the exact symbol rate, which does not depend on the timing phase). The
+    /// 16-symbol window decides quickly on clear signals, the 48-symbol one (lower
+    /// threshold) on weak or narrow ones.
+    fn detect_mode(&mut self) -> Option<(RobustnessMode, Real)> {
+        let len = self.rm_buf[0].len();
+        let short: [Real; 4] = self.rm_acc.map(|a| a.norm() / len.min(self.rm_len).max(1) as Real);
+        self.last_mode_scores = short;
+        if let Some(r) = decide(&short, RM_RELIABILITY) {
+            return Some(r);
         }
-        self.last_mode_scores = scores;
-        let (best, &max) = scores.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1))?;
-        let second = scores.iter().enumerate().filter(|&(i, _)| i != best).map(|(_, &v)| v).fold(0.0, Real::max);
-        let rel = if second > 0.0 { max / second } else { Real::INFINITY };
-        (rel > RM_RELIABILITY).then(|| (RobustnessMode::ALL[best], rel))
+        // The long window decides from 1.5× the short length on, over everything
+        // observed so far.
+        if 2 * len >= 3 * self.rm_len {
+            let long: [Real; 4] = self.rm_acc_long.map(|a| a.norm() / len as Real);
+            return decide(&long, RM_RELIABILITY_LONG);
+        }
+        None
     }
 
     fn timing_step(&mut self, v: Real, pos: i64) {
@@ -468,4 +524,12 @@ impl TimeSync {
             self.buf_base += d as i64;
         }
     }
+}
+
+/// Best mode and its ratio to the second best, if the ratio exceeds `threshold`.
+fn decide(scores: &[Real; 4], threshold: Real) -> Option<(RobustnessMode, Real)> {
+    let (best, &max) = scores.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1))?;
+    let second = scores.iter().enumerate().filter(|&(i, _)| i != best).map(|(_, &v)| v).fold(0.0, Real::max);
+    let rel = if second > 0.0 { max / second } else { Real::INFINITY };
+    (rel > threshold).then(|| (RobustnessMode::ALL[best], rel))
 }

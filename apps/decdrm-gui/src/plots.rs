@@ -4,10 +4,10 @@
 //! This runs once per fetched snapshot (not once per painted frame), and is kept free
 //! of egui so it can be unit-tested; `panels::plots` does the drawing.
 
+use decdrm_core::Cplx;
 use decdrm_core::params::{RobustnessMode, SAMPLE_RATE, SpectrumOccupancy, carrier_range};
 use decdrm_core::rx::{ChainVisuals, RxStatus, Visuals};
 use decdrm_core::tables::scattered_pilots;
-use decdrm_core::Cplx;
 use decdrm_engine::Snapshot;
 use std::f64::consts::PI;
 
@@ -77,13 +77,17 @@ impl PlotData {
             fac: constellation_points(&chain.fac),
             sdc: constellation_points(&chain.sdc),
             msc: constellation_points(&chain.msc),
-            group_delay_range: robust_range(group_delay_ms.iter().map(|p| p[1]), 1.0),
+            group_delay_range: robust_range(group_delay_ms.iter().map(|p| p[1]), 2.0),
             chan_db,
             group_delay_ms,
             pds: pds.points,
             pds_in_ms: pds.in_ms,
             guard_ms: pds.guard_ms,
-            snr: chain.snr_profile.iter().map(|&(k, db)| [f64::from(k), db]).collect(),
+            snr: chain
+                .snr_profile
+                .iter()
+                .map(|&(k, db)| [f64::from(k), db])
+                .collect(),
             carriers,
         }
     }
@@ -97,7 +101,11 @@ pub fn spectrum_points(v: &Visuals) -> Points {
     if n == 0 {
         return Vec::new();
     }
-    let span = if v.spectrum_span_hz > 0.0 { v.spectrum_span_hz } else { f64::from(SAMPLE_RATE) };
+    let span = if v.spectrum_span_hz > 0.0 {
+        v.spectrum_span_hz
+    } else {
+        f64::from(SAMPLE_RATE)
+    };
     let df = span / n as f64;
     let f0 = v.spectrum_centre_hz - span / 2.0;
     v.spectrum_db
@@ -110,8 +118,16 @@ pub fn spectrum_points(v: &Visuals) -> Points {
 
 /// Frequency span of the spectrum plot, kHz.
 pub fn spectrum_span_khz(v: &Visuals) -> (f64, f64) {
-    let span = if v.spectrum_span_hz > 0.0 { v.spectrum_span_hz } else { f64::from(SAMPLE_RATE) };
-    let lo = if v.real_input { v.spectrum_centre_hz } else { v.spectrum_centre_hz - span / 2.0 };
+    let span = if v.spectrum_span_hz > 0.0 {
+        v.spectrum_span_hz
+    } else {
+        f64::from(SAMPLE_RATE)
+    };
+    let lo = if v.real_input {
+        v.spectrum_centre_hz
+    } else {
+        v.spectrum_centre_hz - span / 2.0
+    };
     (lo / 1e3, (v.spectrum_centre_hz + span / 2.0) / 1e3)
 }
 
@@ -121,7 +137,9 @@ pub fn spectrum_span_khz(v: &Visuals) -> (f64, f64) {
 pub fn level_range(values: impl Iterator<Item = f64>) -> (f64, f64) {
     let (lo, hi) = values
         .filter(|v| v.is_finite())
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v), hi.max(v))
+        });
     if lo > hi {
         return (-100.0, 0.0);
     }
@@ -134,7 +152,8 @@ pub fn level_range(values: impl Iterator<Item = f64>) -> (f64, f64) {
 ///
 /// For a spectrally inverted signal the receiver conjugates the input before mixing,
 /// so `RxStatus::dc_frequency_hz` is reported in that conjugated domain (negated).
-/// TODO(engine): report the frequency in the input spectrum directly (see report).
+/// TODO(engine): report the DC frequency in the (unconjugated) input spectrum, or
+/// publish the occupied band edges in `Visuals`, so the GUI need not undo this.
 pub fn display_dc_hz(rx: &RxStatus) -> Option<f64> {
     rx.dc_frequency_hz.map(|f| if rx.inverted { -f } else { f })
 }
@@ -149,7 +168,11 @@ pub fn drm_band_hz(rx: &RxStatus) -> Option<(f64, f64)> {
     let lo = f64::from(kmin) * df - df / 2.0;
     let hi = f64::from(kmax) * df + df / 2.0;
     // An inverted spectrum has its carriers in mirrored order.
-    Some(if rx.inverted { (dc - hi, dc - lo) } else { (dc + lo, dc + hi) })
+    Some(if rx.inverted {
+        (dc - hi, dc - lo)
+    } else {
+        (dc + lo, dc + hi)
+    })
 }
 
 /// Equalised cells as (I, Q) points, thinned to at most
@@ -162,6 +185,43 @@ pub fn constellation_points(cells: &[Cplx]) -> Points {
         .filter(|c| c.re.is_finite() && c.im.is_finite())
         .map(|c| [c.re, c.im])
         .collect()
+}
+
+/// Holds the last complete set of cells of a channel whose cells the engine collects
+/// progressively: the FAC cells of a frame and the SDC cells of a super frame are
+/// cleared at the frame / super-frame start and then filled symbol by symbol, so a
+/// snapshot often catches a partial (or empty) set and the plot would flicker. A fresh
+/// set replaces the held one when it is at least as large, or when the held one has
+/// been kept for `max_age` updates (so a lost signal still clears the plot).
+///
+/// TODO(engine): publish only complete FAC/SDC sets (double-buffer them the way
+/// `ChainVisuals::msc` already is); this helper then becomes a no-op.
+#[derive(Debug, Clone, Default)]
+pub struct HeldPoints {
+    points: Points,
+    age: u32,
+    max_age: u32,
+}
+
+impl HeldPoints {
+    pub fn new(max_age: u32) -> Self {
+        Self {
+            points: Vec::new(),
+            age: 0,
+            max_age,
+        }
+    }
+
+    /// Offer a fresh set; returns the set to draw.
+    pub fn update(&mut self, fresh: Points) -> Points {
+        if fresh.len() >= self.points.len() || self.age >= self.max_age {
+            self.points = fresh;
+            self.age = 0;
+        } else {
+            self.age += 1;
+        }
+        self.points.clone()
+    }
 }
 
 /// Channel magnitude |H|² in dB per carrier, and the group delay
@@ -264,8 +324,16 @@ impl PdsGeometry {
 /// TODO(engine): the engine could publish this axis (Dream's `GetAvPoDeSp` returns
 /// scale, guard-interval and PDS begin/end markers) instead of the GUI re-deriving the
 /// estimator's geometry.
-pub fn pds_plot(pds: &[f64], mode: Option<RobustnessMode>, so: Option<SpectrumOccupancy>) -> PdsPlot {
-    let peak = pds.iter().copied().filter(|v| v.is_finite()).fold(0.0_f64, f64::max);
+pub fn pds_plot(
+    pds: &[f64],
+    mode: Option<RobustnessMode>,
+    so: Option<SpectrumOccupancy>,
+) -> PdsPlot {
+    let peak = pds
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(0.0_f64, f64::max);
     if pds.is_empty() || peak <= 0.0 {
         return PdsPlot::default();
     }
@@ -284,10 +352,18 @@ pub fn pds_plot(pds: &[f64], mode: Option<RobustnessMode>, so: Option<SpectrumOc
                     [delay * g.step_ms, db(pds[r])]
                 })
                 .collect();
-            PdsPlot { points, in_ms: true, guard_ms: Some(g.guard_ms) }
+            PdsPlot {
+                points,
+                in_ms: true,
+                guard_ms: Some(g.guard_ms),
+            }
         }
         None => PdsPlot {
-            points: pds.iter().enumerate().map(|(i, &p)| [i as f64, db(p)]).collect(),
+            points: pds
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| [i as f64, db(p)])
+                .collect(),
             in_ms: false,
             guard_ms: None,
         },
@@ -329,12 +405,18 @@ mod tests {
 
     #[test]
     fn level_ranges() {
-        assert_eq!(level_range([-35.0, -80.0, -62.5].into_iter()), (-80.0, -30.0));
+        assert_eq!(
+            level_range([-35.0, -80.0, -62.5].into_iter()),
+            (-80.0, -30.0)
+        );
         assert_eq!(level_range(std::iter::empty()), (-100.0, 0.0));
         // Very deep noise floors are cut at 120 dB below the top …
         assert_eq!(level_range([-3.0, -300.0].into_iter()), (-120.0, 0.0));
         // … and at least 40 dB are always shown (non-finite values are ignored).
-        assert_eq!(level_range([f64::NEG_INFINITY, -20.0].into_iter()), (-50.0, -10.0));
+        assert_eq!(
+            level_range([f64::NEG_INFINITY, -20.0].into_iter()),
+            (-50.0, -10.0)
+        );
     }
 
     fn locked(dc: f64, inverted: bool) -> RxStatus {
@@ -362,12 +444,18 @@ mod tests {
         assert!((lo - (12_000.0 - half)).abs() < 1e-9 && (hi - (12_000.0 + half)).abs() < 1e-9);
 
         // Single-sided 5 kHz occupancy lies entirely above DC.
-        let rx = RxStatus { occupancy: Some(SpectrumOccupancy::SO_1), ..locked(10_000.0, false) };
+        let rx = RxStatus {
+            occupancy: Some(SpectrumOccupancy::SO_1),
+            ..locked(10_000.0, false)
+        };
         let (lo, _) = drm_band_hz(&rx).unwrap();
         assert!(lo > 10_000.0);
 
         assert_eq!(drm_band_hz(&RxStatus::default()), None);
-        let no_mode = RxStatus { mode: None, ..locked(1.0, false) };
+        let no_mode = RxStatus {
+            mode: None,
+            ..locked(1.0, false)
+        };
         assert_eq!(drm_band_hz(&no_mode), None);
     }
 
@@ -382,6 +470,27 @@ mod tests {
     }
 
     #[test]
+    fn held_points_bridge_partial_sets() {
+        let pts = |n: usize| -> Points { (0..n).map(|i| [i as f64, 0.0]).collect() };
+        let mut h = HeldPoints::new(3);
+        assert_eq!(h.update(pts(5)).len(), 5);
+        assert_eq!(
+            h.update(pts(2)).len(),
+            5,
+            "partial set: keep the complete one"
+        );
+        assert_eq!(h.update(pts(0)).len(), 5);
+        assert_eq!(h.update(pts(1)).len(), 5);
+        assert_eq!(h.update(pts(1)).len(), 1, "held too long: give up");
+        assert_eq!(h.update(pts(5)).len(), 5);
+        assert_eq!(
+            h.update(pts(5)).len(),
+            5,
+            "equal size replaces (newer data)"
+        );
+    }
+
+    #[test]
     fn channel_magnitude_and_group_delay() {
         // A pure delay of 1 ms: H(k) = exp(−j2π·k·Δf·τ) → flat 0 dB, group delay 1 ms.
         let mode = RobustnessMode::B;
@@ -389,7 +498,9 @@ mod tests {
         let tau = 1e-3;
         let chain = ChainVisuals {
             kmin: -5,
-            chan: (0..11).map(|c| Cplx::from_polar(1.0, -2.0 * PI * (c as f64 - 5.0) * df * tau)).collect(),
+            chan: (0..11)
+                .map(|c| Cplx::from_polar(1.0, -2.0 * PI * (c as f64 - 5.0) * df * tau))
+                .collect(),
             ..Default::default()
         };
         let (mag, gd) = channel_curves(&chain, Some(mode));
@@ -436,26 +547,43 @@ mod tests {
         let p = pds_plot(&pds, Some(RobustnessMode::B), Some(SpectrumOccupancy::SO_3));
         assert!(p.in_ms);
         assert_eq!(p.points.len(), g.num_pil);
-        let at = |delay: f64| p.points.iter().find(|q| (q[0] - delay).abs() < 1e-9).map(|q| q[1]);
+        let at = |delay: f64| {
+            p.points
+                .iter()
+                .find(|q| (q[0] - delay).abs() < 1e-9)
+                .map(|q| q[1])
+        };
         assert_eq!(at(0.0), Some(0.0), "peak at 0 ms, 0 dB");
-        assert!((at(-2.0 * g.step_ms).unwrap() + 10.0).abs() < 1e-9, "pre-echo at −10 dB");
-        assert!(p.points.windows(2).all(|w| w[1][0] > w[0][0]), "delay axis increases");
+        assert!(
+            (at(-2.0 * g.step_ms).unwrap() + 10.0).abs() < 1e-9,
+            "pre-echo at −10 dB"
+        );
+        assert!(
+            p.points.windows(2).all(|w| w[1][0] > w[0][0]),
+            "delay axis increases"
+        );
         assert_eq!(p.points.iter().map(|q| q[1]).fold(0.0, f64::min), DB_FLOOR);
 
         // Unknown layout or a length mismatch: raw index axis.
         let raw = pds_plot(&pds, None, None);
         assert!(!raw.in_ms && raw.guard_ms.is_none());
         assert_eq!(raw.points[0], [0.0, 0.0]);
-        let mismatch = pds_plot(&pds[..10], Some(RobustnessMode::B), Some(SpectrumOccupancy::SO_3));
+        let mismatch = pds_plot(
+            &pds[..10],
+            Some(RobustnessMode::B),
+            Some(SpectrumOccupancy::SO_3),
+        );
         assert!(!mismatch.in_ms);
         assert_eq!(pds_plot(&[0.0; 4], None, None), PdsPlot::default());
     }
 
     #[test]
     fn from_snapshot_combines_everything() {
-        let mut snap = Snapshot::default();
-        snap.rx = locked(12_000.0, false);
-        snap.visuals = visuals(16, true);
+        let mut snap = Snapshot {
+            rx: locked(12_000.0, false),
+            visuals: visuals(16, true),
+            ..Default::default()
+        };
         snap.visuals.chain.snr_profile = vec![(-103, 20.0), (103, 18.0)];
         let d = PlotData::from_snapshot(&snap);
         assert_eq!(d.spectrum.len(), 8);

@@ -261,12 +261,20 @@ impl Session {
             None => self.audio = None,
         }
 
-        // Data applications of every service.
-        let wanted: Vec<(u8, ApplicationInfo)> = self
-            .ens
-            .services()
-            .flat_map(|s| s.applications.iter().map(move |a| (s.short_id, a.clone())))
-            .collect();
+        // Data applications of every service. An audio service and a data service
+        // often both list the same application (e.g. one slideshow), so each
+        // (stream, packet id) is decoded once, attributed to a data service if one
+        // lists it (services are visited data services first).
+        let mut services: Vec<&ServiceInfo> = self.ens.services().collect();
+        services.sort_by_key(|s| (!s.is_data(), s.short_id));
+        let mut wanted: Vec<(u8, ApplicationInfo)> = Vec::new();
+        for s in services {
+            for a in &s.applications {
+                if !wanted.iter().any(|(_, w)| same_data_channel(w, a)) {
+                    wanted.push((s.short_id, a.clone()));
+                }
+            }
+        }
         let mut kept = Vec::new();
         for (short_id, app) in wanted {
             if let Some(pos) = self.data.iter().position(|d| d.short_id == short_id && d.app == app) {
@@ -391,6 +399,12 @@ fn build_audio(short_id: u8, params: &AudioParams, stream: StreamLengths) -> Res
         decoder,
         text: TextMessageDecoder::new(),
     })
+}
+
+/// Whether two application entries describe the same data channel: the same stream,
+/// and in packet mode the same packet id.
+fn same_data_channel(a: &ApplicationInfo, b: &ApplicationInfo) -> bool {
+    a.stream_id == b.stream_id && a.packet_mode == b.packet_mode && (!a.packet_mode || a.packet_id == b.packet_id)
 }
 
 fn data_config(app: &ApplicationInfo) -> DataServiceConfig {

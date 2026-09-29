@@ -4,8 +4,8 @@
 //! unit-tested. Times are seconds since an arbitrary epoch (`f64`) rather than
 //! `Instant`s for the same reason.
 
-use decdrm_core::rx::framesync::FrameSyncState;
 use decdrm_core::rx::RxStatus;
+use decdrm_core::rx::framesync::FrameSyncState;
 use decdrm_engine::{AudioStatus, InputStatus, Snapshot};
 use std::collections::VecDeque;
 
@@ -111,7 +111,10 @@ pub struct CrcHistory {
 
 impl CrcHistory {
     pub fn new(window_s: f64) -> Self {
-        Self { window_s, readings: VecDeque::new() }
+        Self {
+            window_s,
+            readings: VecDeque::new(),
+        }
     }
 
     /// Add a reading taken at time `t` (non-decreasing).
@@ -187,8 +190,9 @@ impl Indicators {
     /// (good, CRC-failed) packet counters of all data services.
     ///
     /// TODO(engine): the MSC indicator is derived from the audio frame and data packet
-    /// CRCs because the snapshot has no MSC counters of its own; see the report's
-    /// `RxStatus::{msc_ok, msc_bad}` request.
+    /// CRCs because the snapshot has no MSC counters of its own (e.g. `msc_ok` /
+    /// `msc_bad` in `RxStatus`), and the engine does not forward `DataEvent::Stats`
+    /// yet, so data-only services leave it grey.
     pub fn update(&mut self, t: f64, snap: &Snapshot, running: bool, data_packets: (u64, u64)) {
         let rx = &snap.rx;
         self.fac.push(t, rx.fac_ok, rx.fac_bad);
@@ -206,7 +210,11 @@ impl Indicators {
             frame_sync: frame_sync_led(running, rx),
             fac: gate(self.fac.led()),
             sdc: gate(self.sdc.led()),
-            msc: if msc_ok + msc_bad == 0 { Led::Off } else { gate(self.msc.led()) },
+            msc: if msc_ok + msc_bad == 0 {
+                Led::Off
+            } else {
+                gate(self.msc.led())
+            },
             audio: audio_led(running, a, &self.audio),
         };
     }
@@ -223,20 +231,30 @@ pub fn audio_led(running: bool, audio: &AudioStatus, history: &CrcHistory) -> Le
 
 /// `12.3 dB`, or a dash when unknown.
 pub fn fmt_db(v: Option<f64>) -> String {
-    v.filter(|x| x.is_finite()).map_or_else(|| "–".to_string(), |x| format!("{x:.1} dB"))
+    v.filter(|x| x.is_finite())
+        .map_or_else(|| "–".to_string(), |x| format!("{x:.1} dB"))
 }
 
 /// Seconds as `m:ss.s`.
 pub fn fmt_time(s: f64) -> String {
     // Round once to tenths, then split, so 59.96 s becomes "1:00.0" and not "0:60.0".
     let tenths = (s.max(0.0) * 10.0).round() as u64;
-    format!("{}:{:02}.{}", tenths / 600, (tenths % 600) / 10, tenths % 10)
+    format!(
+        "{}:{:02}.{}",
+        tenths / 600,
+        (tenths % 600) / 10,
+        tenths % 10
+    )
 }
 
 /// Fraction of bad items, as a percentage string.
 pub fn fmt_error_rate(ok: u64, bad: u64) -> String {
     let total = ok + bad;
-    if total == 0 { "–".into() } else { format!("{:.1} %", 100.0 * bad as f64 / total as f64) }
+    if total == 0 {
+        "–".into()
+    } else {
+        format!("{:.1} %", 100.0 * bad as f64 / total as f64)
+    }
 }
 
 #[cfg(test)]
@@ -245,13 +263,21 @@ mod tests {
     use decdrm_core::params::RobustnessMode;
 
     fn running_input(level: f32) -> InputStatus {
-        InputStatus { position_s: 1.0, level_dbfs: level, ..Default::default() }
+        InputStatus {
+            position_s: 1.0,
+            level_dbfs: level,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn input_levels() {
         assert_eq!(input_led(false, &running_input(-30.0)), Led::Off);
-        assert_eq!(input_led(true, &InputStatus::default()), Led::Off, "nothing read yet");
+        assert_eq!(
+            input_led(true, &InputStatus::default()),
+            Led::Off,
+            "nothing read yet"
+        );
         assert_eq!(input_led(true, &running_input(-30.0)), Led::Green);
         assert_eq!(input_led(true, &running_input(-8.0)), Led::Yellow);
         assert_eq!(input_led(true, &running_input(-1.0)), Led::Red);
@@ -270,7 +296,11 @@ mod tests {
         assert_eq!(time_sync_led(true, &rx), Led::Yellow);
         rx.mode = Some(RobustnessMode::B);
         assert_eq!(time_sync_led(true, &rx), Led::Green);
-        assert_eq!(frame_sync_led(true, &rx), Led::Red, "frame sync still searching");
+        assert_eq!(
+            frame_sync_led(true, &rx),
+            Led::Red,
+            "frame sync still searching"
+        );
         rx.frame_sync = FrameSyncState::Doubtful;
         assert_eq!(frame_sync_led(true, &rx), Led::Yellow);
         rx.frame_sync = FrameSyncState::Locked;
@@ -283,7 +313,11 @@ mod tests {
         assert_eq!(crc_led(3, 0), Led::Green);
         assert_eq!(crc_led(3, 1), Led::Yellow);
         assert_eq!(crc_led(0, 2), Led::Red);
-        assert_eq!(crc_led(0, 0), Led::Red, "nothing decoded while running is bad");
+        assert_eq!(
+            crc_led(0, 0),
+            Led::Red,
+            "nothing decoded while running is bad"
+        );
     }
 
     #[test]
@@ -297,11 +331,14 @@ mod tests {
         h.push(1.2, 2, 1);
         assert_eq!(h.deltas(), (2, 1), "baseline is the reading at t=0.0");
         assert_eq!(h.led(), Led::Yellow);
-        // The good blocks age out of the window; only the bad one remains.
+        // The good blocks age out of the window (baseline now the reading at 0.8 s);
+        // only the bad one remains.
         h.push(1.9, 2, 1);
-        h.push(2.3, 2, 1);
         assert_eq!(h.deltas(), (0, 1));
         assert_eq!(h.led(), Led::Red);
+        // The bad block (between 0.8 and 1.2 s) has aged out too.
+        h.push(2.3, 2, 1);
+        assert_eq!(h.deltas(), (0, 0));
         h.push(3.5, 2, 1);
         assert_eq!(h.deltas(), (0, 0));
         // A counter reset (new engine) starts over.

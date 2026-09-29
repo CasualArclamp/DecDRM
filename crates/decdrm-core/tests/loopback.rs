@@ -10,8 +10,8 @@
 //!   offsets. These print a report and only assert easy, high-SNR cases. The long
 //!   sweeps (SNR sweeps, channels 5/6, other layouts) are `#[ignore]`d; run them with
 //!   `cargo test -p decdrm-core --test loopback -- --ignored --nocapture`.
-//! * `known_issue_*` (ignored): receiver problems found by these tests, each stating
-//!   the expected behaviour; they fail until the receiver is fixed.
+//! * Regression tests for receiver problems these loopbacks found (lost frames after
+//!   an occupancy change, a spurious SRO estimate, slow mode A/SO0 detection).
 //!
 //! Use `--nocapture` to see the result tables. Everything is seeded, so results are
 //! reproducible run to run.
@@ -394,11 +394,7 @@ fn check_clean(sc: &Scenario, o: &Outcome) -> Vec<String> {
     if o.fac.wrong > 0 {
         p.push(format!("{} FACs with wrong content", o.fac.wrong));
     }
-    // Tolerated: one missing FAC right after the first one. The receiver starts
-    // with an SO3 carrier layout and, when the first FAC announces another
-    // occupancy, rebuilds its channel estimator, losing the next frame (see
-    // `known_issue_no_frame_lost_at_occupancy_change`).
-    if o.fac.break_at.iter().any(|&at| at != 1) {
+    if o.fac.breaks > 0 {
         p.push(format!("FAC sequence broken after {:?} FACs", o.fac.break_at));
     }
     // Every frame after the first good FAC must decode (the last one or two frames may
@@ -426,7 +422,10 @@ fn check_clean(sc: &Scenario, o: &Outcome) -> Vec<String> {
     if o.restarts > 0 {
         p.push(format!("{} restarts", o.restarts));
     }
-    if o.clipped > 0 {
+    // The default level leaves 15 dB of headroom; an OFDM peak beyond that is rare
+    // but not an error (one in ~10⁶ samples).
+    let samples = (o.frames * SAMPLES_PER_FRAME * 2) as u64;
+    if o.clipped > samples / 100_000 {
         p.push(format!("{} output samples clipped", o.clipped));
     }
     p
@@ -738,21 +737,16 @@ fn robustness_channel_models_5_6() {
 }
 
 // ---------------------------------------------------------------------------------
-// Known receiver issues (found with these loopback tests). Each test states the
-// expected behaviour and is ignored until the receiver is fixed; run them with
-// `cargo test -p decdrm-core --test loopback known_issue -- --ignored --nocapture`.
+// Regression tests for receiver problems found with these loopbacks.
 // ---------------------------------------------------------------------------------
 
-/// After the first FAC of a signal whose occupancy is not SO3, the receiver
-/// (which starts with an SO3 layout) calls `SymbolChain::reconfigure`, which
-/// rebuilds the `ChannelEstimator`. The symbols buffered in the old estimator and
-/// the new one's start-up delay are lost, so `demap` never sees symbol 0 of the
-/// next frame and its frame counter lags by one frame until the next FAC forces a
-/// resync. Symptom: the FAC of the next frame and the SDC block of the super frame
-/// that starts next are never delivered (no CRC error, just missing).
+/// The receiver starts with an SO3 layout; when the first FAC announces another
+/// occupancy, `SymbolChain::reconfigure` rebuilds the channel estimator. It used to
+/// lose the old estimator's delay line, and with it symbol 0 of the next frame: the
+/// next FAC and the SDC block of the next super frame went missing. The recent
+/// windows are now replayed through the new layout.
 #[test]
-#[ignore = "known receiver issue: a FAC and an SDC block are lost when the occupancy differs from SO3"]
-fn known_issue_no_frame_lost_at_occupancy_change() {
+fn no_frame_lost_at_occupancy_change() {
     let mut failures = Vec::new();
     for so in [0, 1, 2, 4, 5] {
         let tx = TxConfig { occupancy: SpectrumOccupancy::new(so).unwrap(), ..Default::default() };
@@ -773,15 +767,12 @@ fn known_issue_no_frame_lost_at_occupancy_change() {
 }
 
 /// The sample-rate-offset acquisition (`rx/chanest/track.rs`, end of the 4 s
-/// acquisition) measures the drift of the *integer* index of the strongest
-/// impulse-response bin. One impulse-response bin is fft_size/num_carriers samples
-/// (≈ 4.9 samples in mode B/SO3), so a single bin flip within the 4 s window —
-/// which happens on a clean signal when the timing tracking nudges the window —
-/// yields a spurious correction of ≈ 1.3 Hz (28 ppm), which then decays only very
-/// slowly. Expected: |SRO| well below 0.3 Hz for a signal without sample-rate offset.
+/// acquisition) used to measure the drift of the *integer* index of the strongest
+/// impulse-response bin (Dream's method). One bin is ≈ 5 samples in mode B/SO3, so
+/// a single bin flip within the 4 s window read as ≈ 1.3 Hz (28 ppm). The peak is
+/// now interpolated and the drift fitted by least squares.
 #[test]
-#[ignore = "known receiver issue: spurious ~1.3 Hz SRO estimate on a clean signal"]
-fn known_issue_no_spurious_sro_on_clean_signal() {
+fn no_spurious_sro_on_clean_signal() {
     let tx = TxConfig { interleaving: Interleaving::Short, ..Default::default() };
     let sc = Scenario { name: "B/SO3 64-QAM short".into(), decode_msc: true, seed: 7, ..Scenario::new(tx, Link::Iq(0.0), 12.0) };
     let o = run(&sc);
@@ -790,14 +781,13 @@ fn known_issue_no_spurious_sro_on_clean_signal() {
 }
 
 /// Robustness-mode detection for mode A with 4.5 kHz occupancy is marginal: the
-/// best/second-best score ratio of a clean A/SO0 signal is only ~4.5–7 (mode B
-/// second, same 37.5 Hz symbol rate) against `RM_RELIABILITY` = 8, so detection
-/// waits for a favourable fluctuation. Mode A/SO3 has a ratio of ~20. Expected:
-/// the first FAC of a clean A/SO0 signal as fast as for other mode A layouts
-/// (2.0 s); observed 2.0–4.0 s, and several seconds more at low SNR.
+/// best/second-best score ratio of a clean A/SO0 signal over 16 symbols is only
+/// ~4–7 (mode A's guard is 1/10 of the symbol, and the other modes' scores are
+/// noisy for a narrow signal). With Dream's threshold of 8 the first FAC took
+/// 2.0–4.0 s (other mode A layouts: 2.0 s). A longer observation with a lower
+/// threshold now covers weak or narrow signals.
 #[test]
-#[ignore = "known receiver issue: slow mode detection for mode A / SO0"]
-fn known_issue_fast_mode_a_so0_acquisition() {
+fn fast_mode_a_so0_acquisition() {
     let mut frames = Vec::new();
     for seed in 0..12 {
         let tx = TxConfig { mode: RobustnessMode::A, occupancy: SpectrumOccupancy::SO_0, ..Default::default() };

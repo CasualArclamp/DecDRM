@@ -231,9 +231,18 @@ mod tests {
     fn mux_demux_roundtrip() {
         let map = CellMap::new(RobustnessMode::B, SpectrumOccupancy::SO_3).unwrap();
         let n_mux = map.msc_cells_per_frame;
-        for (mapping, hier) in [(Mapping::Qam64Sm, false), (Mapping::Qam16, false), (Mapping::Qam64HmSym, true), (Mapping::Qam64HmMix, true)] {
+        for (mapping, hier) in [
+            (Mapping::Qam64Sm, false),
+            (Mapping::Qam16, false),
+            (Mapping::Qam64HmSym, true),
+            (Mapping::Qam64HmMix, true),
+        ] {
             let prot = MscProtection { part_a: 0, part_b: 1, hierarchical: 1 };
-            let streams = [StreamLengths { part_a: 12, part_b: 300 }, StreamLengths { part_a: 7, part_b: 0 }, StreamLengths { part_a: 0, part_b: 40 }];
+            let streams = [
+                StreamLengths { part_a: 12, part_b: 300 },
+                StreamLengths { part_a: 7, part_b: 0 },
+                StreamLengths { part_a: 0, part_b: 40 },
+            ];
             let part_a: usize = streams.iter().map(|s| s.part_a).sum();
             let params = MlcParams::msc(mapping, n_mux, prot, part_a);
             let mux = if hier {

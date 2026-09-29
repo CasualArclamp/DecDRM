@@ -88,7 +88,11 @@ pub fn led(ui: &mut Ui, state: Led, name: &str, help: &str) {
             let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
             let painter = ui.painter();
             painter.circle_filled(rect.center(), 5.5, led_color(state, dark));
-            let rim = if dark { Color32::from_gray(20) } else { Color32::from_gray(110) };
+            let rim = if dark {
+                Color32::from_gray(20)
+            } else {
+                Color32::from_gray(110)
+            };
             painter.circle_stroke(rect.center(), 5.5, Stroke::new(1.0, rim));
             ui.label(name);
         })

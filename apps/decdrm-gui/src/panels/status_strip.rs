@@ -14,17 +14,56 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
     let running = rx.is_running();
 
     ui.horizontal_wrapped(|ui| {
-        led(ui, leds.input, "Input", "RMS input level in a usable range (not silent, not clipping)");
-        led(ui, leds.time_sync, "Time", "DRM signal found in the spectrum and symbol timing acquired");
-        led(ui, leds.frame_sync, "Frame", "frame synchronisation from the time-reference pilots");
-        led(ui, leds.fac, "FAC", "CRC of the fast access channel blocks of the last ~1.3 s");
-        led(ui, leds.sdc, "SDC", "CRC of the service description channel blocks of the last ~2.5 s");
-        led(ui, leds.msc, "MSC", "CRCs of the audio frames and data packets carried in the MSC");
-        led(ui, leds.audio, "Audio", "CRC of the decoded audio frames of the selected service");
+        led(
+            ui,
+            leds.input,
+            "Input",
+            "RMS input level in a usable range (not silent, not clipping)",
+        );
+        led(
+            ui,
+            leds.time_sync,
+            "Time",
+            "DRM signal found in the spectrum and symbol timing acquired",
+        );
+        led(
+            ui,
+            leds.frame_sync,
+            "Frame",
+            "frame synchronisation from the time-reference pilots",
+        );
+        led(
+            ui,
+            leds.fac,
+            "FAC",
+            "CRC of the fast access channel blocks of the last ~1.3 s",
+        );
+        led(
+            ui,
+            leds.sdc,
+            "SDC",
+            "CRC of the service description channel blocks of the last ~2.5 s",
+        );
+        led(
+            ui,
+            leds.msc,
+            "MSC",
+            "CRCs of the audio frames and data packets carried in the MSC",
+        );
+        led(
+            ui,
+            leds.audio,
+            "Audio",
+            "CRC of the decoded audio frames of the selected service",
+        );
         ui.separator();
 
         let state = if !running {
-            if snap.stopped || snap.error.is_some() { "Stopped" } else { "Idle" }
+            if snap.stopped || snap.error.is_some() {
+                "Stopped"
+            } else {
+                "Idle"
+            }
         } else if rx.is_stopping() {
             "Stopping…"
         } else {
@@ -37,12 +76,22 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
         ui.label(RichText::new(state).strong());
         let mode = r.mode.map_or_else(|| "–".to_string(), |m| m.to_string());
         value(ui, "Mode", mode);
-        let bw = r.occupancy.map_or_else(|| "–".to_string(), |o| format!("{} kHz (SO{})", o.bandwidth_khz(), o.value()));
+        let bw = r.occupancy.map_or_else(
+            || "–".to_string(),
+            |o| format!("{} kHz (SO{})", o.bandwidth_khz(), o.value()),
+        );
         value(ui, "BW", bw);
         if r.inverted {
             ui.label(RichText::new("inverted").italics())
                 .on_hover_text("The spectrum is mirrored (found by auto-flip).");
         }
+        ui.separator();
+        level_meter(
+            ui,
+            snap.input.level_dbfs,
+            running && snap.input.position_s > 0.0,
+        );
+        position(ui, snap);
     });
 
     ui.horizontal_wrapped(|ui| {
@@ -56,11 +105,8 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
         value(ui, "SRO", format!("{:+.2} Hz", r.sro_hz))
             .on_hover_text("Sample-rate offset being corrected, at 48 kHz.");
         if let Some(t) = &snap.time_utc {
-            value(ui, "UTC", t.as_str()).on_hover_text("Broadcast time and date from the SDC.");
+            value(ui, "Time", t.as_str()).on_hover_text("Broadcast time and date from the SDC.");
         }
-        ui.separator();
-        level_meter(ui, snap.input.level_dbfs, running && snap.input.position_s > 0.0);
-        position(ui, snap);
     });
 
     if let Some(err) = &snap.error {
@@ -82,8 +128,13 @@ fn level_meter(ui: &mut Ui, level_dbfs: f32, valid: bool) {
     } else {
         ui.visuals().selection.bg_fill
     };
-    ui.add(egui::ProgressBar::new(fraction).desired_width(110.0).fill(color).text(text))
-        .on_hover_text("RMS input level (dB relative to full scale).");
+    ui.add(
+        egui::ProgressBar::new(fraction)
+            .desired_width(110.0)
+            .fill(color)
+            .text(text),
+    )
+    .on_hover_text("RMS input level (dB relative to full scale).");
 }
 
 fn position(ui: &mut Ui, snap: &decdrm_engine::Snapshot) {
@@ -96,12 +147,25 @@ fn position(ui: &mut Ui, snap: &decdrm_engine::Snapshot) {
         Some(total) => {
             ui.label(RichText::new("File").weak());
             let text = format!("{} / {}", fmt_time(pos), fmt_time(total));
-            ui.add(egui::ProgressBar::new((pos / total).clamp(0.0, 1.0) as f32).desired_width(150.0).text(text))
-                .on_hover_text(format!("{} — {} Hz, {} ch", info.name, info.sample_rate, info.channels));
+            ui.add(
+                egui::ProgressBar::new((pos / total).clamp(0.0, 1.0) as f32)
+                    .desired_width(150.0)
+                    .text(text),
+            )
+            .on_hover_text(format!(
+                "{} — {} Hz, {} ch",
+                info.name, info.sample_rate, info.channels
+            ));
         }
         None => {
-            value(ui, "Time", fmt_time(pos));
-            ui.label(RichText::new(format!("{} ({} Hz, {} ch)", info.name, info.sample_rate, info.channels)).weak());
+            value(ui, "Elapsed", fmt_time(pos));
+            ui.label(
+                RichText::new(format!(
+                    "{} ({} Hz, {} ch)",
+                    info.name, info.sample_rate, info.channels
+                ))
+                .weak(),
+            );
         }
     }
 }

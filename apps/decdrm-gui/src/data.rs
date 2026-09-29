@@ -94,7 +94,11 @@ impl DataServices {
     }
 
     fn ids_where(&self, pred: impl Fn(&DataService) -> bool) -> Vec<u8> {
-        self.services.iter().filter(|(_, s)| pred(s)).map(|(&id, _)| id).collect()
+        self.services
+            .iter()
+            .filter(|(_, s)| pred(s))
+            .map(|(&id, _)| id)
+            .collect()
     }
 
     /// Summed (good, CRC-failed) packet counters of all services, for the MSC
@@ -103,7 +107,9 @@ impl DataServices {
         self.services
             .values()
             .filter_map(|s| s.stats.as_ref())
-            .fold((0, 0), |(ok, bad), st| (ok + st.packets_ok, bad + st.packets_crc_error))
+            .fold((0, 0), |(ok, bad), st| {
+                (ok + st.packets_ok, bad + st.packets_crc_error)
+            })
     }
 }
 
@@ -132,8 +138,8 @@ pub fn list_rows(items: &[ListItem]) -> Vec<Vec<&str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use decdrm_data::journaline::{NmlObject, ObjectStatus};
     use decdrm_data::JournalineUpdate;
+    use decdrm_data::journaline::{NmlObject, ObjectStatus};
     use decdrm_data::mot::{MotHeader, content_type};
 
     fn slide_event(name: &str) -> DataEvent {
@@ -161,14 +167,41 @@ mod tests {
             }),
             None,
         );
-        d.apply(2, &DataEvent::Raw { user_app_id: 4, data_group: vec![0; 5] }, None);
-        d.apply(3, &DataEvent::StreamData { user_app_id: 9, data: vec![0; 10] }, None);
-        d.apply(3, &DataEvent::StreamData { user_app_id: 9, data: vec![0; 6] }, None);
+        d.apply(
+            2,
+            &DataEvent::Raw {
+                user_app_id: 4,
+                data_group: vec![0; 5],
+            },
+            None,
+        );
+        d.apply(
+            3,
+            &DataEvent::StreamData {
+                user_app_id: 9,
+                data: vec![0; 10],
+            },
+            None,
+        );
+        d.apply(
+            3,
+            &DataEvent::StreamData {
+                user_app_id: 9,
+                data: vec![0; 6],
+            },
+            None,
+        );
 
         assert_eq!(d.slideshow_ids(), vec![1]);
         assert_eq!(d.journaline_ids(), vec![2]);
-        assert_eq!(d.get_mut(1).unwrap().slideshow.current().unwrap().name, "a.png");
-        assert_eq!(d.get_mut(2).unwrap().journaline.root().unwrap().title, "News");
+        assert_eq!(
+            d.get_mut(1).unwrap().slideshow.current().unwrap().name,
+            "a.png"
+        );
+        assert_eq!(
+            d.get_mut(2).unwrap().journaline.root().unwrap().title,
+            "News"
+        );
         assert_eq!(d.get_mut(2).unwrap().raw_units, 1);
         assert_eq!(d.get_mut(3).unwrap().stream_bytes, 16);
         assert_eq!(d.iter().map(|(id, _)| id).collect::<Vec<_>>(), [1, 2, 3]);
@@ -180,7 +213,13 @@ mod tests {
     fn packet_counters_sum_over_services() {
         let mut d = DataServices::default();
         assert_eq!(d.packet_counters(), (0, 0));
-        let stats = |ok, bad| DataEvent::Stats(DataStats { packets_ok: ok, packets_crc_error: bad, ..Default::default() });
+        let stats = |ok, bad| {
+            DataEvent::Stats(DataStats {
+                packets_ok: ok,
+                packets_crc_error: bad,
+                ..Default::default()
+            })
+        };
         d.apply(1, &stats(10, 1), None);
         d.apply(2, &stats(5, 0), None);
         d.apply(1, &stats(12, 2), None); // cumulative: replaces the earlier value
@@ -192,15 +231,27 @@ mod tests {
         assert_eq!(choose_service(None, &[]), None);
         assert_eq!(choose_service(None, &[2, 3]), Some(2));
         assert_eq!(choose_service(Some(3), &[2, 3]), Some(3));
-        assert_eq!(choose_service(Some(1), &[2, 3]), Some(2), "a vanished choice falls back");
+        assert_eq!(
+            choose_service(Some(1), &[2, 3]),
+            Some(2),
+            "a vanished choice falls back"
+        );
     }
 
     #[test]
     fn list_pages_become_rows() {
-        let items = vec![ListItem::row("a"), ListItem::cell("b"), ListItem::row("c"), ListItem::cell("d")];
+        let items = vec![
+            ListItem::row("a"),
+            ListItem::cell("b"),
+            ListItem::row("c"),
+            ListItem::cell("d"),
+        ];
         assert_eq!(list_rows(&items), vec![vec!["a", "b"], vec!["c", "d"]]);
         // A leading continuation cell still opens a row.
-        assert_eq!(list_rows(&[ListItem::cell("x"), ListItem::cell("y")]), vec![vec!["x", "y"]]);
+        assert_eq!(
+            list_rows(&[ListItem::cell("x"), ListItem::cell("y")]),
+            vec![vec!["x", "y"]]
+        );
         assert!(list_rows(&[]).is_empty());
     }
 }

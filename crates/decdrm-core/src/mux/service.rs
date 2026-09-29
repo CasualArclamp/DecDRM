@@ -217,10 +217,15 @@ impl AudioParams {
     }
 
     /// The type 9 entity to transmit for this service (as Dream's `CSDCTransmit` /
-    /// `CAudioParam::EnqueueType9` writes it).
+    /// `CAudioParam::EnqueueType9` writes it). Opus is signalled the way current Dream
+    /// receivers accept it: audio coding 01, no SBR, audio mode *mono* (Dream rejects
+    /// other modes, then treats the service as stereo), rate code 101.
     pub fn to_entity(&self, short_id: u8) -> AudioInfo {
         let t = &self.type9_bytes;
-        let b0 = t.first().copied().unwrap_or(0);
+        let mut b0 = t.first().copied().unwrap_or(0);
+        if self.codec == AudioCodec::Opus {
+            b0 = 0b0100_0101;
+        }
         let b1 = t.get(1).copied().unwrap_or(0);
         AudioInfo {
             short_id,
@@ -784,7 +789,8 @@ impl Ensemble {
             }
             EntityBody::ConditionalAccess(c) => {
                 let i = usize::from(c.short_id & 3);
-                let list = if next { &mut self.next.conditional_access[i] } else { &mut self.services[i].conditional_access };
+                let list =
+                    if next { &mut self.next.conditional_access[i] } else { &mut self.services[i].conditional_access };
                 if upsert(list, c.clone(), |a, b| a.audio_ca == b.audio_ca && a.data_ca == b.data_ca) {
                     if next {
                         ch.next_configuration = true;
@@ -797,7 +803,9 @@ impl Ensemble {
                 let i = usize::from(a.short_id & 3);
                 let list = if next { &mut self.next.applications[i] } else { &mut self.services[i].applications };
                 let same = |x: &ApplicationInfo, y: &ApplicationInfo| {
-                    x.stream_id == y.stream_id && x.packet_mode == y.packet_mode && (!x.packet_mode || x.packet_id == y.packet_id)
+                    x.stream_id == y.stream_id
+                        && x.packet_mode == y.packet_mode
+                        && (!x.packet_mode || x.packet_id == y.packet_id)
                 };
                 if upsert(list, a.clone(), same) {
                     if next {
@@ -1026,9 +1034,16 @@ mod tests {
         }
         // Reserved AAC sampling rates are rejected (Dream keeps the old parameters).
         assert!(AudioParams::from_entity(&audio_entity(0, 0, 0, false, 0, 2, false)).is_err());
-        // Transmitter round trip.
+        // Transmitter round trips.
         let p = AudioParams::new(0, AudioCodec::Aac, true, AudioMode::ParametricStereo, 12_000, true, vec![]);
         assert_eq!(AudioParams::from_entity(&p.to_entity(0)).unwrap(), p);
+        let p = AudioParams::new(1, AudioCodec::XheAac, false, AudioMode::Stereo, 24_000, false, vec![0x13, 0x88]);
+        assert_eq!(AudioParams::from_entity(&p.to_entity(2)).unwrap(), p);
+        // Opus goes out as coding 01 / mono / no SBR, which Dream accepts.
+        let p = AudioParams::new(0, AudioCodec::Opus, false, AudioMode::Stereo, 48_000, true, vec![]);
+        let e = p.to_entity(0);
+        assert_eq!((e.coding, e.mode, e.sbr, e.sample_rate), (1, 0, false, 5));
+        assert_eq!(AudioParams::from_entity(&e).unwrap(), p);
     }
 
     #[test]
@@ -1046,7 +1061,10 @@ mod tests {
                 SdcEntity::new(false, EntityBody::Multiplex(mux.clone())),
                 SdcEntity::new(false, EntityBody::Audio(audio_entity(0, 0, 0, true, 0, 3, true))),
                 SdcEntity::new(false, EntityBody::Label(Label::new(0, "Test FM"))),
-                SdcEntity::new(false, EntityBody::LanguageCountry(LanguageCountry { short_id: 0, language: *b"eng", country: *b"gb" })),
+                SdcEntity::new(
+                    false,
+                    EntityBody::LanguageCountry(LanguageCountry { short_id: 0, language: *b"eng", country: *b"gb" }),
+                ),
             ],
             97,
         )
@@ -1135,7 +1153,8 @@ mod tests {
         assert!(ens.apply_entity(&SdcEntity::new(true, EntityBody::AfsMultiplex(af(9000)))).afs);
         assert_eq!(ens.alternative_frequencies().multiplexes.items(), &[af(9000)]);
         // Announcement switching flags replace in place.
-        let ann = |sw: u16| Announcement { short_id_flags: 1, support_flags: 3, switching_flags: sw, ..Default::default() };
+        let ann =
+            |sw: u16| Announcement { short_id_flags: 1, support_flags: 3, switching_flags: sw, ..Default::default() };
         ens.apply_entity(&SdcEntity::new(false, EntityBody::Announcement(ann(0))));
         assert!(ens.apply_entity(&SdcEntity::new(false, EntityBody::Announcement(ann(2)))).announcements);
         assert_eq!(ens.announcements().items(), &[ann(2)]);

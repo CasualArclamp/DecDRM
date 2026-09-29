@@ -19,7 +19,7 @@
 
 use crate::data::DataServices;
 use crate::indicators::Indicators;
-use crate::plots::PlotData;
+use crate::plots::{HeldPoints, PlotData};
 use decdrm_engine::{Command, Engine, EngineConfig, EngineEvent, InputSpec, Snapshot};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -30,6 +30,8 @@ pub const FETCH_INTERVAL: Duration = Duration::from_millis(100);
 pub const LOG_CAPACITY: usize = 5000;
 /// Text messages kept for the history list.
 pub const TEXT_HISTORY: usize = 20;
+/// Snapshots for which a complete FAC/SDC constellation is held (see [`HeldPoints`]).
+const CONSTELLATION_HOLD: u32 = 30;
 
 /// Bounded list of log lines.
 #[derive(Debug, Clone, Default)]
@@ -59,7 +61,11 @@ impl LogBuffer {
 
     /// All lines joined with newlines (for the clipboard).
     pub fn text(&self) -> String {
-        self.lines.iter().map(String::as_str).collect::<Vec<_>>().join("\n")
+        self.lines
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -83,6 +89,8 @@ pub struct RxSession {
     pub snap: Snapshot,
     /// Plot data prepared from `snap`.
     pub plots: PlotData,
+    held_fac: HeldPoints,
+    held_sdc: HeldPoints,
     pub indicators: Indicators,
     pub data: DataServices,
     pub log: LogBuffer,
@@ -103,6 +111,8 @@ impl Default for RxSession {
             stopping: false,
             snap: Snapshot::default(),
             plots: PlotData::default(),
+            held_fac: HeldPoints::new(CONSTELLATION_HOLD),
+            held_sdc: HeldPoints::new(CONSTELLATION_HOLD),
             indicators: Indicators::default(),
             data: DataServices::default(),
             log: LogBuffer::default(),
@@ -131,6 +141,8 @@ impl RxSession {
         self.live = matches!(cfg.input, InputSpec::Device { .. });
         self.snap = Snapshot::default();
         self.plots = PlotData::default();
+        self.held_fac = HeldPoints::new(CONSTELLATION_HOLD);
+        self.held_sdc = HeldPoints::new(CONSTELLATION_HOLD);
         self.indicators.clear();
         self.data.clear();
         self.texts.clear();
@@ -180,7 +192,9 @@ impl RxSession {
     /// Drain engine events and, at most every [`FETCH_INTERVAL`], fetch a new snapshot.
     /// Returns `true` if anything changed (the caller then repaints).
     pub fn poll(&mut self, now: Instant) -> bool {
-        let Some(engine) = &self.engine else { return false };
+        let Some(engine) = &self.engine else {
+            return false;
+        };
         let events = engine.poll_events();
         let mut changed = !events.is_empty();
         let mut finished = false;
@@ -189,7 +203,9 @@ impl RxSession {
             match ev {
                 EngineEvent::Log(line) => self.log.push(line),
                 EngineEvent::Text(text) => push_text(&mut self.texts, text),
-                EngineEvent::Data { short_id, event } => self.data.apply(short_id, &event, now_unix),
+                EngineEvent::Data { short_id, event } => {
+                    self.data.apply(short_id, &event, now_unix)
+                }
                 EngineEvent::Stopped { error } => {
                     if let Some(e) = error {
                         self.log.push(format!("error: {e}"));
@@ -201,16 +217,24 @@ impl RxSession {
         if let Some(t) = now_unix {
             self.data.tick(t);
         }
-        let due = self.last_fetch.is_none_or(|t| now.duration_since(t) >= FETCH_INTERVAL);
+        let due = self
+            .last_fetch
+            .is_none_or(|t| now.duration_since(t) >= FETCH_INTERVAL);
         if due || finished {
             self.snap = engine.snapshot();
-            self.plots = PlotData::from_snapshot(&self.snap);
+            let mut plots = PlotData::from_snapshot(&self.snap);
+            // `std::mem::take` moves the vector out and leaves an empty one behind,
+            // avoiding a copy.
+            plots.fac = self.held_fac.update(std::mem::take(&mut plots.fac));
+            plots.sdc = self.held_sdc.update(std::mem::take(&mut plots.sdc));
+            self.plots = plots;
             self.last_fetch = Some(now);
             changed = true;
+            let t = now.duration_since(self.epoch).as_secs_f64();
+            let running = !finished && !self.snap.stopped;
+            self.indicators
+                .update(t, &self.snap, running, self.data.packet_counters());
         }
-        let t = now.duration_since(self.epoch).as_secs_f64();
-        let running = !finished && !self.snap.stopped;
-        self.indicators.update(t, &self.snap, running, self.data.packet_counters());
         if finished {
             // The worker has exited, so dropping the handle joins it immediately. The
             // final snapshot (plots, counters, error) stays on screen.
@@ -224,7 +248,9 @@ impl RxSession {
 
 /// Seconds since 1970 (UTC), from the system clock.
 fn unix_now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 #[cfg(test)]
