@@ -151,7 +151,7 @@ pub(crate) fn check_whole_frames(samples: &[f32], channels: usize) -> Result<()>
     if channels == 0 {
         return Err(Error::invalid("channel count must be > 0"));
     }
-    if samples.len() % channels != 0 {
+    if !samples.len().is_multiple_of(channels) {
         return Err(Error::invalid(format!(
             "{} samples is not a whole number of {}-channel frames",
             samples.len(),

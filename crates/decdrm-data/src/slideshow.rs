@@ -152,15 +152,15 @@ impl SlideShow {
     }
 
     fn show(&mut self, slide: Slide) -> bool {
-        if !slide.name.is_empty() {
-            if let Some(pos) = self.history.iter().position(|s| s.name == slide.name) {
-                self.history.remove(pos);
-                self.selected = match self.selected {
-                    Some(sel) if pos < sel => Some(sel - 1),
-                    Some(sel) if pos == sel => None,
-                    other => other,
-                };
-            }
+        if !slide.name.is_empty()
+            && let Some(pos) = self.history.iter().position(|s| s.name == slide.name)
+        {
+            self.history.remove(pos);
+            self.selected = match self.selected {
+                Some(sel) if pos < sel => Some(sel - 1),
+                Some(sel) if pos == sel => None,
+                other => other,
+            };
         }
         self.history.push_back(slide);
         if self.history.len() > self.capacity {

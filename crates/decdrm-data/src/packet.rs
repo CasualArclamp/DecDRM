@@ -250,11 +250,11 @@ impl PacketDemux {
 
         // ES 201 980: the CI "shall increment by one modulo-8 for each packet with this
         // packet Id". A jump means packets were lost: the unit in progress is broken.
-        if let Some(prev) = ch.last_ci {
-            if (prev + 1) & 7 != header.continuity {
-                st.continuity_errors += 1;
-                ch.ok = false;
-            }
+        if let Some(prev) = ch.last_ci
+            && (prev + 1) & 7 != header.continuity
+        {
+            st.continuity_errors += 1;
+            ch.ok = false;
         }
         ch.last_ci = Some(header.continuity);
 

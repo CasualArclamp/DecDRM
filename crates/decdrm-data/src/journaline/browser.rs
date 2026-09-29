@@ -68,10 +68,10 @@ impl JournalineBrowser {
     /// currently shown changed.
     pub fn apply(&mut self, update: &JournalineUpdate) -> bool {
         let changed = self.insert(update.object.clone());
-        if update.status == ObjectStatus::Updated {
-            if let Some(p) = self.pages.get_mut(&update.object.object_id) {
-                p.updated = true;
-            }
+        if update.status == ObjectStatus::Updated
+            && let Some(p) = self.pages.get_mut(&update.object.object_id)
+        {
+            p.updated = true;
         }
         changed
     }

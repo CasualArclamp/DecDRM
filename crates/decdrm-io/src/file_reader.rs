@@ -284,12 +284,12 @@ impl FileReader {
         self.pending.clear();
         self.pending_pos = 0;
         self.skip_frames = 0;
-        if let Some(total) = self.total_frames {
-            if frame >= total {
-                self.eof = true;
-                self.position = total;
-                return Ok(total);
-            }
+        if let Some(total) = self.total_frames
+            && frame >= total
+        {
+            self.eof = true;
+            self.position = total;
+            return Ok(total);
         }
         let Some(src) = self.source.as_mut() else {
             return Ok(self.position);

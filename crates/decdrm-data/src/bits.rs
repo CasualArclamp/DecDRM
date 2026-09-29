@@ -98,7 +98,7 @@ impl BitWriter {
         );
         for i in (0..n).rev() {
             let bit = (value >> i) & 1;
-            if self.nbits % 8 == 0 {
+            if self.nbits.is_multiple_of(8) {
                 self.bytes.push(0);
             }
             if bit == 1 {

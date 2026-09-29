@@ -87,7 +87,9 @@ pub fn decode(charset: u8, bytes: &[u8]) -> String {
         charset_id::ISO_8859_1 => latin1(bytes),
         charset_id::UCS2_BE => {
             let units = bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| u16::from_be_bytes([c[0], c[1]]));
             // Rust note: `decode_utf16` yields `Result<char, _>` per code point so that
             // unpaired surrogates can be replaced instead of aborting.
