@@ -9,7 +9,7 @@
 //! let mut enc = XheAacEncoder::new(XheAacConfig::new(24_000, 2, 16_000))?;
 //! let sdc_type9 = enc.audio_info().to_type9_bytes(); // for SDC entity 9 / the receiver
 //! for au in enc.encode(pcm_24k_stereo)? {
-//!     // hand `au.data` and `au.bit_reservoir_level` to the xHE-AAC super-frame builder
+//!     // to the super-frame builder: push_access_unit(&au.data, au.bit_reservoir_level)
 //!     # let _ = (au, &sdc_type9);
 //! }
 //! # Ok(()) }
@@ -76,9 +76,11 @@
 //!   smaller than `⌈L/15⌉ − 2` bytes (a smaller frame is padded).
 //!
 //! The encoder starts with a full reservoir (`D = 0`), like libxaac. The super-frame builder
-//! must therefore run *ahead* of the channel: before building the super frame that ends at
-//! time `t`, it must hold the access units of the audio up to `t` plus about one frame
-//! (see the xHE-AAC round-trip test for a complete transmitter loop).
+//! (`decdrm_core::mux::audio::XheAacFramer`, which never pads) must therefore run *ahead*
+//! of the channel: before building the super frame that ends at time `t`, it must hold the
+//! access units of the audio up to `t` plus about one frame; DecDRM's station encodes two
+//! frames ahead (see also the xHE-AAC round-trip test for a complete transmitter loop).
+//! [`XheAacConfig::budget`] checks a configuration without creating an encoder.
 //!
 //! # Rust / FFI notes
 //!
@@ -335,7 +337,8 @@ impl XheAacConfig {
                     return Err(CodecError::Unsupported(format!(
                         "no usable xHE-AAC configuration at 38.4 kHz for {} at {} bit/s with \
                          libxaac (its SBR has no 38.4 kHz tables except for 4:1, which is mono \
-                         only and degrades above 24 kbit/s); use 24, 32 or 48 kHz input",
+                         only and degrades above 24 kbit/s); use a sampling rate of 24, 32 or \
+                         48 kHz",
                         if mono { "mono" } else { "stereo" },
                         self.bitrate()
                     )));
@@ -344,7 +347,7 @@ impl XheAacConfig {
                 48_000 if !mono && self.bitrate() < 12_000 => {
                     return Err(CodecError::Unsupported(format!(
                         "stereo xHE-AAC at 48 kHz below 12 kbit/s decodes badly with libxaac \
-                         ({} bit/s requested); use 16 or 24 kHz input",
+                         ({} bit/s requested); use a 16 or 24 kHz sampling rate",
                         self.bitrate()
                     )));
                 }
@@ -359,7 +362,8 @@ impl XheAacConfig {
             )),
             XheSbrRatio::Ratio4To1 if self.sample_rate < 32_000 => {
                 Err(CodecError::Unsupported(format!(
-                    "libxaac supports 4:1 SBR only at input rates of 32 kHz and above, not {} Hz",
+                    "libxaac supports 4:1 SBR only at sampling rates of 32 kHz and above, not \
+                     {} Hz",
                     self.sample_rate
                 )))
             }
@@ -367,7 +371,7 @@ impl XheAacConfig {
                 Err(CodecError::Unsupported(
                     "libxaac's SBR encoder has no frequency band tables for a 38.4 kHz output \
                      rate with 2:1 or 8:3 SBR (it rejects them at initialisation); use 4:1 \
-                     (mono) or another input rate"
+                     (mono) or another sampling rate"
                         .into(),
                 ))
             }
@@ -506,14 +510,70 @@ impl Drop for XheAacEncoder {
     }
 }
 
-impl XheAacEncoder {
-    /// Creates and initialises an encoder.
-    pub fn new(config: XheAacConfig) -> Result<Self, CodecError> {
-        let ratio = config.validate()?;
-        let channels = usize::from(config.channels);
+/// What a configuration gives the encoder, worked out without libxaac
+/// ([`XheAacConfig::budget`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct XheBudget {
+    /// The SBR ratio used.
+    pub sbr_ratio: XheSbrRatio,
+    /// Samples per channel per access unit.
+    pub frame_len: usize,
+    /// Channel capacity for access units in bit/s: the stream rate minus super-frame
+    /// headers, frame CRCs and directory entries ([`XheAacEncoder::net_bitrate`]).
+    pub net_bitrate: f64,
+    /// The bit rate libxaac is asked for (a little below `net_bitrate`).
+    pub core_bitrate: u32,
+    /// Smallest access unit in bytes (15-frames-per-super-frame rule).
+    pub min_frame_bytes: usize,
+}
+
+/// The rate parameters behind [`XheBudget`].
+#[derive(Debug, Clone, Copy)]
+struct RatePlan {
+    ratio: XheSbrRatio,
+    frame_len: usize,
+    /// Channel capacity per access unit, in bits·fs (see the module docs).
+    cap_num: i64,
+    /// Bit rate for libxaac.
+    core_rate: i64,
+    au_min_bytes: usize,
+}
+
+impl XheAacConfig {
+    /// Checks everything [`XheAacEncoder::new`] checks before it hands the configuration
+    /// to libxaac — sampling rate, channels, super frame size, the SBR ratio
+    /// ([`Self::sbr_ratio`]) and the channel budget of a frame (at least libxaac's minimum
+    /// rate, room for a bit reservoir below the 6144-bit maximum, at most 15 frames per
+    /// super frame) — and returns what the configuration gives the encoder. Cheap: no
+    /// encoder is created, so libxaac may still reject a configuration that passes.
+    pub fn budget(&self) -> Result<XheBudget, CodecError> {
+        let p = self.rate_plan()?;
+        Ok(XheBudget {
+            sbr_ratio: p.ratio,
+            frame_len: p.frame_len,
+            net_bitrate: p.cap_num as f64 / p.frame_len as f64,
+            core_bitrate: p.core_rate as u32,
+            min_frame_bytes: p.au_min_bytes,
+        })
+    }
+
+    /// The smallest [`super_frame_bytes`](Self::super_frame_bytes) for which
+    /// [`Self::budget`] succeeds with this sampling rate, channel count and SBR mode, or
+    /// `None` if no size does (e.g. an SBR ratio the rate does not support).
+    pub fn min_super_frame_bytes(&self) -> Option<usize> {
+        let mut probe = self.clone();
+        (1..=XHE_AAC_MAX_SUPER_FRAME_BYTES).find(|&l| {
+            probe.super_frame_bytes = l;
+            probe.rate_plan().is_ok()
+        })
+    }
+
+    fn rate_plan(&self) -> Result<RatePlan, CodecError> {
+        let ratio = self.validate()?;
+        let channels = usize::from(self.channels);
         let frame_len = ratio.frame_len();
-        let fs = i64::from(config.sample_rate);
-        let l = config.super_frame_bytes as i64;
+        let fs = i64::from(self.sample_rate);
+        let l = self.super_frame_bytes as i64;
         // Channel capacity per access unit, in bits·fs (see the module docs).
         let cap_num = 20 * (l - 2) * frame_len as i64 - 32 * fs;
         let avg_bits = cap_num as f64 / fs as f64;
@@ -522,19 +582,19 @@ impl XheAacEncoder {
         let core_bits = avg_bits * 0.985 - 24.0;
         let core_rate = (core_bits * fs as f64 / frame_len as f64).floor() as i64;
         // libxaac's own ceiling: 6 bit per core sample and channel.
-        let core_max = 6 * i64::from(ratio.core_rate(config.sample_rate)) * channels as i64;
+        let core_max = 6 * i64::from(ratio.core_rate(self.sample_rate)) * channels as i64;
         let core_rate = core_rate.min(core_max);
         if core_rate < LIBXAAC_MIN_BITRATE {
             return Err(CodecError::InvalidConfig(format!(
                 "{} bytes per super frame leave {avg_bits:.0} bits per {frame_len}-sample \
                  xHE-AAC frame ({:.0} bit/s net), too little for the encoder",
-                config.super_frame_bytes,
+                self.super_frame_bytes,
                 avg_bits * fs as f64 / frame_len as f64
             )));
         }
         // No more than 15 frame starts per super frame: frames (access unit + CRC) of at
         // least ⌈L/15⌉ bytes guarantee that, even with a delayed border (§5.3.1.3).
-        let au_min_bytes = (config
+        let au_min_bytes = (self
             .super_frame_bytes
             .div_ceil(XHE_AAC_MAX_FRAMES_PER_SUPER_FRAME))
         .saturating_sub(2)
@@ -546,7 +606,7 @@ impl XheAacEncoder {
                 "{} bytes per super frame give {avg_bits:.0}-bit {frame_len}-sample frames at \
                  {} Hz, too close to the xHE-AAC maximum of 6144 bits per channel (ES 201 980 \
                  §5.3.1.3); use a higher sampling rate or a lower bit rate",
-                config.super_frame_bytes, config.sample_rate
+                self.super_frame_bytes, self.sample_rate
             )));
         }
         if (au_min_bytes * 8) as f64 >= avg_bits {
@@ -554,10 +614,32 @@ impl XheAacEncoder {
                 "with {frame_len}-sample frames at {} Hz a 400 ms super frame holds {:.2} \
                  frames; the 15-frame limit of ES 201 980 §5.3.1 leaves no room for a bit \
                  reservoir (use SBR or a lower sampling rate)",
-                config.sample_rate,
+                self.sample_rate,
                 0.4 * fs as f64 / frame_len as f64
             )));
         }
+        Ok(RatePlan {
+            ratio,
+            frame_len,
+            cap_num,
+            core_rate,
+            au_min_bytes,
+        })
+    }
+}
+
+impl XheAacEncoder {
+    /// Creates and initialises an encoder.
+    pub fn new(config: XheAacConfig) -> Result<Self, CodecError> {
+        let RatePlan {
+            ratio,
+            frame_len,
+            cap_num,
+            core_rate,
+            au_min_bytes,
+        } = config.rate_plan()?;
+        let channels = usize::from(config.channels);
+        let fs = i64::from(config.sample_rate);
 
         // --- libxaac configuration (values as libxaac's test bench sets them) ---
         // SAFETY: pure function.
@@ -1873,5 +1955,34 @@ mod tests {
         let mut nosbr48 = XheAacConfig::new(48_000, 2, 64_000);
         nosbr48.sbr = XheSbrMode::Fixed(XheSbrRatio::None);
         assert!(nosbr48.validate().is_err());
+    }
+
+    /// `budget` agrees with the encoder, and `min_super_frame_bytes` is the boundary.
+    #[test]
+    fn budget_without_libxaac() {
+        let cfg = XheAacConfig::new(24_000, 2, 16_000);
+        let b = cfg.budget().unwrap();
+        let enc = XheAacEncoder::new(cfg.clone()).unwrap();
+        assert_eq!(b.sbr_ratio, enc.sbr_ratio());
+        assert_eq!(b.frame_len, enc.frame_len());
+        assert!((b.net_bitrate - enc.net_bitrate()).abs() < 1e-9);
+        assert_eq!(b.core_bitrate, enc.core_bitrate());
+        assert_eq!(b.min_frame_bytes, enc.min_frame_bytes());
+        // Around 4.8 kbit/s at 24 kHz (libxaac's 4 kbit/s minimum plus the overhead).
+        let min = cfg.min_super_frame_bytes().unwrap();
+        assert!((230..250).contains(&min), "{min}");
+        let at = |l: usize| XheAacConfig::with_super_frame_bytes(24_000, 2, l);
+        assert!(at(min).budget().is_ok() && at(min - 1).budget().is_err());
+        assert!(XheAacEncoder::new(at(min)).is_ok());
+        // No size works for 38.4 kHz stereo.
+        assert_eq!(
+            XheAacConfig::new(38_400, 2, 16_000).min_super_frame_bytes(),
+            None
+        );
+        // Stereo at 48 kHz: from 12 kbit/s.
+        assert_eq!(
+            XheAacConfig::new(48_000, 2, 16_000).min_super_frame_bytes(),
+            Some(600)
+        );
     }
 }

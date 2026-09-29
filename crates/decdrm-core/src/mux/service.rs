@@ -122,7 +122,10 @@ impl AudioMode {
     }
 }
 
-/// xHE-AAC core sampling rates by 3-bit code (§6.4.3.10).
+/// xHE-AAC sampling rates by 3-bit code (§6.4.3.10): the USAC output sampling rate —
+/// what the decoder delivers and the encoder takes — not the core coder rate. FDK-AAC
+/// reads the field that way and derives the core rate from the SBR ratio in the xHE-AAC
+/// Static Config (e.g. 24 kHz with 2:1 SBR: a 12 kHz core).
 pub const XHE_AAC_SAMPLE_RATES: [u32; 8] = [9_600, 12_000, 16_000, 19_200, 24_000, 32_000, 38_400, 48_000];
 
 /// Audio parameters of one service, interpreted from SDC entity type 9 the way Dream's
@@ -135,8 +138,10 @@ pub struct AudioParams {
     /// SBR used (AAC only; always `false` otherwise).
     pub sbr: bool,
     pub mode: AudioMode,
-    /// Sampling rate of the core coder in Hz (AAC: 12000/24000 in DRM30, the output
-    /// rate doubles with SBR; Opus: 48000).
+    /// The signalled sampling rate in Hz. AAC: the core coder rate (12000/24000 in
+    /// DRM30; the output rate doubles with SBR). xHE-AAC: the USAC output rate (see
+    /// [`XHE_AAC_SAMPLE_RATES`]; the core runs at a fraction set by the SBR ratio of the
+    /// Static Config). Opus: 48000. EnCodec: 24000.
     pub sample_rate_hz: u32,
     /// A text message occupies the last 4 bytes of each logical frame of the stream.
     pub text_flag: bool,
@@ -299,7 +304,8 @@ impl AudioParams {
         }
     }
 
-    /// Nominal output sampling rate of the decoder (core rate, doubled by SBR).
+    /// Nominal output sampling rate of the decoder: AAC's core rate, doubled by SBR; the
+    /// signalled rate itself for the other codecs (xHE-AAC signals its output rate).
     pub fn output_sample_rate_hz(&self) -> u32 {
         if self.sbr { 2 * self.sample_rate_hz } else { self.sample_rate_hz }
     }

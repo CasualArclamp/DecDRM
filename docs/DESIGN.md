@@ -116,11 +116,11 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       EPG, text, time; all MSC modes incl. HM/UEP), verified by loopback through our
       receiver, also live through a virtual audio cable. To do: clock-drift
       compensation between a sound-card input and output.
-- [ ] **M8 TX codecs** — xHE-AAC (libxaac encoder), Opus.
-      *Status:* Opus transmitted by the station; `XheAacEncoder` (libxaac with
-      build-time fixes) round-trips through our framer and FDK with 0 concealment.
-      To do: station integration, framer API (reservoir level per access unit, no
-      silent zero-fill), MPS212 for 4:1 stereo.
+- [x] **M8 TX codecs** — xHE-AAC (libxaac encoder), Opus.
+      *Done:* station codecs `xhe-aac` (24/32/48 kHz by stream rate, mono/stereo,
+      text) and `opus`; `XheAacFramer` writes the header reservoir level itself and
+      refuses to pad mid-frame. Loopbacks mode B/A/D decode with 0 concealed frames.
+      Not supported: MPS212 (4:1 stereo), 38.4 kHz stereo.
 - [x] **M9 EnCodec** — experimental neural-codec extension (TX + RX).
       *Done:* `decdrm-encodec` (feature `encodec`, candle 0.9, own streaming SEANet
       identical to candle-transformers' EnCodec), signalled as SDC type 9 audio coding

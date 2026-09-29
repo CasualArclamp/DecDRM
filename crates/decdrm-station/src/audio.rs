@@ -1,22 +1,35 @@
 //! Audio services: the input (file, sound card or test tone, converted to the encoder's
-//! rate and channel count), the encoder (FDK-AAC, Opus, or EnCodec with the `encodec`
-//! feature) and the logical frame of each 400 ms multiplex frame (audio super frame plus
-//! text message piece).
+//! rate and channel count), the encoder (FDK-AAC, libxaac for xHE-AAC, Opus, or EnCodec
+//! with the `encodec` feature) and the logical frame of each 400 ms multiplex frame
+//! (audio super frame plus text message piece).
 //!
 //! Timing: one call of [`AudioChain::next_logical_frame`] consumes exactly 400 ms of
 //! PCM at the encoder's input rate — five or ten AAC granules of 960 core samples
-//! (1920 input samples with SBR), twenty 20 ms Opus frames, or thirty 320-sample
-//! EnCodec frames at 24 kHz — and produces one audio super frame (ES 201 980 §5.4.1).
+//! (1920 input samples with SBR), twenty 20 ms Opus frames, 400 ms of xHE-AAC input
+//! (1024-, 2048- or 4096-sample frames that do not align with the super frames), or
+//! thirty 320-sample EnCodec frames at 24 kHz — and produces one audio super frame
+//! (ES 201 980 §5.3.1, §5.4.1).
 //!
 //! FDK-AAC has an encoder delay: its first calls return no frame. The encoder is primed
 //! with silence at start-up until it delivers its first frame, after which every
 //! granule yields one frame; a queue absorbs the one-frame offset.
+//!
+//! xHE-AAC frames run continuously through the super frames, and the super frame
+//! builder ([`XheAacFramer`]) must not pad. The encoder is therefore kept two frames
+//! ahead of the channel: primed with two frames of silence, it holds the audio up to the
+//! end of each super frame plus two frames when that super frame is built, which with its
+//! rate control (output at or above the channel rate) always fills the payload.
 
 use crate::config::{AudioInputSettings, Codec, StationConfig};
 use crate::error::{Result, StationError};
 use crate::plan::AudioPlan;
-use decdrm_codecs::{AacProfile, DrmAacFrame, FdkDrmEncoder, FdkEncoderConfig, OpusDrmEncoder, OpusEncoderConfig};
-use decdrm_core::mux::audio::{AacSuperFrameFormat, AudioError, AudioFrame, build_aac_super_frame, insert_text_message};
+use decdrm_codecs::{
+    AacProfile, CodecError, DrmAacFrame, FdkDrmEncoder, FdkEncoderConfig, OpusDrmEncoder, OpusEncoderConfig,
+    XheAacConfig, XheAacEncoder,
+};
+use decdrm_core::mux::audio::{
+    AacSuperFrameFormat, AudioError, AudioFrame, XheAacFramer, build_aac_super_frame, insert_text_message,
+};
 use decdrm_core::mux::sdc::StreamLengths;
 use decdrm_core::mux::text::TextMessageEncoder;
 use decdrm_io::{FileReader, InputOptions, InputStream, Resampler, ResamplerQuality};
@@ -474,6 +487,105 @@ impl OpusEncoder {
     }
 }
 
+/// xHE-AAC encoder (libxaac) and super frame builder, two frames ahead of the channel
+/// (see the module docs).
+struct XheEncoder {
+    enc: XheAacEncoder,
+    config: XheAacConfig,
+    /// The Static Config SDC type 9 announces; every encoder must produce it.
+    static_config: Vec<u8>,
+    framer: XheAacFramer,
+    /// One access unit's worth of interleaved silence.
+    silence: Vec<f32>,
+    /// libxaac failures (the encoder is then replaced).
+    encoder_errors: u64,
+    /// Frames lost to encoder failures or replaced by silence to fill a payload.
+    dropped: u64,
+}
+
+impl XheEncoder {
+    /// Frames the encoder runs ahead of the channel.
+    const LEAD_FRAMES: usize = 2;
+    /// Frames of silence added at most to fill one payload before giving up (the lead
+    /// makes even one unnecessary; each frame adds at least an average frame's bytes).
+    const MAX_FILL_FRAMES: usize = 32;
+
+    fn new(plan: &AudioPlan) -> std::result::Result<Self, CodecError> {
+        let config = plan
+            .xhe
+            .clone()
+            .ok_or_else(|| CodecError::InvalidConfig("xHE-AAC service without an encoder configuration".into()))?;
+        let static_config = plan.params.codec_config.clone();
+        let enc = Self::open(&config, &static_config)?;
+        let silence = vec![0.0; enc.frame_len() * usize::from(enc.channels())];
+        let mut e =
+            Self { enc, config, static_config, framer: XheAacFramer::new(), silence, encoder_errors: 0, dropped: 0 };
+        e.prime()?;
+        Ok(e)
+    }
+
+    /// An encoder for `config` that produces `static_config` (the plan's SDC type 9).
+    fn open(config: &XheAacConfig, static_config: &[u8]) -> std::result::Result<XheAacEncoder, CodecError> {
+        let enc = XheAacEncoder::new(config.clone())?;
+        if enc.static_config() != static_config {
+            return Err(CodecError::InvalidConfig(
+                "libxaac produced another xHE-AAC Static Config than SDC type 9 announces".into(),
+            ));
+        }
+        Ok(enc)
+    }
+
+    /// Encode the lead: frames of silence.
+    fn prime(&mut self) -> std::result::Result<(), CodecError> {
+        for _ in 0..Self::LEAD_FRAMES {
+            let silence = std::mem::take(&mut self.silence);
+            let r = self.encode(&silence);
+            self.silence = silence;
+            r?;
+        }
+        Ok(())
+    }
+
+    fn encode(&mut self, pcm: &[f32]) -> std::result::Result<(), CodecError> {
+        for au in self.enc.encode(pcm)? {
+            self.framer.push_access_unit(&au.data, au.bit_reservoir_level);
+        }
+        Ok(())
+    }
+
+    /// Encode `pcm`; if libxaac fails (fatal for its instance), count it and continue with
+    /// a new encoder, primed again (the audio of the failed call is lost). Fails only if
+    /// no new encoder can be made.
+    fn encode_or_restart(&mut self, pcm: &[f32]) -> std::result::Result<(), CodecError> {
+        if self.encode(pcm).is_ok() {
+            return Ok(());
+        }
+        self.encoder_errors += 1;
+        self.dropped += (pcm.len() / self.silence.len().max(1)) as u64;
+        self.enc = Self::open(&self.config, &self.static_config)?;
+        self.prime()
+    }
+
+    /// The super frame of `len` bytes after encoding `pcm` (400 ms of input).
+    fn super_frame(&mut self, pcm: &[f32], len: usize, service: &str) -> Result<Vec<u8>> {
+        let codec_error = |source| StationError::Codec { service: service.to_string(), source };
+        self.encode_or_restart(pcm).map_err(codec_error)?;
+        // The lead fills the payload; should it not, add silence rather than pad the
+        // payload (which would break the frame in progress).
+        for _ in 0..Self::MAX_FILL_FRAMES {
+            if self.framer.ready(len) {
+                break;
+            }
+            self.dropped += 1;
+            let silence = std::mem::take(&mut self.silence);
+            let r = self.encode_or_restart(&silence);
+            self.silence = silence;
+            r.map_err(codec_error)?;
+        }
+        Ok(self.framer.next_super_frame(len)?)
+    }
+}
+
 /// EnCodec encoder producing DecDRM's EnCodec super frames (the `encodec` feature).
 #[cfg(feature = "encodec")]
 struct EncodecEncoder {
@@ -514,6 +626,7 @@ fn open_encodec(_plan: &AudioPlan) -> std::result::Result<Encoder, decdrm_codecs
 
 enum Encoder {
     Aac(AacEncoder),
+    Xhe(Box<XheEncoder>),
     Opus(OpusEncoder),
     #[cfg(feature = "encodec")]
     Encodec(EncodecEncoder),
@@ -562,6 +675,7 @@ impl AudioChain {
             .map_err(|message| StationError::Input { service: name.clone(), message })?;
         let encoder = match plan.codec {
             Codec::Opus => OpusEncoder::new(plan, stream).map(Encoder::Opus),
+            Codec::XheAac => XheEncoder::new(plan).map(|e| Encoder::Xhe(Box::new(e))),
             Codec::Encodec => open_encodec(plan),
             _ => AacEncoder::new(plan, stream).map(Encoder::Aac),
         }
@@ -599,6 +713,12 @@ impl AudioChain {
         let mut lf = match &mut self.encoder {
             Encoder::Aac(e) => {
                 let sf = e.super_frame(&self.pcm, len)?;
+                self.counters.frames_dropped = e.dropped;
+                self.counters.encoder_errors = e.encoder_errors;
+                sf
+            }
+            Encoder::Xhe(e) => {
+                let sf = e.super_frame(&self.pcm, len, service_name)?;
                 self.counters.frames_dropped = e.dropped;
                 self.counters.encoder_errors = e.encoder_errors;
                 sf

@@ -47,9 +47,20 @@ iso_country = "gb"           # ... and ISO 3166 country code
 programme_type = "Pop Music" # FAC programme type: name from table 19 or 0-31
 
 [service.audio]
-codec = "he-aac"             # "aac", "he-aac" (SBR), "he-aac-v2" (SBR + parametric stereo), "opus", "encodec"
+codec = "he-aac"             # "aac", "he-aac" (SBR), "he-aac-v2" (SBR + parametric stereo), "xhe-aac"
+                             # (MPEG-D USAC), "opus", "encodec"
 core_rate = 12000            # AAC core rate: 12000 (5 frames per 400 ms) or 24000 (10 frames)
 stereo = false               # stereo coding (HE-AAC v2 is always parametric stereo)
+# xHE-AAC (codec = "xhe-aac", without core_rate) fills whatever stream it gets, from about
+# 5 kbit/s, mono or stereo. Its sampling rate — the encoder's input and the receiver's
+# output — follows from the stream's bit rate (minus the text bytes) unless set here:
+#   up to 24 kbit/s: 24 kHz (2:1 SBR, 12 kHz core: most bits per coded line at low rates)
+#   up to 48 kbit/s: 32 kHz (16 kHz core, audio up to 16 kHz)
+#   above:           48 kHz (24 kHz core, audio up to 24 kHz)
+# sample_rate = 24000        # "xhe-aac" only: 9600, 12000, 16000, 19200, 24000, 32000, 38400
+                             # (mono only) or 48000
+# sbr_ratio = "auto"         # "xhe-aac" only: "auto" (the encoder's choice for the rate), "none"
+                             # (up to 32 kHz), "8:3", "2:1" or "4:1" (mono only, from 32 kHz)
 # bandwidth_kbps = 6         # "encodec" only (DecDRM's experimental neural codec, 24 kHz mono; needs a
                              # build with --features encodec and `decdrm models download encodec`):
                              # 1.5, 3, 6, 12 or 24 kbit/s; default: the highest that fits the stream

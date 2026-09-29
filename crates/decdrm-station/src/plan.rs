@@ -32,8 +32,34 @@
 //! EnCodec (DecDRM's experimental extension) takes the highest of its fixed bit rates
 //! that fits and spends the rest on CRC granularity and repetition
 //! (`decdrm_encodec::plan`).
+//!
+//! # xHE-AAC
+//!
+//! xHE-AAC (§5.3.1) has no fixed number of frames per super frame: access units of
+//! varying size run continuously through the super frames, and the encoder's rate
+//! control (`decdrm_codecs::XheAacEncoder`) fills the stream exactly — the super frame
+//! (stream minus text bytes) less a 2-byte header and 4 bytes of CRC and directory per
+//! frame; the frame sizes vary within the bit reservoir. The sampling rate (the rate the
+//! encoder takes and the decoder delivers, signalled in SDC type 9) is `sample_rate` if
+//! set, else it follows from the super frame's bit rate ([`default_xhe_rate`]):
+//!
+//! | super frame bit rate | sampling rate | with the default 2:1 SBR |
+//! |----------------------|---------------|--------------------------|
+//! | up to 24 kbit/s      | 24 kHz        | 12 kHz core, audio to 12 kHz |
+//! | up to 48 kbit/s      | 32 kHz        | 16 kHz core, audio to 16 kHz |
+//! | above                | 48 kHz        | 24 kHz core, audio to 24 kHz |
+//!
+//! A low core rate leaves the core coder the most bits per spectral line, which is what
+//! matters at low rates (DecDRM's xHE-AAC sweep: 54–59 dB tone SNR at 24 kHz from
+//! 8 kbit/s; 32 kHz stereo is poor at 8 kbit/s, 48 kHz stereo below ~24 kbit/s). The
+//! SBR ratio is `sbr_ratio`, by default the encoder's choice for the rate
+//! (`XheAacConfig::sbr_ratio`); `sbr_ratio = "4:1"` defaults to 48 kHz, `"none"` to at
+//! most 32 kHz. The plan checks the configuration with `XheAacConfig::budget` (too
+//! small a stream, unsupported rate/ratio/channel combinations such as 38.4 kHz stereo
+//! or 4:1 stereo) and then creates the encoder once, for the xHE-AAC Static Config that
+//! SDC type 9 carries.
 
-use crate::config::{AppKind, Codec, Part, SignalFormat, StationConfig};
+use crate::config::{AppKind, Codec, Part, SbrRatio, SignalFormat, StationConfig};
 use crate::error::{ConfigProblems, Result, StationError};
 use crate::sdc;
 use decdrm_core::cellmap::CellMap;
@@ -43,6 +69,7 @@ use decdrm_core::mux::audio::{AacSuperFrameFormat, OPUS_FRAMES_PER_SUPER_FRAME, 
 use decdrm_core::mux::msc::MscGeometry;
 use decdrm_core::mux::sdc::{MultiplexDescription, StreamLengths};
 use decdrm_core::mux::service::{AudioCodec, AudioMode, AudioParams};
+use decdrm_codecs::{XHE_AAC_SAMPLE_RATES, XheAacConfig, XheAacEncoder};
 use decdrm_core::params::{ChannelLayout, MAX_SERVICES, MAX_STREAMS};
 use decdrm_core::tx::output::{OutputConfig, OutputFormat, OutputStage, suggested_if_hz};
 use decdrm_core::tx::{MscCapacity, Transmitter, TxConfig};
@@ -142,23 +169,28 @@ pub struct ServicePlan {
 pub struct AudioPlan {
     pub stream: u8,
     pub codec: Codec,
-    /// AAC core sampling rate (48 000 for Opus).
+    /// Core coder sampling rate: AAC's core rate, 48 000 for Opus, xHE-AAC's core rate
+    /// (the sampling rate divided by the SBR ratio).
     pub core_rate: u32,
     /// Stereo coding (for HE-AAC v2: parametric stereo).
     pub stereo: bool,
-    /// Sampling rate of the PCM the encoder takes (2 × core with SBR, 48 kHz Opus).
+    /// Sampling rate of the PCM the encoder takes (2 × core with SBR, 48 kHz Opus,
+    /// xHE-AAC's sampling rate).
     pub input_rate: u32,
     /// Channels of the PCM the encoder takes.
     pub input_channels: usize,
     /// Text messages in the last four bytes of the stream.
     pub text: bool,
-    /// Audio frames per 400 ms super frame (5, 10 or 20).
+    /// Audio frames per 400 ms super frame (5, 10 or 20; xHE-AAC: the average rounded
+    /// up).
     pub frames_per_super_frame: usize,
     /// Audio super frame bytes (stream minus text bytes).
     pub super_frame_len: usize,
-    /// Bytes available for the coded frames (super frame minus header and CRC bytes).
+    /// Bytes available for the coded frames (super frame minus header and CRC bytes;
+    /// xHE-AAC: also minus the directory, on average).
     pub payload_len: usize,
-    /// Encoder bit rate, bit/s (Opus: packet size × 400 bit/s).
+    /// Encoder bit rate, bit/s (Opus: packet size × 400 bit/s; xHE-AAC: the channel
+    /// capacity for access units, which the encoder fills).
     pub encoder_bitrate: u32,
     /// Opus packet size in bytes (0 for AAC).
     pub opus_packet_bytes: usize,
@@ -166,6 +198,13 @@ pub struct AudioPlan {
     pub params: AudioParams,
     /// EnCodec: bandwidth and DRM framing (signalled in `params`).
     pub encodec: Option<decdrm_encodec::EncodecConfig>,
+    /// xHE-AAC: the encoder configuration (its Static Config is in `params`).
+    pub xhe: Option<XheAacConfig>,
+}
+
+/// `hz` in kHz, with a decimal where needed ("24", "38.4").
+fn khz(hz: u32) -> String {
+    if hz.is_multiple_of(1000) { format!("{}", hz / 1000) } else { format!("{:.1}", f64::from(hz) / 1000.0) }
 }
 
 impl AudioPlan {
@@ -181,6 +220,10 @@ impl AudioPlan {
             Codec::Aac => format!("AAC {ch}, {} kHz", self.core_rate / 1000),
             Codec::HeAac => format!("HE-AAC {ch}, {} kHz core", self.core_rate / 1000),
             Codec::HeAacV2 => format!("HE-AAC v2 ({ch}), {} kHz core", self.core_rate / 1000),
+            Codec::XheAac if self.core_rate == self.input_rate => {
+                format!("xHE-AAC {ch}, {} kHz (no SBR)", khz(self.input_rate))
+            }
+            Codec::XheAac => format!("xHE-AAC {ch}, {} kHz ({} kHz core)", khz(self.input_rate), khz(self.core_rate)),
             Codec::Encodec => match self.encodec {
                 Some(c) => format!("{}, 24 kHz mono", c.describe()),
                 None => "EnCodec, 24 kHz mono".into(),
@@ -283,12 +326,30 @@ impl MultiplexPlan {
 // Codec limits
 // ---------------------------------------------------------------------------------
 
-/// Default AAC core rate of a codec.
+/// Default AAC core rate of a codec (xHE-AAC: see [`default_xhe_rate`]).
 fn default_core_rate(codec: Codec) -> u32 {
     match codec {
-        Codec::Aac | Codec::Encodec => 24_000,
+        Codec::Aac | Codec::Encodec | Codec::XheAac => 24_000,
         Codec::HeAac | Codec::HeAacV2 => 12_000,
         Codec::Opus => 48_000,
+    }
+}
+
+/// The xHE-AAC sampling rate for audio super frames of `super_frame_len` bytes when
+/// `sample_rate` is not set (see the module docs): 24 kHz up to 24 kbit/s, 32 kHz up to
+/// 48 kbit/s, 48 kHz above; 48 kHz for 4:1 SBR (a 12 kHz core) and at most 32 kHz
+/// without SBR (more frames than a super frame can list above that).
+pub fn default_xhe_rate(super_frame_len: usize, sbr: SbrRatio) -> u32 {
+    let bitrate = 20 * super_frame_len;
+    let rate = match bitrate {
+        0..=24_000 => 24_000,
+        24_001..=48_000 => 32_000,
+        _ => 48_000,
+    };
+    match sbr {
+        SbrRatio::Ratio4To1 => 48_000,
+        SbrRatio::None => rate.min(32_000),
+        _ => rate,
     }
 }
 
@@ -783,6 +844,27 @@ fn check_audio(cfg: &StationConfig, name: &str, a: &crate::config::AudioSettings
     } else if a.bandwidth_kbps.is_some() {
         p.push(format!("{name}: bandwidth_kbps is only used by codec = \"encodec\""));
     }
+    if a.codec == Codec::XheAac {
+        if a.core_rate.is_some() {
+            p.push(format!("{name}: xHE-AAC has no core_rate setting; set its sampling rate with sample_rate"));
+        }
+        if let Some(r) = a.sample_rate
+            && !XHE_AAC_SAMPLE_RATES.contains(&r)
+        {
+            let list: Vec<String> = XHE_AAC_SAMPLE_RATES.iter().map(u32::to_string).collect();
+            p.push(format!("{name}: xHE-AAC sample_rate {r} Hz is not allowed (use {})", list.join(", ")));
+        }
+    } else {
+        if a.sample_rate.is_some() {
+            p.push(format!(
+                "{name}: sample_rate is only used by codec = \"xhe-aac\"{}",
+                if a.codec.is_aac() { " (AAC has core_rate)" } else { "" }
+            ));
+        }
+        if a.sbr_ratio.is_some() {
+            p.push(format!("{name}: sbr_ratio is only used by codec = \"xhe-aac\""));
+        }
+    }
     if !(a.share.is_finite() && a.share > 0.0) {
         p.push(format!("{name}: share must be a positive number"));
     }
@@ -806,12 +888,13 @@ fn check_audio(cfg: &StationConfig, name: &str, a: &crate::config::AudioSettings
             p.push(format!("{name}: audio input: {e}"));
         }
     }
-    let input_rate = if a.codec == Codec::Opus {
-        48_000
-    } else if a.codec.sbr() {
-        2 * rate
-    } else {
-        rate
+    let input_rate = match a.codec {
+        Codec::Opus => 48_000,
+        // Without sample_rate the highest rate the plan may choose; it checks the tone
+        // against the rate it chooses.
+        Codec::XheAac => a.sample_rate.unwrap_or(48_000),
+        c if c.sbr() => 2 * rate,
+        _ => rate,
     };
     if let Some(f) = i.tone_hz
         && !(f > 0.0 && f < f64::from(input_rate) / 2.0)
@@ -925,8 +1008,10 @@ fn stream_requests(cfg: &StationConfig, p: &mut Problems) -> Vec<Request> {
 
 /// Codec parameters of an audio service carried in `stream`.
 fn audio_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::result::Result<AudioPlan, String> {
-    if a.codec == Codec::Encodec {
-        return encodec_plan(a, stream);
+    match a.codec {
+        Codec::Encodec => return encodec_plan(a, stream),
+        Codec::XheAac => return xhe_plan(a, stream),
+        _ => {}
     }
     let codec = a.codec;
     let core_rate = a.core_rate.unwrap_or_else(|| default_core_rate(codec));
@@ -1016,6 +1101,80 @@ fn audio_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::res
         opus_packet_bytes,
         params,
         encodec: None,
+        xhe: None,
+    })
+}
+
+/// What to do about a stream that is too short (in the error messages).
+fn stream_remedy(stream: &StreamPlan) -> &'static str {
+    if stream.hierarchical {
+        "the hierarchical stream's length is fixed by the channel: use a higher protection_hierarchical, \
+         HMsym instead of HMmix, or a wider channel"
+    } else {
+        "reduce the data bit rates, or use a wider channel, 64-QAM or a higher protection level number"
+    }
+}
+
+/// xHE-AAC parameters of an audio service carried in `stream` (see the module docs):
+/// the sampling rate, the encoder configuration — checked without, then with libxaac —
+/// and SDC type 9 with the encoder's Static Config.
+fn xhe_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::result::Result<AudioPlan, String> {
+    let text = a.text.iter().any(|t| !t.is_empty());
+    let len = stream.bytes();
+    let text_bytes = if text { TEXT_MESSAGE_BYTES } else { 0 };
+    let super_frame_len = len.saturating_sub(text_bytes);
+    let sbr = a.sbr_ratio.unwrap_or_default();
+    let rate = a.sample_rate.unwrap_or_else(|| default_xhe_rate(super_frame_len, sbr));
+    let channels: u16 = if a.stereo { 2 } else { 1 };
+    let mut config = XheAacConfig::with_super_frame_bytes(rate, channels, super_frame_len);
+    config.sbr = sbr.mode();
+    let what = format!(
+        "xHE-AAC {} at {} kHz{}",
+        if a.stereo { "stereo" } else { "mono" },
+        khz(rate),
+        if sbr == SbrRatio::Auto { String::new() } else { format!(" with SBR ratio {sbr}") }
+    );
+    let kbit = |bytes: usize| bytes as f64 * 8.0 / FRAME_SECONDS / 1000.0;
+    let budget = config.budget().map_err(|e| match config.min_super_frame_bytes() {
+        Some(min) if super_frame_len < min => format!(
+            "{:.1} kbit/s left for the audio stream; {what} needs at least {:.1} kbit/s ({})",
+            kbit(len),
+            kbit(min + text_bytes),
+            stream_remedy(stream)
+        ),
+        _ => format!("{what}: {e}"),
+    })?;
+    if let Some(f) = a.input.tone_hz
+        && f >= f64::from(rate) / 2.0
+    {
+        return Err(format!(
+            "tone_hz {f} is not below {} Hz, half the xHE-AAC sampling rate ({} kHz{}); lower the tone or set \
+             sample_rate",
+            rate / 2,
+            khz(rate),
+            if a.sample_rate.is_none() { ", chosen for the stream's bit rate" } else { "" }
+        ));
+    }
+    let encoder = XheAacEncoder::new(config.clone()).map_err(|e| format!("{what}: {e}"))?;
+    let mode = if a.stereo { AudioMode::Stereo } else { AudioMode::Mono };
+    let params =
+        AudioParams::new(stream.id, AudioCodec::XheAac, false, mode, rate, text, encoder.static_config().to_vec());
+    Ok(AudioPlan {
+        stream: stream.id,
+        codec: Codec::XheAac,
+        core_rate: encoder.core_sample_rate(),
+        stereo: a.stereo,
+        input_rate: rate,
+        input_channels: usize::from(channels),
+        text,
+        frames_per_super_frame: encoder.frames_per_super_frame().ceil() as usize,
+        super_frame_len,
+        payload_len: (budget.net_bitrate * FRAME_SECONDS / 8.0) as usize,
+        encoder_bitrate: budget.net_bitrate as u32,
+        opus_packet_bytes: 0,
+        params,
+        encodec: None,
+        xhe: Some(config),
     })
 }
 
@@ -1090,6 +1249,7 @@ fn encodec_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::r
         opus_packet_bytes: 0,
         params,
         encodec: Some(config),
+        xhe: None,
     })
 }
 

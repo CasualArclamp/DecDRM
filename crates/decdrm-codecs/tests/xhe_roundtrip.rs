@@ -265,38 +265,48 @@ fn run_with(cfg: XheAacConfig, seconds: f64, signal: Programme) -> Outcome {
     };
     let avg_frame_bytes = enc.net_bitrate() / 8.0 * frame as f64 / f64::from(fs) + 4.0;
     for k in 0..n_sf {
-        // Run the encoder ahead of the channel by two frames.
-        let target = sf_samples(k + 1) + 2 * frame;
-        while fed < target {
-            let n = chunk.min(target - fed);
-            let pcm = signal(fs, channels, fed, n);
-            fed += n;
-            for au in enc.encode(&pcm).unwrap() {
-                // Audio of this frame starts at frames_out·frame samples.
-                let sf_of_frame = frames_out * frame * 5 / (2 * fs as usize);
-                o.per_super_frame[sf_of_frame] += au.data.len() + 4;
-                starts.push((pushed, au.bit_reservoir_level, au.independent));
-                framer.push_access_unit(&au.data);
-                pushed += au.data.len() + 2;
-                frames_out += 1;
+        // Run the encoder ahead of the channel by two frames (and further, one frame at
+        // a time, should the queue still not fill the payload: an underrun, which the
+        // checks count as a failure).
+        let mut target = sf_samples(k + 1) + 2 * frame;
+        loop {
+            while fed < target {
+                let n = chunk.min(target - fed);
+                let pcm = signal(fs, channels, fed, n);
+                fed += n;
+                for au in enc.encode(&pcm).unwrap() {
+                    // Audio of this frame starts at frames_out·frame samples.
+                    let sf_of_frame = frames_out * frame * 5 / (2 * fs as usize);
+                    if let Some(b) = o.per_super_frame.get_mut(sf_of_frame) {
+                        *b += au.data.len() + 4;
+                    }
+                    starts.push((pushed, au.bit_reservoir_level, au.independent));
+                    framer.push_access_unit(&au.data, au.bit_reservoir_level);
+                    pushed += au.data.len() + 2;
+                    frames_out += 1;
+                }
             }
+            if framer.ready(l) {
+                break;
+            }
+            o.underruns += 1;
+            target += frame;
         }
-        // Header level: the first frame starting in this super frame's payload, else the
-        // frame in progress (§5.3.1.1). The payload starts at stream offset `sent`.
-        let level = starts
-            .iter()
-            .find(|&&(s, _, _)| s >= sent)
-            .or_else(|| starts.iter().rev().find(|&&(s, _, _)| s < sent))
-            .map_or(0, |&(_, lv, _)| lv);
         let pending = framer.pending_bytes();
-        let sf = framer.next_super_frame(l, level);
+        let sf = framer
+            .next_super_frame(l)
+            .expect("the queue fills the payload");
         assert_eq!(sf.len(), l);
         let count = sf[0] >> 4;
         o.max_borders = o.max_borders.max(count);
         let payload = l - 2 - 2 * usize::from(count);
-        if pending < payload {
-            o.underruns += 1;
-        }
+        // Header level: the first frame starting in this super frame's payload, else the
+        // frame in progress (§5.3.1.1). The payload starts at stream offset `sent`.
+        let level = starts
+            .iter()
+            .find(|&&(s, _, _)| (sent..sent + payload).contains(&s))
+            .or_else(|| starts.iter().rev().find(|&&(s, _, _)| s < sent))
+            .map_or(0, |&(_, lv, _)| lv);
         payloads.push((sent, sent + payload, count));
         sent += payload;
         o.max_pending_after_cut = o.max_pending_after_cut.max(pending.saturating_sub(payload));

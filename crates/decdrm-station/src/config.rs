@@ -331,17 +331,26 @@ impl ServiceSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AudioSettings {
-    /// aac, he-aac (AAC + SBR), he-aac-v2 (AAC + SBR + parametric stereo), opus or
-    /// encodec (DecDRM's experimental neural codec, 24 kHz mono).
+    /// aac, he-aac (AAC + SBR), he-aac-v2 (AAC + SBR + parametric stereo), xhe-aac
+    /// (MPEG-D USAC), opus or encodec (DecDRM's experimental neural codec, 24 kHz mono).
     pub codec: Codec,
     /// AAC core sampling rate: 12000 (5 frames per 400 ms) or 24000 (10 frames).
     /// Default: 24000 for AAC, 12000 for HE-AAC and HE-AAC v2. Not used by Opus
-    /// (48 kHz, 20 frames of 20 ms).
+    /// (48 kHz, 20 frames of 20 ms) or xHE-AAC (see `sample_rate`).
     #[serde(default)]
     pub core_rate: Option<u32>,
-    /// Stereo coding (AAC, HE-AAC, Opus); HE-AAC v2 is always parametric stereo.
+    /// Stereo coding (AAC, HE-AAC, xHE-AAC, Opus); HE-AAC v2 is always parametric stereo.
     #[serde(default)]
     pub stereo: bool,
+    /// xHE-AAC only: sampling rate of the coded audio — the encoder's input and the
+    /// decoder's output (signalled in SDC type 9) — 9600, 12000, 16000, 19200, 24000,
+    /// 32000, 38400 or 48000 Hz. Default: from the stream bit rate, 24 kHz up to
+    /// 24 kbit/s, 32 kHz up to 48 kbit/s, 48 kHz above (see [`crate::plan`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    /// xHE-AAC only: SBR ratio — auto (default), none, 8:3, 2:1 or 4:1 (mono).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sbr_ratio: Option<SbrRatio>,
     /// Where the programme audio comes from.
     pub input: AudioInputSettings,
     /// Text messages (at most 128 bytes of UTF-8 each), sent one after the other.
@@ -377,6 +386,8 @@ impl AudioSettings {
             codec,
             core_rate: None,
             stereo: false,
+            sample_rate: None,
+            sbr_ratio: None,
             input,
             text: Vec::new(),
             share: 1.0,
@@ -737,6 +748,8 @@ pub enum Codec {
     HeAac,
     /// HE-AAC v2: AAC + SBR + parametric stereo.
     HeAacV2,
+    /// xHE-AAC: MPEG-D USAC (ES 201 980 §5.3.1), mono or stereo, from about 5 kbit/s.
+    XheAac,
     /// Opus (Dream's extension; not part of ES 201 980).
     Opus,
     /// EnCodec, Meta's neural codec (DecDRM's experimental extension, 24 kHz mono,
@@ -750,14 +763,16 @@ string_setting!(
         "aac" | "aaclc" | "lc" => Ok(Codec::Aac),
         "heaac" | "heaacv1" | "aacsbr" | "aacplus" => Ok(Codec::HeAac),
         "heaacv2" | "aacps" | "eaacplus" => Ok(Codec::HeAacV2),
+        "xheaac" | "xhe" | "usac" | "xheaacusac" => Ok(Codec::XheAac),
         "opus" => Ok(Codec::Opus),
         "encodec" => Ok(Codec::Encodec),
-        _ => Err(format!("unknown codec \"{s}\" (use aac, he-aac, he-aac-v2, opus or encodec)")),
+        _ => Err(format!("unknown codec \"{s}\" (use aac, he-aac, he-aac-v2, xhe-aac, opus or encodec)")),
     },
     |c: Codec| match c {
         Codec::Aac => "aac",
         Codec::HeAac => "he-aac",
         Codec::HeAacV2 => "he-aac-v2",
+        Codec::XheAac => "xhe-aac",
         Codec::Opus => "opus",
         Codec::Encodec => "encodec",
     }
@@ -770,9 +785,62 @@ impl Codec {
         matches!(self, Codec::Aac | Codec::HeAac | Codec::HeAacV2)
     }
 
-    /// Whether the codec uses SBR.
+    /// Whether the codec uses SBR signalled in SDC type 9 (HE-AAC; xHE-AAC signals its
+    /// SBR in the codec config instead).
     pub fn sbr(self) -> bool {
         matches!(self, Codec::HeAac | Codec::HeAacV2)
+    }
+}
+
+/// SBR ratio of an xHE-AAC service (output rate : core rate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum SbrRatio {
+    /// The encoder's choice for the sampling rate and bit rate
+    /// (`decdrm_codecs::XheAacConfig::sbr_ratio`).
+    #[default]
+    Auto,
+    /// No SBR: the core codes the whole band (sampling rates up to 32 kHz).
+    None,
+    /// 8:3 (a 768-sample core).
+    Ratio8To3,
+    /// 2:1.
+    Ratio2To1,
+    /// 4:1 (mono only; sampling rates from 32 kHz).
+    Ratio4To1,
+}
+
+string_setting!(
+    SbrRatio,
+    |s: &str| match norm(s).as_str() {
+        "auto" | "" => Ok(SbrRatio::Auto),
+        "none" | "no" | "off" | "false" | "11" => Ok(SbrRatio::None),
+        "83" => Ok(SbrRatio::Ratio8To3),
+        "21" => Ok(SbrRatio::Ratio2To1),
+        "41" => Ok(SbrRatio::Ratio4To1),
+        _ => Err(format!("unknown SBR ratio \"{s}\" (use auto, none, 8:3, 2:1 or 4:1)")),
+    },
+    |r: SbrRatio| match r {
+        SbrRatio::Auto => "auto",
+        SbrRatio::None => "none",
+        SbrRatio::Ratio8To3 => "8:3",
+        SbrRatio::Ratio2To1 => "2:1",
+        SbrRatio::Ratio4To1 => "4:1",
+    }
+    .to_string()
+);
+
+impl SbrRatio {
+    /// The encoder setting.
+    pub fn mode(self) -> decdrm_codecs::XheSbrMode {
+        use decdrm_codecs::{XheSbrMode as M, XheSbrRatio as R};
+        match self {
+            SbrRatio::Auto => M::Auto,
+            SbrRatio::None => M::Fixed(R::None),
+            SbrRatio::Ratio8To3 => M::Fixed(R::Ratio8To3),
+            SbrRatio::Ratio2To1 => M::Fixed(R::Ratio2To1),
+            SbrRatio::Ratio4To1 => M::Fixed(R::Ratio4To1),
+        }
     }
 }
 
@@ -976,7 +1044,15 @@ mod tests {
         assert_eq!("HMsym".parse::<MscModeSetting>().unwrap().0, MscMode::Qam64HmSym);
         assert_eq!("he-aac-v2".parse::<Codec>().unwrap(), Codec::HeAacV2);
         assert_eq!("HE AAC".parse::<Codec>().unwrap(), Codec::HeAac);
+        assert_eq!("xHE-AAC".parse::<Codec>().unwrap(), Codec::XheAac);
+        assert_eq!("usac".parse::<Codec>().unwrap(), Codec::XheAac);
+        assert_eq!(Codec::XheAac.to_string(), "xhe-aac");
+        assert!(!Codec::XheAac.is_aac() && !Codec::XheAac.sbr());
         assert!("mp3".parse::<Codec>().unwrap_err().contains("he-aac-v2"));
+        assert_eq!("2:1".parse::<SbrRatio>().unwrap(), SbrRatio::Ratio2To1);
+        assert_eq!("None".parse::<SbrRatio>().unwrap(), SbrRatio::None);
+        assert_eq!(SbrRatio::Ratio8To3.to_string(), "8:3");
+        assert!("3:1".parse::<SbrRatio>().unwrap_err().contains("4:1"));
         assert_eq!(FacLanguage::parse("english").unwrap(), FacLanguage(5));
         assert_eq!(FacLanguage::parse("7").unwrap(), FacLanguage(7));
         assert!(FacLanguage::parse("16").is_err());

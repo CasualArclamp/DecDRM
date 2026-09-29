@@ -43,6 +43,10 @@ pub const OPUS_FRAMES_PER_SUPER_FRAME: usize = 20;
 /// Largest xHE-AAC frame: the 6144-bit bit reservoir per channel (§5.3.1.3) for stereo.
 pub const XHE_AAC_MAX_FRAME_BYTES: usize = 2 * 6144 / 8;
 
+/// Most frame border descriptions in one xHE-AAC directory (§5.3.1: no more than 15
+/// audio frames per audio super frame).
+pub const XHE_AAC_MAX_BORDERS: usize = 15;
+
 /// One coded audio frame, ready for the codec.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioFrame {
@@ -103,6 +107,13 @@ pub enum AudioError {
     PayloadSize { need: usize, have: usize },
     #[error("unsupported audio configuration: {0}")]
     Unsupported(&'static str),
+    /// xHE-AAC transmitter: the queued audio frames do not fill the next payload (the
+    /// encoder must run further ahead of the channel).
+    #[error("xHE-AAC payload of {need} bytes but only {have} bytes of audio frames queued")]
+    XheUnderrun { need: usize, have: usize },
+    /// xHE-AAC transmitter: more frames start in one payload than a directory can list.
+    #[error("more than {max} xHE-AAC frames start in one audio super frame", max = XHE_AAC_MAX_BORDERS)]
+    XheTooManyFrames,
 }
 
 // ---------------------------------------------------------------------------------
@@ -410,17 +421,59 @@ impl XheAacDeframer {
     }
 }
 
-/// xHE-AAC audio super frame builder (transmitter side): queue USAC access units with
-/// [`XheAacFramer::push_access_unit`] and take constant-size super frames with
-/// [`XheAacFramer::next_super_frame`].
+/// Shortest and longest xHE-AAC audio super frame [`XheAacFramer`] builds. The upper
+/// limit keeps every payload index below the special values 0xFFE/0xFFF of the 12-bit
+/// frame border index; it is the spec's maximum anyway (163 920 bit/s in robustness mode
+/// E, whose super frames last 200 ms: 4 098 bytes).
+const XHE_FRAMER_LEN: std::ops::RangeInclusive<usize> = 8..=4098;
+
+/// xHE-AAC audio super frame builder (transmitter side, §5.3.1).
+///
+/// Queue the encoder's USAC access units with their bit reservoir levels
+/// ([`XheAacFramer::push_access_unit`]) and take one super frame of constant size per
+/// logical frame ([`XheAacFramer::next_super_frame`]):
+///
+/// * **Header level** (§5.3.1.1): the bit reservoir level of the first frame that starts
+///   in the payload, or — when none does — of the frame in progress. A frame that starts
+///   in the last two payload bytes counts as starting in that super frame although its
+///   border is only signalled in the next one (0xFFE/0xFFF, §5.3.1.3).
+/// * **No padding.** The payload is taken from queued frames only: padding bytes would
+///   become part of the frame in progress and break its CRC, and §5.3.1.3 puts padding
+///   inside the access units (the encoder's fill element). The transmitter therefore runs
+///   the encoder ahead of the channel — `decdrm_codecs::XheAacEncoder` keeps its output at
+///   or above the channel rate, so encoding the audio up to the end of the super frame
+///   plus two frames is enough — and [`XheAacFramer::ready`] tells whether the queue
+///   fills the next payload. If it does not, `next_super_frame` fails with
+///   [`AudioError::XheUnderrun`].
+/// * **At most [`XHE_AAC_MAX_BORDERS`] borders per directory.** More frame starts in one
+///   payload fail with [`AudioError::XheTooManyFrames`]; the encoder rules them out with
+///   frames (access unit plus CRC) of at least ⌈len/15⌉ bytes.
+///
+/// A failed call changes nothing. Super frames are 8 to 4 098 bytes long.
 #[derive(Debug, Clone, Default)]
 pub struct XheAacFramer {
-    /// Audio frame bytes not yet placed into a super frame.
+    /// Audio frame bytes (access units + CRCs) not yet placed into a super frame.
     pending: Vec<u8>,
-    /// Positions (in `pending`) of frame starts not yet signalled.
-    starts: Vec<usize>,
+    /// Frame starts not yet signalled: position in `pending` and the frame's bit
+    /// reservoir level.
+    starts: Vec<(usize, u8)>,
     /// Border that did not fit into the previous directory (0xFFE or 0xFFF).
     delayed: Option<u16>,
+    /// Bit reservoir level of the frame in progress at the start of `pending` (the last
+    /// frame that started in an earlier payload).
+    current_level: u8,
+}
+
+/// How the queue maps onto the next xHE-AAC super frame.
+#[derive(Debug, Clone, Copy)]
+struct XheLayout {
+    /// Frame starts listed in the directory (besides a delayed border).
+    signalled: usize,
+    /// Frame border count: directory elements.
+    count: usize,
+    payload_len: usize,
+    /// A start in the last two payload bytes, signalled in the next directory.
+    next_delayed: Option<u16>,
 }
 
 impl XheAacFramer {
@@ -428,9 +481,11 @@ impl XheAacFramer {
         Self::default()
     }
 
-    /// Queue one USAC access unit; its audio frame CRC-16 is appended here.
-    pub fn push_access_unit(&mut self, au: &[u8]) {
-        self.starts.push(self.pending.len());
+    /// Queue one USAC access unit together with the encoder's bit reservoir level after
+    /// encoding it (the 4-bit header value, §5.3.1.3); the audio frame CRC-16 is appended
+    /// here.
+    pub fn push_access_unit(&mut self, au: &[u8], bit_reservoir_level: u8) {
+        self.starts.push((self.pending.len(), bit_reservoir_level & 0x0F));
         self.pending.extend_from_slice(au);
         self.pending.extend_from_slice(&crc16(au).to_be_bytes());
     }
@@ -440,55 +495,83 @@ impl XheAacFramer {
         self.pending.len()
     }
 
-    /// Build the next super frame of `len` bytes. The payload is filled from the queue
-    /// (with zeros if the encoder delivered too little). At most 15 borders fit into a
-    /// directory (§5.3.1.0); the encoder must not start more frames than that.
-    pub fn next_super_frame(&mut self, len: usize, bit_reservoir_level: u8) -> Vec<u8> {
+    /// Whether the queued frames fill the payload of the next super frame of `len` bytes.
+    pub fn ready(&self, len: usize) -> bool {
+        self.pending.len() >= self.layout(len).payload_len
+    }
+
+    fn layout(&self, len: usize) -> XheLayout {
         let delayed = usize::from(self.delayed.is_some());
-        let payload_for = |entries: usize| len.saturating_sub(2 + 2 * entries);
-        // Signal every frame start of which at least one byte fits into the payload
-        // that remains once its directory entry is added.
+        let payload_for = |elements: usize| len.saturating_sub(2 + 2 * elements);
+        // Signal every frame start of which at least one byte fits into the payload that
+        // remains once its directory element is added (§5.3.1.3).
         let mut m = 0;
-        while delayed + m < 15 && self.starts.get(m).is_some_and(|&s| s < payload_for(delayed + m + 1)) {
+        while delayed + m < XHE_AAC_MAX_BORDERS
+            && self.starts.get(m).is_some_and(|&(s, _)| s < payload_for(delayed + m + 1))
+        {
             m += 1;
         }
         let count = delayed + m;
         let payload_len = payload_for(count);
-        // A start inside this payload whose entry did not fit is delayed to the next
-        // super frame (it lies in the last two payload bytes). With a full directory a
-        // start further inside cannot be signalled at all.
+        // A start in this payload whose element does not fit lies in its last two bytes:
+        // the next directory signals it.
         let next_delayed = match self.starts.get(m) {
-            Some(&s) if s < payload_len => match payload_len - s {
+            Some(&(s, _)) if s < payload_len => match payload_len - s {
                 1 => Some(0xFFF),
                 2 => Some(0xFFE),
                 _ => None,
             },
             _ => None,
         };
+        XheLayout { signalled: m, count, payload_len, next_delayed }
+    }
 
-        let b0 = ((count as u8) << 4) | (bit_reservoir_level & 0x0F);
-        let mut sf = vec![b0, crc8(&[b0])];
-        let take = payload_len.min(self.pending.len());
-        sf.extend_from_slice(&self.pending[..take]);
-        sf.resize(2 + payload_len, 0);
-        // Border 0 (the delayed one, if any) is the last directory element.
-        let mut borders: Vec<u16> = self.delayed.iter().copied().collect();
-        borders.extend(self.starts[..m].iter().map(|&s| s as u16));
-        for &b in borders.iter().rev() {
-            sf.extend_from_slice(&((b << 4) | count as u16).to_be_bytes());
+    /// Build the next super frame of `len` bytes (see the type docs). Fails, changing
+    /// nothing, when the queue does not fill the payload, when more frames start in it
+    /// than a directory can list, or for a length outside 8–4 098 bytes.
+    pub fn next_super_frame(&mut self, len: usize) -> Result<Vec<u8>, AudioError> {
+        if len < *XHE_FRAMER_LEN.start() {
+            return Err(AudioError::TooShort(len));
         }
-        sf.resize(len, 0);
+        if len > *XHE_FRAMER_LEN.end() {
+            return Err(AudioError::Unsupported("xHE-AAC audio super frame longer than 4098 bytes"));
+        }
+        let XheLayout { signalled, count, payload_len, next_delayed } = self.layout(len);
+        if self.pending.len() < payload_len {
+            return Err(AudioError::XheUnderrun { need: payload_len, have: self.pending.len() });
+        }
+        // Every start in the payload must be signalled now or in the next directory.
+        let in_payload = self.starts.iter().take_while(|&&(s, _)| s < payload_len).count();
+        if in_payload > signalled + usize::from(next_delayed.is_some()) {
+            return Err(AudioError::XheTooManyFrames);
+        }
+        let level = match self.starts.first() {
+            Some(&(s, level)) if s < payload_len => level,
+            _ => self.current_level,
+        };
 
-        self.pending.drain(..take);
-        let used = m + usize::from(next_delayed.is_some());
-        self.starts.drain(..used.min(self.starts.len()));
-        // Starts that were in this payload but could not be signalled are lost.
-        self.starts.retain(|&s| s >= payload_len);
-        for s in &mut self.starts {
+        let b0 = ((count as u8) << 4) | level;
+        let mut sf = Vec::with_capacity(len);
+        sf.extend_from_slice(&[b0, crc8(&[b0])]);
+        sf.extend_from_slice(&self.pending[..payload_len]);
+        // Border 0 (the delayed one, if any) is the last directory element.
+        let borders = self.delayed.into_iter().chain(self.starts[..signalled].iter().map(|&(s, _)| s as u16));
+        let elements: Vec<u16> = borders.map(|b| (b << 4) | count as u16).collect();
+        for e in elements.iter().rev() {
+            sf.extend_from_slice(&e.to_be_bytes());
+        }
+        debug_assert_eq!(sf.len(), len);
+
+        if let Some(&(_, level)) = self.starts[..in_payload].last() {
+            self.current_level = level;
+        }
+        self.pending.drain(..payload_len);
+        self.starts.drain(..in_payload);
+        for (s, _) in &mut self.starts {
             *s -= payload_len;
         }
         self.delayed = next_delayed;
-        sf
+        Ok(sf)
     }
 }
 
@@ -708,27 +791,44 @@ mod tests {
         assert_eq!(out.nominal_frames, Some(20));
     }
 
+    /// The header level §5.3.1.1 asks for, from the stream offsets of the frame starts
+    /// (offset, level) and the payload `[from, to)` in the same byte stream: the first
+    /// frame starting in the payload, else the frame in progress.
+    fn expected_level(starts: &[(usize, u8)], from: usize, to: usize) -> u8 {
+        let first = starts.iter().find(|&&(s, _)| (from..to).contains(&s));
+        let running = starts.iter().rev().find(|&&(s, _)| s < from);
+        first.or(running).map_or(0, |&(_, level)| level)
+    }
+
     #[test]
     fn xhe_roundtrip_with_carry_over() {
-        // Frames of irregular sizes, super frames of 150 bytes: frames span super
-        // frames, and borders fall into the last payload bytes (0xFFE / 0xFFF).
+        // Frames of irregular sizes, super frames of 150 bytes and less: frames span
+        // super frames, and borders fall into the last payload bytes (0xFFE / 0xFFF).
         for sf_len in [150usize, 97, 61, 400] {
             let aus: Vec<Vec<u8>> = (0..300).map(|i| pseudo(20 + (i * 7919) % 130, i as u32)).collect();
+            let level = |i: usize| (i * 7 % 16) as u8;
             let mut framer = XheAacFramer::new();
             let mut deframer = XheAacDeframer::new();
             let mut got = Vec::new();
             let mut delayed_seen = 0;
             let mut next_au = 0;
-            for k in 0..400 {
+            // Stream offset of every frame start, and of the next payload.
+            let mut starts = Vec::new();
+            let (mut pushed, mut sent) = (0, 0);
+            for _ in 0..400 {
                 // Keep the encoder a little ahead of the framer.
                 while framer.pending_bytes() < 2 * sf_len && next_au < aus.len() {
-                    framer.push_access_unit(&aus[next_au]);
+                    framer.push_access_unit(&aus[next_au], level(next_au));
+                    starts.push((pushed, level(next_au)));
+                    pushed += aus[next_au].len() + 2;
                     next_au += 1;
                 }
-                if framer.pending_bytes() < sf_len {
+                if !framer.ready(sf_len) {
+                    assert_eq!(next_au, aus.len(), "ready once the queue holds a super frame");
+                    assert!(matches!(framer.next_super_frame(sf_len), Err(AudioError::XheUnderrun { .. })));
                     break;
                 }
-                let sf = framer.next_super_frame(sf_len, (k % 16) as u8);
+                let sf = framer.next_super_frame(sf_len).unwrap();
                 assert_eq!(sf.len(), sf_len);
                 let n = usize::from(sf[0] >> 4);
                 if n > 0 && u16::from_be_bytes([sf[sf_len - 2], sf[sf_len - 1]]) >> 4 >= 0xFFE {
@@ -736,7 +836,9 @@ mod tests {
                 }
                 let (h, frames) = deframer.push(&sf).unwrap();
                 assert!(h.header_crc_ok);
-                assert_eq!(h.bit_reservoir_level, (k % 16) as u8);
+                let payload = sf_len - 2 - 2 * n;
+                assert_eq!(h.bit_reservoir_level, expected_level(&starts, sent, sent + payload), "at {sent}");
+                sent += payload;
                 got.extend(frames);
             }
             // The first frame is complete too because the deframer saw it from the start.
@@ -751,14 +853,98 @@ mod tests {
         }
     }
 
+    /// The framer never pads: a short queue is an error that changes nothing, and so is
+    /// a payload with more frame starts than a directory can list.
+    #[test]
+    fn xhe_framer_refuses_to_pad_or_overfill() {
+        let mut framer = XheAacFramer::new();
+        assert!(!framer.ready(100));
+        assert_eq!(framer.next_super_frame(100), Err(AudioError::XheUnderrun { need: 98, have: 0 }));
+        framer.push_access_unit(&[5; 48], 5);
+        // One frame start: 2 header bytes, one directory element, 96 payload bytes.
+        assert!(!framer.ready(100));
+        assert_eq!(framer.next_super_frame(100), Err(AudioError::XheUnderrun { need: 96, have: 50 }));
+        assert_eq!(framer.pending_bytes(), 50, "a failed call changes nothing");
+        framer.push_access_unit(&[7; 48], 7);
+        framer.push_access_unit(&[9; 48], 9);
+        assert!(framer.ready(100));
+        let sf = framer.next_super_frame(100).unwrap();
+        assert_eq!((sf[0] >> 4, sf[0] & 15), (2, 5), "two borders (0 and 50), level of the first frame");
+        assert!(matches!(framer.next_super_frame(4), Err(AudioError::TooShort(4))));
+        assert!(matches!(framer.next_super_frame(5000), Err(AudioError::Unsupported(_))));
+
+        // Sixteen 3-byte frames (one-byte access units) start in one 100-byte payload.
+        let mut framer = XheAacFramer::new();
+        for _ in 0..16 {
+            framer.push_access_unit(&[1], 0);
+        }
+        framer.push_access_unit(&[0; 100], 0);
+        assert!(framer.ready(100));
+        assert_eq!(framer.next_super_frame(100), Err(AudioError::XheTooManyFrames));
+        assert_eq!(framer.pending_bytes(), 16 * 3 + 102);
+        // Fifteen fit: fourteen small frames and a large one reaching beyond the payload.
+        let mut framer = XheAacFramer::new();
+        for _ in 0..14 {
+            framer.push_access_unit(&[1], 0);
+        }
+        framer.push_access_unit(&[0; 100], 0);
+        let sf = framer.next_super_frame(100).unwrap();
+        assert_eq!(sf[0] >> 4, 15);
+        let (_, frames) = XheAacDeframer::new().push(&sf).unwrap();
+        assert_eq!(frames.len(), 14, "the 15th frame is still in progress");
+    }
+
+    /// §5.3.1.1: the header carries the level of the first frame starting in the payload
+    /// — also one whose border is delayed to the next super frame — or else of the frame
+    /// in progress, which may be the one of a delayed border.
+    #[test]
+    fn xhe_header_level_rules() {
+        // Frames (access unit + CRC) A 0..20, B 20..50, C 50..72, D 72..77, E 77..109 of
+        // the payload byte stream, with levels 1, 4, 9, 12, 2.
+        let mut framer = XheAacFramer::new();
+        for (i, (au_len, level)) in [(18, 1), (28, 4), (20, 9), (3, 12), (30, 2)].into_iter().enumerate() {
+            framer.push_access_unit(&pseudo(au_len, i as u32), level);
+        }
+        let mut deframer = XheAacDeframer::new();
+        let mut decoded = Vec::new();
+        // 16-byte super frames: 14 payload bytes without a border, 12 with one.
+        let mut next = |framer: &mut XheAacFramer| {
+            let sf = framer.next_super_frame(16).unwrap();
+            let (h, frames) = deframer.push(&sf).unwrap();
+            let delayed = h.frame_border_count > 0 && u16::from_be_bytes([sf[14], sf[15]]) >> 4 >= 0xFFE;
+            decoded.extend(frames.iter().map(|f| f.data.len()));
+            (h.frame_border_count, h.bit_reservoir_level, delayed)
+        };
+        // Payload 0..12: A starts in it.
+        assert_eq!(next(&mut framer), (1, 1, false));
+        // 12..24: B starts at 20 while A is in progress: B's level.
+        assert_eq!(next(&mut framer), (1, 4, false));
+        // 24..38: no start, B in progress.
+        assert_eq!(next(&mut framer), (0, 4, false));
+        // 38..52: C starts at 50, in the last two bytes — its border is delayed, but it
+        // starts here, so the level is C's.
+        assert_eq!(next(&mut framer), (0, 9, false));
+        // 52..64: the delayed border (0xFFE) ends B; no start of its own: C, in progress.
+        assert_eq!(next(&mut framer), (1, 9, true));
+        // 64..76: D starts at 72 while C is in progress.
+        assert_eq!(next(&mut framer), (1, 12, false));
+        // 76..88: E starts at 77.
+        assert_eq!(next(&mut framer), (1, 2, false));
+        // 88..102: E in progress; then only 7 bytes are left.
+        assert_eq!(next(&mut framer), (0, 2, false));
+        assert!(!framer.ready(16));
+        assert_eq!(framer.next_super_frame(16), Err(AudioError::XheUnderrun { need: 14, have: 7 }));
+        assert_eq!(decoded, [20, 30, 22, 5], "A, B, C, D complete, E in progress");
+    }
+
     #[test]
     fn xhe_tune_in_mid_stream_and_errors() {
         let aus: Vec<Vec<u8>> = (0..60).map(|i| pseudo(30 + (i * 37) % 50, 100 + i as u32)).collect();
         let mut framer = XheAacFramer::new();
         for au in &aus {
-            framer.push_access_unit(au);
+            framer.push_access_unit(au, 3);
         }
-        let sfs: Vec<Vec<u8>> = (0..12).map(|_| framer.next_super_frame(120, 3)).collect();
+        let sfs: Vec<Vec<u8>> = (0..12).map(|_| framer.next_super_frame(120).unwrap()).collect();
         // Start at the third super frame: the first (partial) frame is dropped, all
         // following frames are complete and correct.
         let mut d = XheAacDeframer::new();
@@ -790,10 +976,10 @@ mod tests {
     #[test]
     fn xhe_header_crc_fallback() {
         let mut framer = XheAacFramer::new();
-        framer.push_access_unit(&[1, 2, 3, 4, 5, 6, 7, 8]);
-        framer.push_access_unit(&[9; 20]);
-        framer.push_access_unit(&[7; 20]);
-        let mut sf = framer.next_super_frame(40, 1);
+        framer.push_access_unit(&[1, 2, 3, 4, 5, 6, 7, 8], 1);
+        framer.push_access_unit(&[9; 20], 2);
+        framer.push_access_unit(&[7; 20], 3);
+        let mut sf = framer.next_super_frame(40).unwrap();
         let count = sf[0] >> 4;
         sf[1] ^= 0xFF; // break the header CRC; the directory still gives the count
         let mut d = XheAacDeframer::new();
