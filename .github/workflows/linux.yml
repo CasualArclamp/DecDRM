@@ -1,0 +1,27 @@
+# Linux build and test. Manual trigger only (Actions → "Linux" → Run workflow, or
+# `gh workflow run linux.yml`), so pushes do not use Actions minutes.
+name: Linux
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: System packages (ALSA headers for cpal, CMake for libopus)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config cmake
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --release --all-targets
+      - name: Test
+        run: cargo test --workspace --release
+      - name: Clippy
+        run: cargo clippy --workspace --release --all-targets -- -D clippy::correctness
