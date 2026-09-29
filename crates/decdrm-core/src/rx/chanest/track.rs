@@ -88,6 +88,8 @@ pub struct PdsTracker {
     pub avg_pds: Vec<Real>,
     rotated: Vec<Real>,
     scratch: Vec<Real>,
+    spec_a: Vec<Cplx>,
+    spec_b: Vec<Cplx>,
     lambda: Real,
     guard_ir: Real,
     st_po_rot: usize,
@@ -148,6 +150,8 @@ impl PdsTracker {
             avg_pds: vec![0.0; num_pil],
             rotated: vec![0.0; num_pil],
             scratch: vec![0.0; num_pil],
+            spec_a: Vec::with_capacity(num_pil),
+            spec_b: Vec::with_capacity(num_pil),
             lambda: iir1_lambda(TICONST_PDS, sym_rate),
             guard_ir,
             st_po_rot,
@@ -257,7 +261,14 @@ impl PdsTracker {
             self.xc_count = 0;
             match &mut self.xc_ref {
                 Some((prev, prev_pos)) => {
-                    let s = profile_shift(prev, &self.rotated, SRO_MAX_STEP_BINS);
+                    let s = profile_shift(
+                        prev,
+                        &self.rotated,
+                        SRO_MAX_STEP_BINS,
+                        &mut self.fft,
+                        &mut self.spec_a,
+                        &mut self.spec_b,
+                    );
                     self.drift.push_back((s + frame_pos - *prev_pos, self.applied_hz));
                     if self.drift.len() > self.drift_max {
                         self.drift.pop_front();
@@ -408,53 +419,109 @@ fn median(v: &[Real]) -> Real {
 }
 
 /// Shift `s` (IR bins, with sub-bin precision) that best aligns `cur` with `prev`,
-/// i.e. `cur(i + s) ≈ prev(i)`, searched within ±`max`: circular cross-correlation of
-/// the mean-removed profiles plus a parabolic fit around its maximum. A translation of
-/// the whole profile (clock drift, timing change) moves the maximum; fading that
-/// changes the relative power of paths at fixed delays hardly does.
-fn profile_shift(prev: &[Real], cur: &[Real], max: usize) -> Real {
+/// i.e. `cur(i + s) ≈ prev(i)`, searched within ±`max`.
+///
+/// The integer part is the maximum of the circular cross-correlation of the
+/// mean-removed profiles. For the fraction, two estimates:
+/// * the slope of the cross-spectrum phase (Fourier shift theorem:
+///   `conj(P_k)·C_k ∝ e^{-j2πks/n}`), a weighted least-squares fit over the lowest
+///   eighth of the bins — unbiased for a translation, but it follows the power
+///   centroid when resolved paths change power;
+/// * a parabola through the correlation peak — robust to such power changes (the
+///   peak is each path aligned with itself) but it reads small shifts up to 50 %
+///   short.
+///
+/// A translation makes the cross-spectrum phase linear in k, a power change of
+/// resolved paths does not, so the phase estimate is used when its fit residual is
+/// small and the parabola otherwise. (Paths closer than the lobe width cannot be told
+/// from a translation by any estimator; the median over many steps handles them.)
+fn profile_shift(prev: &[Real], cur: &[Real], max: usize, fft: &mut Fft, a: &mut Vec<Cplx>, b: &mut Vec<Cplx>) -> Real {
+    /// Largest weighted RMS phase residual (rad) of a translation.
+    const MAX_PHASE_RESIDUAL: Real = 0.04;
     let n = prev.len();
-    if n < 3 || cur.len() != n {
+    if n < 8 || cur.len() != n || fft.len() != n {
         return 0.0;
     }
     let mean = |v: &[Real]| v.iter().sum::<Real>() / n as Real;
     let (mp, mc) = (mean(prev), mean(cur));
-    let m = max.min(n / 2 - 1) as isize;
-    let corr: Vec<Real> = (-m..=m)
-        .map(|s| {
-            (0..n)
-                .map(|i| (prev[i] - mp) * (cur[(i as isize + s).rem_euclid(n as isize) as usize] - mc))
-                .sum::<Real>()
+    let m = max.min(n / 2 - 2) as isize;
+    let at = |i: usize, s: isize| cur[(i as isize + s).rem_euclid(n as isize) as usize];
+    let corr = |s: isize| (0..n).map(|i| (prev[i] - mp) * (at(i, s) - mc)).sum::<Real>();
+    let Some(k0) = (-m..=m).max_by(|&x, &y| corr(x).total_cmp(&corr(y))) else { return 0.0 };
+
+    // Parabola through the correlation peak.
+    let (y0, y1, y2) = (corr(k0 - 1), corr(k0), corr(k0 + 1));
+    let den = y0 - 2.0 * y1 + y2;
+    let parabola = if den < 0.0 { (0.5 * (y0 - y2) / den).clamp(-0.5, 0.5) } else { 0.0 };
+
+    // Phase slope of the cross-spectrum, with `cur` moved back by the integer part.
+    a.clear();
+    a.extend(prev.iter().map(|&v| Cplx::new(v, 0.0)));
+    b.clear();
+    b.extend((0..n).map(|i| Cplx::new(at(i, k0), 0.0)));
+    fft.forward(a);
+    fft.forward(b);
+    let bins = 1..=(n / 8).max(2);
+    let (mut num, mut den, mut wsum) = (0.0, 0.0, 0.0);
+    for k in bins.clone() {
+        let c = a[k].conj() * b[k];
+        let (w, kf) = (c.norm(), k as Real);
+        num += w * kf * c.arg();
+        den += w * kf * kf;
+        wsum += w;
+    }
+    if den <= 0.0 {
+        return k0 as Real + parabola;
+    }
+    let slope = num / den;
+    let resid2: Real = bins
+        .map(|k| {
+            let c = a[k].conj() * b[k];
+            c.norm() * (c.arg() - slope * k as Real).powi(2)
         })
-        .collect();
-    let Some((best, _)) = corr.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)) else { return 0.0 };
-    let frac = if best > 0 && best + 1 < corr.len() {
-        let (a, b, c) = (corr[best - 1], corr[best], corr[best + 1]);
-        let den = a - 2.0 * b + c;
-        if den < 0.0 { (0.5 * (a - c) / den).clamp(-0.5, 0.5) } else { 0.0 }
-    } else {
-        0.0
-    };
-    best as Real - m as Real + frac
+        .sum::<Real>()
+        / wsum;
+    let phase = (-slope * n as Real / (2.0 * std::f64::consts::PI)).clamp(-1.0, 1.0);
+    k0 as Real + if resid2.sqrt() < MAX_PHASE_RESIDUAL { phase } else { parabola }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Two paths (Hamming-like lobes) at `a` and `a + d` with powers `pa`, `pb`.
-    fn profile(n: usize, a: Real, d: Real, pa: Real, pb: Real) -> Vec<Real> {
-        let lobe = |x: Real| if x.abs() < 2.0 { (0.54 + 0.46 * (std::f64::consts::PI * x / 2.0).cos()).powi(2) } else { 0.0 };
-        (0..n).map(|i| 1e-3 + pa * lobe(i as Real - a) + pb * lobe(i as Real - a - d)).collect()
+    /// Power delay profile of paths (delay in bins, amplitude) as the tracker computes
+    /// it: |IFFT(Hamming · H)|² over `n` pilot-grid carriers.
+    fn ir_profile(n: usize, paths: &[(Real, Real)]) -> Vec<Real> {
+        let mut fft = Fft::new(n);
+        let w = hamming(n);
+        let mut v: Vec<Cplx> = (0..n)
+            .map(|k| {
+                let h: Cplx = paths
+                    .iter()
+                    .map(|&(d, a)| Cplx::from_polar(a, -2.0 * std::f64::consts::PI * k as Real * d / n as Real))
+                    .sum();
+                h * w[k]
+            })
+            .collect();
+        fft.inverse(&mut v);
+        v.iter().map(|c| c.norm_sqr()).collect()
+    }
+
+    fn shift(prev: &[Real], cur: &[Real]) -> Real {
+        let mut fft = Fft::new(prev.len());
+        profile_shift(prev, cur, 3, &mut fft, &mut Vec::new(), &mut Vec::new())
     }
 
     #[test]
     fn shift_follows_translation() {
-        for true_shift in [-2.3, -0.4, 0.0, 0.15, 1.7] {
-            let prev = profile(64, 20.0, 6.0, 1.0, 0.5);
-            let cur = profile(64, 20.0 + true_shift, 6.0, 1.0, 0.5);
-            let s = profile_shift(&prev, &cur, 3);
-            assert!((s - true_shift).abs() < 0.15, "shift {true_shift}: measured {s}");
+        for base in [10.0, 10.3, 10.5] {
+            for true_shift in [-2.3, -0.4, -0.02, 0.0, 0.01, 0.05, 0.15, 1.7] {
+                let prev = ir_profile(104, &[(base, 1.0), (base + 6.0, 0.5)]);
+                let cur = ir_profile(104, &[(base + true_shift, 1.0), (base + 6.0 + true_shift, 0.5)]);
+                let s = shift(&prev, &cur);
+                let tol = 0.003 + 0.03 * true_shift.abs();
+                assert!((s - true_shift).abs() < tol, "base {base} shift {true_shift}: measured {s}");
+            }
         }
     }
 
@@ -464,9 +531,9 @@ mod tests {
         // by 5 bins, the profile does not move. (Unresolved paths, closer than the
         // lobe width, cannot be told from a translation; the median over many steps
         // takes care of those.)
-        let prev = profile(64, 20.0, 5.0, 1.0, 0.6);
-        let cur = profile(64, 20.0, 5.0, 0.6, 1.0);
-        let s = profile_shift(&prev, &cur, 3);
+        let prev = ir_profile(104, &[(20.0, 1.0), (25.0, 0.6)]);
+        let cur = ir_profile(104, &[(20.0, 0.6), (25.0, 1.0)]);
+        let s = shift(&prev, &cur);
         assert!(s.abs() < 0.3, "measured {s}");
     }
 
