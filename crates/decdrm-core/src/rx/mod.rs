@@ -39,6 +39,15 @@ use timesync::{TimeSync, TimeSyncEvent};
 
 /// Symbols of time sync without a valid FAC before restarting acquisition.
 const MAX_SYMBOLS_WITHOUT_FAC: usize = 150;
+/// A frequency acquisition that no FAC has confirmed yet is dropped at once when the
+/// input power rises this many times (10 dB) above its level during the search: the
+/// detection predates the signal. A virtual audio cable, for instance, carries the
+/// ±1 LSB dither of an idle player before the SDR audio starts, and that dither's
+/// spectral lines can pass the pilot test; without this the receiver would wait
+/// `MAX_SYMBOLS_WITHOUT_FAC` symbols (4 s in mode B) on the wrong frequency.
+const ACQ_POWER_JUMP: Real = 10.0;
+/// The rise must last this long, s (a click is not a signal).
+const ACQ_POWER_JUMP_S: Real = 0.05;
 /// Consecutive bad FACs (while locked) before restarting acquisition.
 const MAX_BAD_FACS_LOCKED: usize = 10;
 /// Timing-loss detection from the cyclic-prefix correlation (a timing jump, e.g.
@@ -227,6 +236,10 @@ pub struct Receiver {
     sro_hz: Real,
     res: Vec<Cplx>,
     acq: Option<FreqAcquisition>,
+    /// Input power during the frequency search, while no FAC has confirmed it.
+    acq_power: Option<Real>,
+    /// Input samples in a row (whole chunks) above `ACQ_POWER_JUMP` × `acq_power`.
+    loud_samples: usize,
     pending: Vec<Cplx>,
     conj: bool,
     dc_hz: Real,
@@ -261,6 +274,8 @@ impl Receiver {
         let mode = RobustnessMode::B;
         Self {
             acq: Some(FreqAcquisition::new(real, cfg.auto_flip)),
+            acq_power: None,
+            loud_samples: 0,
             input,
             conv: Vec::new(),
             resampler: FracResampler::new(),
@@ -341,6 +356,8 @@ impl Receiver {
     pub fn restart(&mut self) {
         let real = self.input.is_real();
         self.acq = Some(FreqAcquisition::new(real, self.cfg.auto_flip));
+        self.acq_power = None;
+        self.loud_samples = 0;
         self.pending.clear();
         self.conj = false;
         self.track_hz = 0.0;
@@ -390,6 +407,12 @@ impl Receiver {
         let ratio = fs / (fs - sro);
         self.resampler.process(&self.conv, ratio, &mut self.res);
         let samples = std::mem::take(&mut self.res);
+        if let Some(p0) = self.acq_power
+            && !samples.is_empty()
+        {
+            let p = samples.iter().map(|s| s.norm_sqr()).sum::<Real>() / samples.len() as Real;
+            self.loud_samples = if p > ACQ_POWER_JUMP * p0 { self.loud_samples + samples.len() } else { 0 };
+        }
 
         if let Some(acq) = self.acq.as_mut() {
             self.pending.extend_from_slice(&samples);
@@ -406,12 +429,18 @@ impl Receiver {
                 self.dc_hz = if a.inverted { -a.dc_hz } else { a.dc_hz };
                 self.track_hz = 0.0;
                 self.events.push(ReceiverEvent::SignalFound { dc_hz: a.dc_hz, inverted: a.inverted });
+                self.acq_power = Some(a.power);
+                self.loud_samples = 0;
                 self.status.inverted = a.inverted;
                 let pending = std::mem::take(&mut self.pending);
                 self.feed_baseband(&pending);
             }
         } else {
             self.feed_baseband(&samples);
+        }
+        if self.acq_power.is_some() && self.loud_samples as Real >= ACQ_POWER_JUMP_S * fs {
+            self.restart();
+            self.events.push(ReceiverEvent::Restarted);
         }
         self.res = samples;
         self.status.sro_hz = self.sro_hz;
@@ -569,6 +598,7 @@ impl Receiver {
 
     fn on_good_fac(&mut self) {
         self.bad_facs = 0;
+        self.acq_power = None;
         if self.state == RxState::Acquisition {
             self.state = RxState::Tracking;
             self.symbols_without_fac = 0;

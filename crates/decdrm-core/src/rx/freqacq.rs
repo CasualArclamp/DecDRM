@@ -45,12 +45,16 @@ pub struct Acquisition {
     pub inverted: bool,
     /// Detection metric (sum of normalised pilot powers).
     pub score: Real,
+    /// Mean input power over the analysed span (window-weighted), |sample|².
+    pub power: Real,
 }
 
 #[derive(Debug)]
 pub struct FreqAcquisition {
     fft: Fft,
     window: Vec<Real>,
+    /// Σ window², for the input power.
+    window_energy: Real,
     /// Most recent FFT_LEN samples.
     history: VecDeque<Cplx>,
     since_last: usize,
@@ -74,9 +78,11 @@ impl FreqAcquisition {
         } else {
             SearchWindow { min_hz: -fs / 2.0 + top, max_hz: fs / 2.0 - top }
         };
+        let window = hamming(FFT_LEN);
         Self {
             fft: Fft::new(FFT_LEN),
-            window: hamming(FFT_LEN),
+            window_energy: window.iter().map(|w| w * w).sum(),
+            window,
             history: VecDeque::with_capacity(FFT_LEN),
             since_last: 0,
             psds: VecDeque::with_capacity(NUM_AVERAGE),
@@ -196,10 +202,13 @@ impl FreqAcquisition {
             }
         }
         self.last_normalised = norm;
+        // Parseval: Σ|X|² = N·Σ|x·w|².
+        let power = psd.iter().sum::<Real>() / (n as Real * self.window_energy);
         best.map(|(d, inv, score)| Acquisition {
             dc_hz: (d as isize - half) as Real * bin_hz,
             inverted: inv,
             score,
+            power,
         })
     }
 }

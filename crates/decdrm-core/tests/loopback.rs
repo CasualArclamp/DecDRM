@@ -799,3 +799,67 @@ fn fast_mode_a_so0_acquisition() {
     // 2.4 s = the FAC decoded while the sixth frame is pushed.
     assert!(frames.iter().all(|f| f.is_some_and(|f| f < 6)), "first FAC after (s): {}", times.join(" "));
 }
+
+/// A virtual audio cable carries the ±1 LSB dither of an idle player until the SDR
+/// audio starts, and the dither's spectral lines can pass the pilot test of the
+/// frequency search (seen live: a false DC carrier at 13914 Hz, then 4 s until the
+/// no-FAC timeout restarted the search). The receiver now drops an acquisition that
+/// no FAC has confirmed as soon as the input power rises by 10 dB. Here a faint fake
+/// pilot pattern (DC 5 kHz, −100 dBFS) precedes the real signal (DC 12 kHz).
+#[test]
+fn acquisition_dropped_when_a_signal_appears() {
+    let fs = Real::from(SAMPLE_RATE);
+    let mut rx = receiver_for(Link::RealIf);
+    let mut rng = Rng::new(11);
+    let mut found: Vec<(Real, Real)> = Vec::new();
+    let mut restarts: Vec<Real> = Vec::new();
+    let mut first_fac: Option<Real> = None;
+    let mut pushed = 0usize;
+    let mut feed = |rx: &mut Receiver, pcm: &[f32], pushed: &mut usize| {
+        *pushed += pcm.len();
+        let t = *pushed as Real / fs;
+        for ev in rx.push(pcm) {
+            match ev {
+                ReceiverEvent::SignalFound { dc_hz, .. } => found.push((t, dc_hz)),
+                ReceiverEvent::Restarted => restarts.push(t),
+                ReceiverEvent::Fac(_) => {
+                    first_fac.get_or_insert(t);
+                }
+                _ => {}
+            }
+        }
+    };
+
+    let lead: Vec<f32> = (0..(1.5 * fs) as usize)
+        .map(|n| {
+            let t = n as Real / fs;
+            let tones: Real = [5750.0, 7250.0, 8000.0].iter().map(|f| (std::f64::consts::TAU * f * t).sin()).sum();
+            (1e-5 * tones + 1e-6 * rng.gaussian()) as f32
+        })
+        .collect();
+    for chunk in lead.chunks(4800) {
+        feed(&mut rx, chunk, &mut pushed);
+    }
+    let onset = pushed as Real / fs;
+
+    let mut tx = Transmitter::new(TxConfig::default()).expect("valid transmitter configuration");
+    let mut out_stage = output_for(tx.layout(), Link::RealIf);
+    let cap = tx.msc_capacity();
+    let mut pcm = Vec::new();
+    for _ in 0..15 {
+        let fac = test_fac(&mut rng);
+        let msc = rng.bits(cap.total_bits());
+        let sdc = (tx.frame_index() == 0).then(|| rng.bytes(tx.sdc_capacity_bytes()));
+        let baseband = tx.transmit_frame(&fac, &msc, sdc.as_deref()).expect("transmit");
+        pcm.clear();
+        out_stage.process(&baseband, &mut pcm);
+        feed(&mut rx, &pcm, &mut pushed);
+    }
+
+    let summary = format!("signal found {found:?}, restarts {restarts:?}, first FAC {first_fac:?}, onset {onset} s");
+    println!("{summary}");
+    assert!(found.first().is_some_and(|&(t, dc)| t <= onset && (dc - 5000.0).abs() < 10.0), "no false acquisition: {summary}");
+    assert!(restarts.first().is_some_and(|&t| t > onset && t < onset + 0.5), "{summary}");
+    assert!(found.iter().any(|&(t, dc)| t > onset && (dc - 12000.0).abs() < 10.0), "{summary}");
+    assert!(first_fac.is_some_and(|t| t < onset + 3.2), "{summary}");
+}
