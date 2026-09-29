@@ -1,28 +1,43 @@
 # DecDRM
 
-A Digital Radio Mondiale (DRM30) receiver — and, soon, transmitter — written in Rust.
+A Digital Radio Mondiale (DRM30) receiver **and transmitter** written in Rust.
 
 DecDRM decodes DRM robustness modes A–D in every channel bandwidth (4.5–20 kHz) from
 recordings or a live sound card (for example a virtual audio cable fed by a web SDR such
-as a KiwiSDR). The signal processing is a spec-first reimplementation of ETSI ES 201 980
-that borrows proven algorithms from [Dream](https://sourceforge.net/projects/drm/);
-audio decoding uses Fraunhofer FDK-AAC (AAC, HE-AAC v1/v2, xHE-AAC) and libopus.
+as a KiwiSDR), and generates DRM signals from a station description. The signal
+processing is a spec-first reimplementation of ETSI ES 201 980 that borrows proven
+algorithms from [Dream](https://sourceforge.net/projects/drm/); audio uses Fraunhofer
+FDK-AAC (AAC, HE-AAC v1/v2, xHE-AAC decoding) and libopus.
 
-> **Status:** early development. The receiver synchronises to and decodes FAC, SDC and
-> MSC on all in-scope test recordings (modes A/B/C, 9–20 kHz, real and I/Q inputs,
-> inverted spectra, sound-card clock offsets up to 1250 ppm). Audio decoding, data
-> services, the GUI and the transmitter are being integrated. See
+> **Status:** the receiver decodes audio, text messages and data services from every
+> DRM test recording available here (modes A/B/C, 9–20 kHz, real and I/Q inputs,
+> inverted spectra, clock offsets up to 1250 ppm, AAC/HE-AAC/xHE-AAC/Opus). The
+> transmitter produces complete multiplexes that the receiver decodes. See
 > [docs/DESIGN.md](docs/DESIGN.md) for the plan and milestone status.
 
 ## Highlights
 
+- **Sensitivity close to the theoretical limit.** MSC bit error rate 10⁻⁴ after decoding
+  (64-QAM, R = 0.6) at ≈15.1 dB SNR in AWGN and within ~1.3 dB of ETSI ES 201 980
+  annex A's *ideal-receiver* figures on the DRM fading channels 2–5 — with real
+  synchronisation and channel estimation (`cargo run --release -p decdrm-core --example
+  bercurve -- 1 A 14 15 16`).
 - Automatic frequency, robustness-mode, spectrum-occupancy and spectrum-inversion
   detection; no need to set the IF or flip the spectrum by hand.
-- Sample-rate-offset acquisition from the pilot phase slope: sound-card clock errors of
-  more than 1000 ppm are corrected before the first FAC is decoded.
+- Sample-rate-offset estimation that is robust on fading channels (cross-correlation of
+  impulse-response snapshots, lag-compensated tracking); pilot-slope acquisition for
+  clock errors beyond 1000 ppm.
 - Wiener channel estimation in time and frequency with Doppler and delay-spread
-  adaptation, impulse-response based timing and sample-rate tracking, iterative
-  multilevel decoding.
+  adaptation, impulse-response based timing tracking, iterative multilevel decoding.
+- Services: AAC, HE-AAC v1/v2, xHE-AAC, Opus (Dream's extension), text messages,
+  MOT slideshow, Broadcast Website, Journaline, EPG, TPEG/raw capture, broadcast time,
+  alternative frequencies.
+- Transmitter: up to four services with AAC/HE-AAC/Opus audio, text, slideshow,
+  website, Journaline and EPG, every MSC mode incl. hierarchical 64-QAM and unequal
+  protection, WAV/FLAC or sound-card output, plus a channel simulator (the DRM channel
+  models 1–6) for testing.
+- Desktop GUI (egui): spectrum, constellations, channel, impulse response, SNR per
+  carrier, status LEDs, services, text, slideshow and Journaline browser.
 
 ## Building
 
@@ -32,9 +47,9 @@ cd DecDRM
 cargo build --release
 ```
 
-Requirements: Rust 1.88 or newer, a C/C++ compiler (MSVC Build Tools on Windows, gcc on
-Linux) and CMake for the vendored codecs, and on Linux the ALSA development package
-(`libasound2-dev`).
+Requirements: Rust 1.88 or newer (1.95 for the GUI), a C/C++ compiler (MSVC Build Tools
+on Windows, gcc on Linux) and CMake for the vendored codecs, and on Linux the ALSA
+development package (`libasound2-dev`).
 
 ## Usage
 
@@ -42,27 +57,41 @@ Linux) and CMake for the vendored codecs, and on Linux the ALSA development pack
 # decode a recording (real IF / audio input at any sample rate)
 decdrm rx recording.flac
 
-# I/Q recording
-decdrm rx iq_recording.wav --format iq
+# I/Q recording; save the audio, the data objects and a reception log
+decdrm rx iq_recording.wav --format iq --out audio.wav --data-dir data --log rx.csv
 
-# live from a sound-card input, e.g. a virtual audio cable
+# live from a sound-card input, e.g. a virtual audio cable, with playback
 decdrm devices
-decdrm rx --device "CABLE-A Output"
+decdrm rx --device "CABLE-A Output" --play
+
+# transmit: the station file describes services, codecs, data and the output
+decdrm tx crates/decdrm-station/examples/station.toml --check     # show the multiplex
+decdrm tx crates/decdrm-station/examples/station.toml --duration 30 --output drm.wav
+
+# desktop GUI
+cargo run --release -p decdrm-gui -- recording.flac
 ```
+
+`--log` writes one metrics row per second of signal (SNR, MER, Doppler, delay, clock
+offset, FAC/SDC/MSC/audio counters, service) as CSV, or JSON Lines (`.jsonl`) with text
+messages, data objects and log lines as events.
 
 ## Workspace
 
 | Crate | Purpose |
 |---|---|
-| `decdrm-core` | DRM30 physical layer, FEC, receiver and transmitter chains (pure Rust) |
+| `decdrm-core` | DRM30 physical layer, FEC, multiplex, receiver and transmitter chains, channel simulator (pure Rust) |
 | `decdrm-codecs` | FDK-AAC / libopus wrappers for DRM audio framing |
 | `decdrm-data` | Packet mode, MOT slideshow/website/EPG, Journaline, TPEG capture |
 | `decdrm-io` | WAV/FLAC, resampling, sound-card input/output, drift-compensated playback |
-| `decdrm-engine` | Threads, sources, decoding pipelines, status snapshots |
+| `decdrm-engine` | Receiver threads, sources, decoding pipelines, status snapshots, logging |
+| `decdrm-station` | Transmitter station: TOML configuration → multiplex → signal |
 | `decdrm-cli` | The `decdrm` command-line tool |
+| `decdrm-gui` | The desktop GUI |
 
 ## Licence
 
 GPL-2.0-or-later (it derives from Dream, which is GPL). The vendored FDK-AAC library has
-its own licence; see `third_party/fdk-aac/NOTICE`. AAC and DRM technologies are covered
-by patents licensed through Via LA.
+its own licence (see `third_party/fdk-aac/NOTICE`), which is generally regarded as
+incompatible with the GPL: fine for personal use, but check before distributing
+binaries. AAC and DRM technologies are covered by patents licensed through Via LA.
