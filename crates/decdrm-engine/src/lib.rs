@@ -19,7 +19,7 @@ pub use decdrm_core::rx::{InputFormat, RealChannel, ReceiverConfig};
 pub use decdrm_data;
 pub use logger::{LogConfig, LogFormat};
 pub use session::{MscStats, Session, SessionEvent};
-pub use snapshot::{AudioStatus, InputStatus, ServiceView, Snapshot};
+pub use snapshot::{AudioStatus, BroadcastTime, InputStatus, ServiceView, Snapshot};
 pub use source::{InputSpec, Source, SourceInfo};
 
 use anyhow::Result;
@@ -317,6 +317,7 @@ fn publish(
         snap.audio.drift_ppm = ppm;
     }
     snap.afs = afs::describe(session.ensemble().alternative_frequencies(), session.ensemble().time());
+    snap.time = session.ensemble().time().map(BroadcastTime::from_sdc);
     snap.time_utc = session.ensemble().time().map(|t| {
         let (y, m, d) = t.date();
         format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", t.hour, t.minute)
