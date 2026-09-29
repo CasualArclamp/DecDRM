@@ -25,3 +25,7 @@ jobs:
         run: cargo test --workspace --release
       - name: Clippy
         run: cargo clippy --workspace --release --all-targets -- -D clippy::correctness
+      - name: EnCodec feature (candle; model tests skip without weights)
+        run: |
+          cargo build --release -p decdrm-cli -p decdrm-gui --features decdrm-cli/encodec,decdrm-gui/encodec
+          cargo test --release -p decdrm-encodec -p decdrm-station --features decdrm-encodec/encodec,decdrm-station/encodec
