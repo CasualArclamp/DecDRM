@@ -86,7 +86,11 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       SRO estimation: cross-correlation of PDS snapshots (robust to fading paths),
       exact pilot-grid scaling, lag-compensated tracking; pilot-slope acquisition
       only beyond the ~1000 ppm unaided lock range and only when confirmed.
-      Still to do: a systematic sensitivity comparison with Dream.
+      Sensitivity (`examples/bercurve.rs`, BER 1e-4 after decoding, 64-QAM R = 0.6,
+      2 MLC iterations, real synchronisation and channel estimation) against ES 201 980
+      annex A (ideal estimation): ch1 ≈15.1 dB (14.9), ch2 ≈15.8 (16.5), ch3 ≈24.5
+      (23.2), ch4 ≈21.8 (22.3), ch5 ≈21.7 (20.4) — within ~1.3 dB of the ideal-receiver
+      figures (fading points from 60 s runs, ±0.5 dB).
 - [x] **M3 Codecs & text** — xHE-AAC, Opus, text messages, concealment, drift-compensated
       live playback. *Done* (xHE-AAC on FMGold, Opus in all three signalling variants).
 - [ ] **M4 Data services** — Journaline, MOT Slideshow, BWS, EPG, TPEG/raw; clock & AFS.

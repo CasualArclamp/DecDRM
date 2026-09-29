@@ -27,9 +27,12 @@ const MAX_CW_LEN: [u32; 32] = [
     29, 33, 33, 33, 37, 37, 41,
 ];
 
-/// FDK's decoder limits (`MAX_HCR_SETS`, codewords per set, `LEN_OF_LONGEST_CW_TOP_LENGTH`).
+/// FDK's decoder limits (`MAX_HCR_SETS`, the segment arrays of `1024 >> 1` entries in
+/// `aacdec_hcr_types.h`, `LEN_OF_LONGEST_CW_TOP_LENGTH`). A 960/1024-line frame has at
+/// most 512 codewords (two-line codebooks), so the segment limit never binds in
+/// practice; it used to be 256 here, which failed above ~50 kbit/s per channel.
 const MAX_SETS: usize = 14;
-const MAX_SEGMENTS: usize = 256;
+const MAX_SEGMENTS: usize = 1024 >> 1;
 const MAX_LONGEST_CW: u32 = 49;
 
 /// A codeword: bit string right-aligned in `bits`, `len` bits long.

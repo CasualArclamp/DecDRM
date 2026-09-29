@@ -339,3 +339,44 @@ fn he_aac_stereo_sbr() {
         "right SBR band {hf_r:.1} dB should stay empty"
     );
 }
+
+/// Tone plus white noise (deterministic LCG), `channels` interleaved channels: dense
+/// spectra need many HCR codewords, the case that used to exceed the repacker's
+/// segment limit at high bit rates.
+fn noisy_frame(f: f64, fs: u32, len: usize, channels: usize) -> impl Fn(usize) -> Vec<f32> {
+    move |i| {
+        let tone = sine(f, 0.4, fs, i * len, len);
+        let mut state = 0x9E37_79B9_7F4A_7C15u64 ^ (i as u64);
+        let mut noise = move || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as f64 / (1u64 << 31) as f64 - 0.5) * 0.4
+        };
+        tone.iter().flat_map(|&t| (0..channels).map(|_| (t + noise()) as f32).collect::<Vec<_>>()).collect()
+    }
+}
+
+#[test]
+fn aac_high_bitrates_repack() {
+    for (profile, rate, bitrate, stereo) in [
+        (AacProfile::Lc, 12_000, 64_000, false),
+        (AacProfile::Lc, 24_000, 96_000, false),
+        (AacProfile::Lc, 24_000, 128_000, true),
+        (AacProfile::HeAac, 12_000, 80_000, true),
+    ] {
+        let mut cfg = FdkEncoderConfig::new(profile, rate, bitrate);
+        cfg.stereo = stereo;
+        let channels = if stereo { 2 } else { 1 };
+        let len = if profile == AacProfile::Lc { 960 } else { 1920 };
+        let in_rate = if profile == AacProfile::Lc { rate } else { 2 * rate };
+        let run = aac_run(cfg, 40, noisy_frame(1000.0, in_rate, len, channels));
+        assert_eq!(run.concealed, 0, "{profile:?} {rate} Hz {bitrate} bit/s: frames failed");
+        assert!(!run.out.is_empty(), "{profile:?} {rate} Hz {bitrate} bit/s: no output");
+        let bytes: usize = run.frame_bytes.iter().sum();
+        eprintln!(
+            "{profile:?} {rate} Hz {} {bitrate} bit/s: {} frames, mean {} bytes",
+            if stereo { "stereo" } else { "mono" },
+            run.frame_bytes.len(),
+            bytes / run.frame_bytes.len().max(1)
+        );
+    }
+}

@@ -349,16 +349,14 @@ fn aac_encoder_bitrate(codec: Codec, core_rate: u32, stereo: bool, payload_rate:
     Err(worst_output(&table, FILL_POINTS[0]) / AAC_SAFETY)
 }
 
-/// Largest encoder bit rate: above it the DRM re-packing of some frames exceeds FDK's
-/// limit on HCR segments (measured as above; beyond it frames get padded instead).
+/// Largest encoder bit rate: 90 % of AAC's limit of 6144 bits per channel and frame
+/// (ISO/IEC 14496-3) at the core rate's frame rate (960-sample frames). (The DRM
+/// re-packing in `decdrm-codecs` used to fail above ~50 kbit/s per channel because of
+/// a too strict HCR segment limit; that is fixed.)
 fn aac_max_bitrate(codec: Codec, core_rate: u32, stereo: bool) -> u32 {
-    let stereo_core = stereo && codec != Codec::HeAacV2;
-    match (core_rate, stereo_core) {
-        (12_000, false) => 40_000,
-        (12_000, true) => 72_000,
-        (_, false) => 64_000,
-        (_, true) => 120_000,
-    }
+    let channels = if stereo && codec != Codec::HeAacV2 { 2.0 } else { 1.0 };
+    let frames_per_s = f64::from(core_rate) / 960.0;
+    (0.9 * 6144.0 * frames_per_s * channels) as u32
 }
 
 // ---------------------------------------------------------------------------------
