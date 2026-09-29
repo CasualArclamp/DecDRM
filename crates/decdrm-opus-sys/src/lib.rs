@@ -219,7 +219,10 @@ mod tests {
         // SAFETY: returns a static NUL-terminated string.
         let v = unsafe { CStr::from_ptr(opus_get_version_string()) };
         let v = v.to_str().unwrap();
-        assert!(v.starts_with("libopus 1.6"), "unexpected version {v}");
+        // libopus takes its version from `git describe --tags`; a shallow submodule
+        // clone (as `.gitmodules` requests) has no tags and reports "unknown". Any
+        // other version means a different libopus was linked.
+        assert!(v.starts_with("libopus 1.6") || v == "libopus unknown", "unexpected version {v}");
     }
 
     #[test]
