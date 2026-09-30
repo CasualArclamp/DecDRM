@@ -6,7 +6,12 @@
 //! noise in the nominal bandwidth).
 //!
 //! `cargo run --release -p decdrm-core --example bercurve -- CHANNEL MODE SNR... [--secs S]
-//!  [--so N] [--qam 16|64] [--prot P] [--iter I] [--seed N] [--short] [--euclid]`
+//!  [--so N] [--qam 16|64] [--prot P] [--iter I] [--seed N] [--short]
+//!  [--dream | --euclid | --huber C | --huber-amplitude C]`
+//!
+//! The MSC soft metric is the receiver's default (`rx::MSC_METRIC`) unless one is chosen:
+//! `--dream` (Dream's |r/h − s|·|h|), `--euclid` (|r/h − s|²·|h|²), `--huber C` or
+//! `--huber-amplitude C` (see `fec::qam::MetricKind`).
 //!
 //! e.g. `bercurve 1 A 14 15 16 17` or `bercurve 3 B 22 24 26 --secs 60`.
 
@@ -35,6 +40,9 @@ struct Args {
     seed: u64,
     short: bool,
     euclid: bool,
+    huber: Option<f64>,
+    huber_amplitude: Option<f64>,
+    dream: bool,
 }
 
 fn parse() -> Args {
@@ -48,7 +56,7 @@ fn parse() -> Args {
         Some("D") => RobustnessMode::D,
         other => panic!("mode A..D, got {other:?}"),
     };
-    let mut args = Args { channel, mode, snrs: Vec::new(), secs: 30.0, so: 3, qam: 64, prot: 1, iter: 2, seed: 1, short: false, euclid: false };
+    let mut args = Args { channel, mode, snrs: Vec::new(), secs: 30.0, so: 3, qam: 64, prot: 1, iter: 2, seed: 1, short: false, euclid: false, huber: None, huber_amplitude: None, dream: false };
     while let Some(s) = it.next() {
         let mut val = || it.next().expect("value").clone();
         match s.as_str() {
@@ -60,6 +68,9 @@ fn parse() -> Args {
             "--seed" => args.seed = val().parse().unwrap(),
             "--short" => args.short = true,
             "--euclid" => args.euclid = true,
+            "--dream" => args.dream = true,
+            "--huber" => args.huber = Some(val().parse().unwrap()),
+            "--huber-amplitude" => args.huber_amplitude = Some(val().parse().unwrap()),
             v => args.snrs.push(v.parse().expect("SNR in dB")),
         }
     }
@@ -119,7 +130,13 @@ fn main() {
             input: InputFormat::Iq { swap: false },
             channels: 2,
             msc_iterations: a.iter,
-            metric: if a.euclid { MetricKind::Euclidean } else { MetricKind::DreamLinear },
+            metric: match (a.huber, a.huber_amplitude, a.euclid, a.dream) {
+                (Some(c), ..) => MetricKind::Huber(c),
+                (None, Some(c), ..) => MetricKind::HuberAmplitude(c),
+                (None, None, true, _) => MetricKind::Euclidean,
+                (None, None, false, true) => MetricKind::DreamLinear,
+                (None, None, false, false) => decdrm_core::rx::MSC_METRIC,
+            },
             ..Default::default()
         });
         rx.set_msc_config(Some(MscConfig {

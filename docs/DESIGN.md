@@ -95,11 +95,20 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       (14.9), ch2 15.8 (16.5), ch3 23.8 (23.2), ch4 23.8 (22.3), ch5 22.0 (20.4) — at
       most 1.6 dB from the ideal-receiver figures (pooled over 3-4 seeds × 300-600 s per
       point, 0.1 dB grid for ch1-2; earlier 60 s runs had ch4 1.5 dB too optimistic).
-      Soft metric (2026-09-30, same runs): Dream's |r/h − s|·|h| against the Euclidean
-      |r/h − s|²·|h|² (`MetricKind`): Dream's is 0.1-0.35 dB better at BER 1e-4 on every
-      channel; the Euclidean curve is steeper and has the lower error floor on ch1-2,
-      so at MSC frame error rate 1 % it wins there by ~0.3 dB but loses by ~0.1 dB on
-      ch3 and ch5. The default stays Dream's metric.
+      Soft metric (2026-09-30, same runs, paired seeds; `MetricKind`): Dream's
+      |r/h − s|·|h| against the Euclidean |r/h − s|²·|h|²: Dream's is 0.1-0.35 dB
+      better at BER 1e-4 on every channel; the Euclidean curve is steeper with the
+      lower floor on ch1-2 (better at MSC frame error rate 1 % there, ~0.1 dB worse on
+      ch3 and ch5). A Huber shape (squared up to δ, linear beyond; δ = c × the level's
+      subset half-distance, so only abnormally large distances — from wrong decisions
+      of other MLC levels — are clipped) recovers Dream's waterfall on AWGN but, with
+      |h|² weighting, loses 0.2-0.46 dB on the fading channels: the weighting is what
+      Dream gets right (|h|² over-trusts strong carriers there). With Dream's |h|
+      weighting (`HuberAmplitude`), c = 0.25 is never worse than Dream at BER 1e-4
+      (−0.01 to −0.07 dB) and 0.17 / 0.11 dB better at FER 1 % on ch1 / ch2 (neutral
+      within ±0.05 dB on ch3-5; 16-QAM checked on ch1/ch3): now the MSC default
+      (`rx::MSC_METRIC`); FAC and SDC keep Dream's metric. The recordings decode
+      identically (their errors are not SNR-limited).
 - [x] **M3 Codecs & text** — xHE-AAC, Opus, text messages, concealment, drift-compensated
       live playback. *Done* (xHE-AAC on FMGold, Opus in all three signalling variants).
 - [x] **M4 Data services** — Journaline, MOT Slideshow, BWS, EPG, TPEG/raw; clock & AFS.

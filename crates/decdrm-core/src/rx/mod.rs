@@ -91,8 +91,20 @@ pub struct ReceiverConfig {
     /// what ES 201 980 annex A assumes) gains ~0.3–0.5 dB with 64-QAM for ~15 % more
     /// CPU time; more passes gain nothing measurable.
     pub msc_iterations: usize,
+    /// Soft metric of the MSC decoder (FAC and SDC keep `MetricKind::default()`,
+    /// Dream's). Default: [`MSC_METRIC`].
     pub metric: MetricKind,
 }
+
+/// The default MSC soft metric: the Huber shape with Dream's amplitude weighting and a
+/// threshold of a quarter of each level's subset half-distance. Measured with
+/// `examples/bercurve` on DRM channels 1–5 (64-QAM R = 0.6, 3–4 seeds × 300–600 s per
+/// point) against Dream's linear metric: never worse at BER 1e-4 (−0.01 to −0.07 dB),
+/// and 0.17 / 0.11 dB better at an MSC frame error rate of 1 % on channels 1 / 2
+/// (neutral within ±0.05 dB on 3–5). Weighting by |h|² instead (the Euclidean metric,
+/// or the Huber shape with |h|²) costs 0.2–0.4 dB on the fading channels; larger
+/// thresholds trade BER 1e-4 on channel 3 for frame errors on channel 1.
+pub const MSC_METRIC: MetricKind = MetricKind::HuberAmplitude(0.25);
 
 impl Default for ReceiverConfig {
     fn default() -> Self {
@@ -102,7 +114,7 @@ impl Default for ReceiverConfig {
             flip: false,
             auto_flip: true,
             msc_iterations: 2,
-            metric: MetricKind::default(),
+            metric: MSC_METRIC,
         }
     }
 }

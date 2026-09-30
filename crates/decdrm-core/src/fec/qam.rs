@@ -36,13 +36,31 @@ pub struct EqCell {
 }
 
 /// How branch metrics are computed from the distance to a constellation point.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum MetricKind {
     /// Dream's default: |r/h − s| · |h|.
     #[default]
     DreamLinear,
     /// Squared Euclidean distance |r/h − s|² · |h|² (the Gaussian log-likelihood).
     Euclidean,
+    /// Huber: the squared Euclidean distance up to a threshold δ, growing linearly
+    /// beyond it (with a continuous slope), weighted with |h|²:
+    /// `d² · |h|²` for d ≤ δ, `(2δd − δ²) · |h|²` above. δ is the parameter times half
+    /// the distance between the points of the level's two subsets (half-spacing of the
+    /// PAM axis times 2^bit, where bit is the index bit the level decides), so it clips
+    /// only distances that are abnormally large for that level — those a wrong decision
+    /// of another level or a bad channel estimate produces. δ → ∞ gives `Euclidean`.
+    Huber(f64),
+    /// The same Huber shape weighted with the channel amplitude |h| instead of |h|²
+    /// (Dream's channel-state weighting): `d² · |h|` up to δ, `(2δd − δ²) · |h|` above.
+    HuberAmplitude(f64),
+}
+
+/// Half the smallest distance between two points of a PAM axis.
+fn half_spacing(table: &[f64]) -> f64 {
+    let mut v = table.to_vec();
+    v.sort_by(f64::total_cmp);
+    v.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 1e-12).fold(f64::INFINITY, f64::min) / 2.0
 }
 
 impl Mapping {
@@ -169,8 +187,14 @@ impl Mapping {
             (mask, val)
         };
 
+        // Huber threshold at this level's scale (see `MetricKind::Huber`).
+        let huber_scale = f64::from(1u32 << target_bit);
         let mut push = |a: f64, w: f64, table: &[f64], k: usize| {
             let (mask, val) = known(k);
+            let delta = match kind {
+                MetricKind::Huber(c) | MetricKind::HuberAmplitude(c) => c * huber_scale * half_spacing(table),
+                _ => 0.0,
+            };
             let mut best = [f64::INFINITY; 2];
             for (idx, &s) in table.iter().enumerate() {
                 if idx & mask != val {
@@ -180,6 +204,10 @@ impl Mapping {
                 let m = match kind {
                     MetricKind::DreamLinear => d * w.sqrt(),
                     MetricKind::Euclidean => d * d * w,
+                    MetricKind::Huber(_) if d <= delta => d * d * w,
+                    MetricKind::Huber(_) => (2.0 * delta * d - delta * delta) * w,
+                    MetricKind::HuberAmplitude(_) if d <= delta => d * d * w.sqrt(),
+                    MetricKind::HuberAmplitude(_) => (2.0 * delta * d - delta * delta) * w.sqrt(),
                 };
                 let bit = (idx >> target_bit) & 1;
                 if m < best[bit] {
@@ -214,6 +242,38 @@ mod tests {
 
     fn all() -> [Mapping; 5] {
         [Mapping::Qam4, Mapping::Qam16, Mapping::Qam64Sm, Mapping::Qam64HmSym, Mapping::Qam64HmMix]
+    }
+
+    /// Huber: identical to the Euclidean metric for small distances (and everywhere
+    /// for a huge threshold), linear beyond the threshold, never above the Euclidean.
+    #[test]
+    fn huber_metric_shape() {
+        let m = Mapping::Qam64Sm;
+        // Cells spread over and beyond the constellation, with various channel powers.
+        let cells: Vec<EqCell> = (0..64)
+            .map(|i| {
+                let x = -1.6 + 3.2 * f64::from(i) / 63.0;
+                EqCell { sig: Cplx::new(x, -0.7 * x), chan: 0.2 + f64::from(i % 5) * 0.3 }
+            })
+            .collect();
+        let decided = vec![Vec::new(); 3];
+        let run = |kind| {
+            let mut out = Vec::new();
+            m.metrics(&cells, 2, &decided, false, kind, &mut out);
+            out
+        };
+        let (eu, big, small) = (run(MetricKind::Euclidean), run(MetricKind::Huber(1e6)), run(MetricKind::Huber(0.25)));
+        for ((e, b), s) in eu.iter().zip(&big).zip(&small) {
+            assert!((e.to0 - b.to0).abs() < 1e-9 && (e.to1 - b.to1).abs() < 1e-9, "huge threshold = Euclidean");
+            assert!(s.to0 <= e.to0 + 1e-12 && s.to1 <= e.to1 + 1e-12, "Huber never exceeds the Euclidean");
+        }
+        assert!(small.iter().zip(&eu).any(|(s, e)| s.to1 < e.to1 - 1e-6), "the threshold clips far points");
+        // On a level, distances below its threshold keep the Euclidean value.
+        let near = [EqCell { sig: Cplx::new(tables::QAM64_SM[3] + 0.01, tables::QAM64_SM[5]), chan: 1.0 }];
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        m.metrics(&near, 0, &decided, false, MetricKind::Euclidean, &mut a);
+        m.metrics(&near, 0, &decided, false, MetricKind::Huber(2.0), &mut b);
+        assert!((a[0].to0.min(a[0].to1) - b[0].to0.min(b[0].to1)).abs() < 1e-12);
     }
 
     #[test]
