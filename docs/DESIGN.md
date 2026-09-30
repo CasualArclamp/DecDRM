@@ -117,7 +117,8 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       service list, text, slideshow, Journaline browser, EPG, clock/AFS.
       *Done:* receiver tab (spectrum, waterfall, constellations, decoded-audio
       spectrum, channel, impulse response, SNR per carrier, history of the last five
-      minutes of signal with error rates per 10 s, LEDs, services, text, slideshow,
+      minutes of signal with error rates per 10 s, LEDs, Dream-style service bars (codec,
+      SBR/PS, rates, bit rate, EEP/UEP, text, data applications, CA), text, slideshow,
       Journaline, broadcast website (opens the HTML start page in the system browser on
       a click), EPG, broadcast clock with local time, alternative frequencies, data
       directory) and transmitter tab (TOML editor with error locations, validation,

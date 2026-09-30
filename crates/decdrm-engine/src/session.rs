@@ -17,7 +17,7 @@ use decdrm_core::mux::service::{AudioCodec, AudioMode, AudioParams, Changes, Ens
 use decdrm_core::mux::text::{TextEvent, TextMessageDecoder};
 use decdrm_core::mux::{demultiplex, msc::LogicalFrame};
 use decdrm_core::rx::{MscConfig, MscFrame, Receiver, ReceiverConfig, ReceiverEvent, RxStatus, Visuals};
-use decdrm_data::{AppDomain, DataDecoder, DataEvent, DataServiceConfig};
+use decdrm_data::{AppDomain, DataDecoder, DataEvent, DataServiceConfig, UserApplication};
 
 /// Output of a session step.
 #[derive(Debug, Clone)]
@@ -408,23 +408,94 @@ impl Session {
         }
     }
 
-    /// Human-readable description of every service, for status displays.
+    /// Every service, described for status displays.
     pub fn service_views(&self) -> Vec<crate::snapshot::ServiceView> {
-        self.ens
-            .services()
-            .map(|s| crate::snapshot::ServiceView {
-                short_id: s.short_id,
-                service_id: s.service_id().unwrap_or(0),
-                label: s.label.clone().unwrap_or_default(),
-                is_audio: s.is_audio(),
-                description: describe_service(s),
-                language: s
-                    .language_code
-                    .clone()
-                    .or_else(|| s.fac_language().map(str::to_string))
-                    .unwrap_or_default(),
+        let lengths = self.ens.stream_lengths();
+        self.ens.services().map(|s| service_view(s, &lengths)).collect()
+    }
+}
+
+/// Bit rate of a stream of `lengths` (bytes per 400 ms multiplex frame), bit/s.
+fn stream_bitrate(lengths: &[StreamLengths], stream: u8) -> Option<f64> {
+    lengths.get(usize::from(stream)).map(|l| (l.part_a + l.part_b) as f64 * 8.0 / 0.4)
+}
+
+fn service_view(s: &ServiceInfo, lengths: &[StreamLengths]) -> crate::snapshot::ServiceView {
+    let audio_stream = s.audio.as_ref().map(|a| a.stream_id);
+    let audio_lengths = audio_stream.and_then(|id| lengths.get(usize::from(id)));
+    let fac_language = s.fac.filter(|f| f.language != 0).and_then(|_| s.fac_language());
+    crate::snapshot::ServiceView {
+        short_id: s.short_id,
+        service_id: s.service_id().unwrap_or(0),
+        label: s.label.clone().unwrap_or_default(),
+        is_audio: s.is_audio(),
+        description: describe_service(s),
+        language: fac_language.map(str::to_string).or_else(|| s.language_code.clone()).unwrap_or_default(),
+        audio: s.audio.as_ref().map(audio_view),
+        audio_bitrate: audio_stream.and_then(|id| stream_bitrate(lengths, id)),
+        audio_part_a_percent: audio_lengths
+            .filter(|l| l.part_a + l.part_b > 0)
+            .map(|l| 100.0 * l.part_a as f64 / (l.part_a + l.part_b) as f64),
+        apps: s
+            .applications
+            .iter()
+            .map(|a| {
+                let id = a.user_app_id().unwrap_or(0);
+                crate::snapshot::AppView {
+                    name: app_name(UserApplication::from_id(AppDomain::from_sdc(a.app_domain), id)),
+                    user_app_id: id,
+                    stream_id: a.stream_id,
+                    packet_mode: a.packet_mode,
+                    packet_id: a.packet_id,
+                    stream_bitrate: stream_bitrate(lengths, a.stream_id),
+                }
             })
-            .collect()
+            .collect(),
+        programme_type: s.fac.filter(|f| !f.is_data && f.descriptor != 0).and_then(|_| s.programme_type()).map(str::to_string),
+        country: s.country_code.as_ref().filter(|c| !c.is_empty() && *c != "--").map(|c| c.to_ascii_uppercase()),
+        ca: s.fac.is_some_and(|f| f.audio_ca || f.data_ca),
+        decodable: s.audio.as_ref().is_some_and(|a| match a.codec {
+            AudioCodec::Reserved => false,
+            AudioCodec::Encodec => decdrm_encodec::BUILT_IN,
+            _ => true,
+        }),
+    }
+}
+
+fn audio_view(p: &AudioParams) -> crate::snapshot::AudioCodingView {
+    let codec = match p.codec {
+        AudioCodec::Aac => "AAC",
+        AudioCodec::XheAac => "xHE-AAC",
+        AudioCodec::Opus => "Opus",
+        AudioCodec::Encodec => "EnCodec",
+        AudioCodec::Reserved => "reserved",
+    };
+    let detail = (p.codec == AudioCodec::Encodec).then(|| {
+        decdrm_encodec::EncodecConfig::from_codec_config(&p.codec_config)
+            .map_or_else(|e| e.to_string(), |c| c.bandwidth.to_string())
+    });
+    crate::snapshot::AudioCodingView {
+        codec: codec.to_string(),
+        sbr: p.sbr,
+        parametric_stereo: p.mode == AudioMode::ParametricStereo,
+        stereo: p.mode == AudioMode::Stereo,
+        sample_rate_hz: p.sample_rate_hz,
+        output_rate_hz: if p.codec == AudioCodec::Aac && p.sbr { 2 * p.sample_rate_hz } else { p.sample_rate_hz },
+        text: p.text_flag,
+        surround: p.surround_mode != 0,
+        detail,
+    }
+}
+
+/// Display name of a data application.
+fn app_name(app: UserApplication) -> String {
+    match app {
+        UserApplication::SlideShow => "MOT Slideshow".into(),
+        UserApplication::BroadcastWebsite => "Broadcast Website".into(),
+        UserApplication::Tpeg => "TPEG".into(),
+        UserApplication::Epg => "EPG".into(),
+        UserApplication::Journaline => "Journaline".into(),
+        UserApplication::Other(id) => format!("application {id:#05X}"),
     }
 }
 
@@ -532,5 +603,83 @@ fn describe_service(s: &ServiceInfo) -> String {
             LANGUAGES.get(f.language as usize).copied().unwrap_or("?")
         ),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use decdrm_core::fac::ServiceParams;
+
+    fn fac(short_id: u8, is_data: bool, descriptor: u8) -> ServiceParams {
+        ServiceParams { service_id: 0xD0D000 + u32::from(short_id), short_id, audio_ca: false, language: 5, is_data, descriptor, data_ca: false }
+    }
+
+    fn app(stream_id: u8, packet_id: u8, user_app: u16) -> ApplicationInfo {
+        ApplicationInfo {
+            short_id: 0,
+            stream_id,
+            packet_mode: true,
+            data_unit_indicator: true,
+            packet_id,
+            enhancement: false,
+            app_domain: 1,
+            packet_length: 45,
+            application_data: user_app.to_be_bytes().to_vec(),
+        }
+    }
+
+    /// Dream's service-bar facts: codec features, output rate, bit rates from the stream
+    /// lengths, UEP share, applications with their stream bit rates.
+    #[test]
+    fn service_views_for_the_bars() {
+        let lengths = [StreamLengths { part_a: 100, part_b: 500 }, StreamLengths { part_a: 0, part_b: 60 }];
+        let audio = ServiceInfo {
+            short_id: 0,
+            fac: Some(fac(0, false, 10)),
+            label: Some("Radio".into()),
+            language_code: Some("eng".into()),
+            country_code: Some("gb".into()),
+            audio: Some(AudioParams {
+                stream_id: 0,
+                codec: AudioCodec::Aac,
+                sbr: true,
+                mode: AudioMode::ParametricStereo,
+                sample_rate_hz: 24_000,
+                text_flag: true,
+                enhancement: false,
+                surround_mode: 0,
+                codec_config: Vec::new(),
+                type9_bytes: Vec::new(),
+            }),
+            applications: vec![app(1, 0, 0x002)],
+            conditional_access: Vec::new(),
+        };
+        let v = service_view(&audio, &lengths);
+        let a = v.audio.as_ref().unwrap();
+        assert_eq!((a.codec.as_str(), a.sbr, a.parametric_stereo, a.stereo), ("AAC", true, true, false));
+        assert_eq!((a.sample_rate_hz, a.output_rate_hz, a.text), (24_000, 48_000, true));
+        assert_eq!(v.audio_bitrate, Some(12_000.0), "600 bytes per 400 ms");
+        assert!((v.audio_part_a_percent.unwrap() - 100.0 / 6.0).abs() < 1e-9, "UEP");
+        assert_eq!(v.apps.len(), 1);
+        assert_eq!((v.apps[0].name.as_str(), v.apps[0].stream_bitrate), ("MOT Slideshow", Some(1_200.0)));
+        assert_eq!(v.language, "English", "the FAC language name before the SDC code");
+        assert_eq!(v.country.as_deref(), Some("GB"));
+        assert_eq!(v.programme_type.as_deref(), Some("Pop Music"));
+        assert!(v.decodable && !v.ca);
+
+        let data = ServiceInfo {
+            short_id: 1,
+            fac: Some(ServiceParams { data_ca: true, language: 0, ..fac(1, true, 0) }),
+            label: Some("News".into()),
+            applications: vec![app(1, 1, 0x44A), app(1, 2, 0x123)],
+            ..Default::default()
+        };
+        let v = service_view(&data, &lengths);
+        assert!(v.audio.is_none() && v.audio_bitrate.is_none() && !v.decodable && v.ca);
+        let names: Vec<&str> = v.apps.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Journaline", "application 0x123"]);
+        assert_eq!(v.programme_type, None);
+        assert_eq!(v.language, "", "no FAC language and no SDC code");
     }
 }

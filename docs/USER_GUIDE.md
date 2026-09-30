@@ -141,6 +141,21 @@ The side panel shows the broadcast clock (with the station's local time when it 
 one), alternative frequencies, the services, the text message, audio details and the
 data services. *Log* at the top shows the receiver's log.
 
+The services appear as four bars, one per Short Id, as in Dream. Each bar shows:
+- the label and the bit rate of its audio stream (for a data service, of its data
+  streams);
+- tags for:
+  - the codec (HE-AAC, HE-AAC v2, AAC, xHE-AAC, Opus, EnCodec), SBR, PS / Stereo /
+    Mono, and the core/output rate;
+  - EEP, or UEP with part A's share;
+  - text messages;
+  - attached data applications with their stream's bit rate;
+  - conditional access, or a missing decoder;
+- language, programme type and country.
+
+Click a bar to decode that service; hover for the details (service ID, streams, packet
+ids).
+
 ## Services, data and logs
 
 ### Services and audio

@@ -40,7 +40,8 @@ encoding) and libopus.
   simulator (the DRM channel models 1–6, noise, frequency and clock offsets:
   `[simulate]` or `decdrm tx … --channel-model 3 --snr 18`) for testing receivers.
 - Desktop GUI (egui): spectrum, waterfall, constellations, audio spectrum, channel,
-  impulse response, SNR per carrier, reception history, status LEDs, services, text,
+  impulse response, SNR per carrier, reception history, status LEDs, Dream-style service
+  bars (codec, SBR/PS, bit rate, protection, data applications), text,
   slideshow, Journaline browser, broadcast website, EPG, broadcast clock, alternative
   frequencies, and a transmitter tab.
 - Light on the CPU: the receiver decodes 10 kHz signals at 100–150× real time (20 kHz

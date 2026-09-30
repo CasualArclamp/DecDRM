@@ -53,9 +53,67 @@ pub struct ServiceView {
     pub service_id: u32,
     pub label: String,
     pub is_audio: bool,
-    /// Human-readable coding/application description.
+    /// Human-readable coding/application description (one line).
     pub description: String,
+    /// Language: the FAC language name, else the SDC ISO 639-2 code (empty if neither).
     pub language: String,
+    /// Audio coding of an audio service (SDC type 9).
+    pub audio: Option<AudioCodingView>,
+    /// Bit rate of the audio stream, bit/s (from the multiplex description).
+    pub audio_bitrate: Option<f64>,
+    /// Share of the audio stream in the higher protected part A, percent: 0 = equal
+    /// error protection (EEP), more = unequal error protection (UEP).
+    pub audio_part_a_percent: Option<f64>,
+    /// Data applications of the service (SDC type 5), in SDC order.
+    pub apps: Vec<AppView>,
+    /// Programme type (FAC, audio services; none for "no programme type").
+    pub programme_type: Option<String>,
+    /// Country (SDC type 12, ISO 3166 code in capitals).
+    pub country: Option<String>,
+    /// Conditional access (scrambled audio or data, FAC CA flags).
+    pub ca: bool,
+    /// Whether this receiver can decode the audio: false for a reserved coding (CELP,
+    /// HVXC) and for EnCodec in a build without it.
+    pub decodable: bool,
+}
+
+/// Audio coding of a service (SDC type 9), the facts Dream's service bars show.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AudioCodingView {
+    /// "AAC", "xHE-AAC", "Opus", "EnCodec" or "reserved".
+    pub codec: String,
+    /// Spectral band replication (AAC; HE-AAC).
+    pub sbr: bool,
+    /// Parametric stereo (AAC audio mode 01; HE-AAC v2).
+    pub parametric_stereo: bool,
+    /// Two coded channels (audio mode 10).
+    pub stereo: bool,
+    /// Signalled sampling rate, Hz: the core coder's for AAC, the output rate for
+    /// xHE-AAC.
+    pub sample_rate_hz: u32,
+    /// Rate of the decoded audio, Hz (AAC with SBR: twice the core rate).
+    pub output_rate_hz: u32,
+    /// Text messages in the audio stream.
+    pub text: bool,
+    /// MPEG Surround side information (AAC, xHE-AAC).
+    pub surround: bool,
+    /// Further codec detail, e.g. the EnCodec bit-rate tier.
+    pub detail: Option<String>,
+}
+
+/// A data application of a service (SDC type 5).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AppView {
+    /// E.g. "MOT Slideshow", "Journaline", "EPG", "TPEG", "application 0x123".
+    pub name: String,
+    pub user_app_id: u16,
+    pub stream_id: u8,
+    /// Packet mode (see `packet_id`); otherwise synchronous stream mode.
+    pub packet_mode: bool,
+    pub packet_id: u8,
+    /// Bit rate of the application's stream, bit/s (a stream shared by several
+    /// applications counts once for each).
+    pub stream_bitrate: Option<f64>,
 }
 
 /// Audio decoding status.

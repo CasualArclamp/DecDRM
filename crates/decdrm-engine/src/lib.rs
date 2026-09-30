@@ -20,8 +20,8 @@ pub use decdrm_data;
 pub use logger::{LogConfig, LogFormat};
 pub use session::{MscStats, Session, SessionEvent};
 pub use snapshot::{
-    AudioSpectrum, AudioStatus, BroadcastTime, InputStatus, METRICS_INTERVAL_S, MetricsSample, RECENT_METRICS, ServiceView,
-    Snapshot,
+    AppView, AudioCodingView, AudioSpectrum, AudioStatus, BroadcastTime, InputStatus, METRICS_INTERVAL_S, MetricsSample,
+    RECENT_METRICS, ServiceView, Snapshot,
 };
 pub use source::{InputSpec, Source, SourceInfo};
 
