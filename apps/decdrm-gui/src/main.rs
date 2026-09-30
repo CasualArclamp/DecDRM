@@ -18,6 +18,7 @@
 mod app;
 mod data;
 mod epg;
+mod fonts;
 mod history;
 mod indicators;
 mod panels;

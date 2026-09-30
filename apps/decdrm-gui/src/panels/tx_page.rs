@@ -41,6 +41,11 @@ pub struct TxPage {
 }
 
 impl TxPage {
+    /// The station configuration being edited.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
     /// Open the last station file, or the example if there is none (or it is gone).
     pub fn new(settings: &mut Settings, example_dir: PathBuf) -> Self {
         let mut page = Self {

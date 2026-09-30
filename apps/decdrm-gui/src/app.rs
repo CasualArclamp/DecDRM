@@ -101,6 +101,8 @@ pub struct DecDrmApp {
     applied_theme: Option<ThemeChoice>,
     /// Volume (percent) last sent to the receiver.
     applied_volume: Option<f32>,
+    /// Fonts for the scripts egui's built-in fonts lack, loaded on demand.
+    fonts: crate::fonts::FontFallbacks,
     last_save: Instant,
     /// Transient message under the source bar (e.g. why Start did nothing).
     notice: Option<String>,
@@ -163,6 +165,7 @@ impl DecDrmApp {
             mute: args.no_audio,
             applied_theme,
             applied_volume: None,
+            fonts: crate::fonts::FontFallbacks::default(),
             last_save: now,
             notice: None,
         };
@@ -327,6 +330,19 @@ impl eframe::App for DecDrmApp {
         let now = Instant::now();
         self.rx.poll(now);
         self.tx.poll(now);
+
+        // Fonts for non-Latin scripts in what was received or is being edited.
+        self.fonts.note(&std::mem::take(&mut self.rx.text_seen));
+        if self.settings.page == Page::Transmitter {
+            self.fonts.note(self.tx_page.text());
+        }
+        let fonts_changed = self.fonts.apply(ctx);
+        for m in self.fonts.messages.drain(..) {
+            self.rx.log.push(m);
+        }
+        if fonts_changed {
+            ctx.request_repaint();
+        }
 
         if self.applied_theme != Some(self.settings.theme) {
             ctx.set_theme(self.settings.theme.preference());

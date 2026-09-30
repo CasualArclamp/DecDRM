@@ -43,6 +43,9 @@ toml = "1.1"
 quick-xml = "0.41"
 # Opens a received broadcast website's start page in the system's browser.
 open = "5.3"
+# Checks that a system font covers a script before it becomes a fallback (egui's own
+# font library, so no extra download).
+ab_glyph = "0.2"
 
 # eframe's default feature set turns on winit's defaults; with eframe's defaults off we
 # re-enable them here (Linux only): Wayland and X11 client libraries are then loaded at

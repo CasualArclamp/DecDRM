@@ -430,7 +430,11 @@ fn service_view(s: &ServiceInfo, lengths: &[StreamLengths]) -> crate::snapshot::
         label: s.label.clone().unwrap_or_default(),
         is_audio: s.is_audio(),
         description: describe_service(s),
-        language: fac_language.map(str::to_string).or_else(|| s.language_code.clone()).unwrap_or_default(),
+        // "---" is the SDC code for an unspecified language.
+        language: fac_language
+            .map(str::to_string)
+            .or_else(|| s.language_code.clone().filter(|c| !c.is_empty() && c != "---"))
+            .unwrap_or_default(),
         audio: s.audio.as_ref().map(audio_view),
         audio_bitrate: audio_stream.and_then(|id| stream_bitrate(lengths, id)),
         audio_part_a_percent: audio_lengths

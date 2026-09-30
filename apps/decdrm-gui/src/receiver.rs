@@ -122,6 +122,9 @@ pub struct RxSession {
     pub history: History,
     pub indicators: Indicators,
     pub data: DataServices,
+    /// Non-ASCII characters of the texts received since the application last took
+    /// them (for the fallback fonts, see `fonts`).
+    pub text_seen: String,
     /// Broadcast website files on disk (for the browser).
     pub sites: SiteFiles,
     /// Where the GUI writes website files when the engine saves none (no data
@@ -150,6 +153,7 @@ impl Default for RxSession {
             history: History::default(),
             indicators: Indicators::default(),
             data: DataServices::default(),
+            text_seen: String::new(),
             sites: SiteFiles::new(SiteStore::Own(sites_dir.clone())),
             sites_dir,
             log: LogBuffer::default(),
@@ -245,17 +249,36 @@ impl RxSession {
         let Some(engine) = &self.engine else {
             return false;
         };
+        let seen = &mut self.text_seen;
         let events = engine.poll_events();
         let mut changed = !events.is_empty();
         let mut finished = false;
         let now_unix = self.live.then(unix_now);
         for ev in events {
             match ev {
-                EngineEvent::Log(line) => self.log.push(line),
-                EngineEvent::Text(text) => push_text(&mut self.texts, text),
+                EngineEvent::Log(line) => {
+                    note_text(seen, &line);
+                    self.log.push(line);
+                }
+                EngineEvent::Text(text) => {
+                    note_text(seen, &text);
+                    push_text(&mut self.texts, text);
+                }
                 EngineEvent::Data { short_id, event } => {
-                    if let DataEvent::WebsiteFile { path, .. } = &event {
-                        self.sites.received(short_id, path);
+                    match &event {
+                        DataEvent::WebsiteFile { path, .. } => {
+                            note_text(seen, path);
+                            self.sites.received(short_id, path);
+                        }
+                        // Rust note: `{:?}` of a page prints its strings (only control
+                        // characters escaped), a cheap way to see all of its text.
+                        DataEvent::Journaline(update) => note_text(seen, &format!("{:?}", update.object)),
+                        DataEvent::Epg { name, xml } => {
+                            note_text(seen, name);
+                            note_text(seen, xml);
+                        }
+                        DataEvent::SlideShowImage { name, .. } => note_text(seen, name),
+                        _ => {}
                     }
                     self.data.apply(short_id, &event, now_unix);
                 }
@@ -280,6 +303,12 @@ impl RxSession {
             // `seq` counts the engine's publications: the same number means the same
             // content, so the plot data need not be prepared again.
             if snap.seq != self.snap.seq {
+                for s in &snap.services {
+                    note_text(&mut self.text_seen, &s.label);
+                }
+                for line in snap.text.iter().chain(&snap.afs) {
+                    note_text(&mut self.text_seen, line);
+                }
                 self.plots = PlotData::from_snapshot(&snap);
                 self.waterfall
                     .push(&snap.visuals.spectrum_db, snap.visuals.real_input);
@@ -312,6 +341,13 @@ fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// Keep the non-ASCII characters of `text` (only they may need a fallback font).
+fn note_text(seen: &mut String, text: &str) {
+    if !text.is_ascii() {
+        seen.extend(text.chars().filter(|c| !c.is_ascii()));
+    }
 }
 
 #[cfg(test)]

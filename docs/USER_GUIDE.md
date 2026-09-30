@@ -156,6 +156,17 @@ The services appear as four bars, one per Short Id, as in Dream. Each bar shows:
 Click a bar to decode that service; hover for the details (service ID, streams, packet
 ids).
 
+Labels, text messages and data in other scripts use the system's fonts; DecDRM loads
+each one the first time such text appears, and the log names it:
+- Korean, Chinese and Japanese;
+- Arabic and Hebrew;
+- Indic scripts, Thai and Ethiopic.
+
+On Windows the fonts that ship with the system cover all of these. On Linux, install
+e.g. Noto Sans CJK and Noto Sans for these scripts; DecDRM asks fontconfig for them.
+Right-to-left text (Arabic, Hebrew) shows its letters, but in stored order and without
+Arabic letter joining: the GUI toolkit (egui) has no bidirectional text support.
+
 The *Audio* section under the text message shows the decoder and playback figures
 and the **volume** slider. The slider acts at once, even on audio already queued, and
 leaves recordings and the audio spectrum unchanged. It uses a squared law, so 50 % is
