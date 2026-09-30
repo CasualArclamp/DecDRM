@@ -19,10 +19,10 @@ encoding) and libopus.
 ## Highlights
 
 - **Sensitivity close to the theoretical limit.** MSC bit error rate 10⁻⁴ after decoding
-  (64-QAM, R = 0.6) at ≈15.1 dB SNR in AWGN and within ~1.3 dB of ETSI ES 201 980
-  annex A's *ideal-receiver* figures on the DRM fading channels 2–5 — with real
-  synchronisation and channel estimation (`cargo run --release -p decdrm-core --example
-  bercurve -- 1 A 14 15 16`).
+  (64-QAM, R = 0.6) at 14.8 dB SNR in AWGN (annex A's ideal receiver: 14.9 dB) and
+  within 1.6 dB of ETSI ES 201 980 annex A's *ideal-receiver* figures on the DRM
+  fading channels 2–5 — with real synchronisation and channel estimation (`cargo run
+  --release -p decdrm-core --example bercurve -- 1 A 14.6 14.8 15`).
 - Automatic frequency, robustness-mode, spectrum-occupancy and spectrum-inversion
   detection; no need to set the IF or flip the spectrum by hand.
 - Sample-rate-offset estimation that is robust on fading channels (cross-correlation of

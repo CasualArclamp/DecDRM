@@ -90,10 +90,16 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       detected from the cyclic-prefix correlation and a time-pilot monitor and
       resynchronised in ~1 s without a full restart (`examples/dropout`).
       Sensitivity (`examples/bercurve.rs`, BER 1e-4 after decoding, 64-QAM R = 0.6,
-      2 MLC iterations, real synchronisation and channel estimation) against ES 201 980
-      annex A (ideal estimation): ch1 ≈15.1 dB (14.9), ch2 ≈15.8 (16.5), ch3 ≈24.5
-      (23.2), ch4 ≈21.8 (22.3), ch5 ≈21.7 (20.4) — within ~1.3 dB of the ideal-receiver
-      figures (fading points from 60 s runs, ±0.5 dB).
+      2 MLC iterations, real synchronisation and channel estimation, modes A for ch1-2
+      and B for ch3-5) against ES 201 980 annex A (ideal estimation): ch1 14.8 dB
+      (14.9), ch2 15.8 (16.5), ch3 23.8 (23.2), ch4 23.8 (22.3), ch5 22.0 (20.4) — at
+      most 1.6 dB from the ideal-receiver figures (pooled over 3-4 seeds × 300-600 s per
+      point, 0.1 dB grid for ch1-2; earlier 60 s runs had ch4 1.5 dB too optimistic).
+      Soft metric (2026-09-30, same runs): Dream's |r/h − s|·|h| against the Euclidean
+      |r/h − s|²·|h|² (`MetricKind`): Dream's is 0.1-0.35 dB better at BER 1e-4 on every
+      channel; the Euclidean curve is steeper and has the lower error floor on ch1-2,
+      so at MSC frame error rate 1 % it wins there by ~0.3 dB but loses by ~0.1 dB on
+      ch3 and ch5. The default stays Dream's metric.
 - [x] **M3 Codecs & text** — xHE-AAC, Opus, text messages, concealment, drift-compensated
       live playback. *Done* (xHE-AAC on FMGold, Opus in all three signalling variants).
 - [x] **M4 Data services** — Journaline, MOT Slideshow, BWS, EPG, TPEG/raw; clock & AFS.
