@@ -58,6 +58,13 @@ impl AudioOut {
         self.player.is_some()
     }
 
+    /// Playback volume (linear gain; the recording and the spectrum are unaffected).
+    pub fn set_volume(&mut self, gain: f32) {
+        if let Some(p) = self.player.as_ref() {
+            p.set_volume(gain);
+        }
+    }
+
     /// Queue decoded audio (interleaved, `channels` = 1 or 2).
     pub fn push(&mut self, samples: &[f32], sample_rate: u32, channels: usize) -> Result<()> {
         self.analyser.push(samples, sample_rate, channels);

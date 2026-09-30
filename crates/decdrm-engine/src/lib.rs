@@ -36,6 +36,13 @@ use std::time::{Duration, Instant};
 /// Audio arrives in bursts, one per 400 ms multiplex frame.
 pub const AUDIO_SPECTRUM_HOLD_S: f64 = 2.0;
 
+/// Linear playback gain of a volume setting in percent (0–100): a squared law, so a
+/// slider's travel matches loudness better than a linear gain (50 % ≈ −12 dB).
+pub fn volume_gain(percent: f32) -> f32 {
+    let p = if percent.is_finite() { percent.clamp(0.0, 100.0) / 100.0 } else { 1.0 };
+    p * p
+}
+
 /// Engine configuration.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -45,6 +52,8 @@ pub struct EngineConfig {
     /// Play decoded audio on a sound card.
     pub play_audio: bool,
     pub output_device: Option<String>,
+    /// Playback volume, a linear gain (1.0 = as decoded); see [`Command::SetVolume`].
+    pub volume: f32,
     /// Write decoded audio to this WAV/FLAC file.
     pub record_audio: Option<std::path::PathBuf>,
     /// Directory for slideshow images, websites, EPG and raw data.
@@ -61,6 +70,7 @@ impl Default for EngineConfig {
             receiver: ReceiverConfig::default(),
             play_audio: false,
             output_device: None,
+            volume: 1.0,
             record_audio: None,
             data_dir: None,
             log: None,
@@ -79,6 +89,9 @@ impl EngineConfig {
 pub enum Command {
     Restart,
     SelectService(u8),
+    /// Change the playback volume (linear gain); it applies at once, not after the
+    /// audio already queued on the sound card.
+    SetVolume(f32),
     Stop,
 }
 
@@ -180,6 +193,7 @@ fn worker(
     // File playback paces the decoder to the sound card; live input relies on the
     // player's drift compensation.
     let mut audio = audio_out::AudioOut::new(cfg.play_audio, cfg.output_device.clone(), info.is_file, cfg.record_audio.clone())?;
+    audio.set_volume(cfg.volume);
     let mut saver = cfg.data_dir.clone().map(data_store::DataStore::new);
     let mut logger = cfg.log.as_ref().map(logger::Logger::create).transpose()?;
     let log = |line: String, snap: &mut Snapshot| {
@@ -216,6 +230,7 @@ fn worker(
                     session.select_service(id);
                     snap.selected_service = session.selected_service();
                 }
+                Command::SetVolume(gain) => audio.set_volume(gain),
             }
         }
 
@@ -356,6 +371,15 @@ fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volume_follows_a_squared_law() {
+        assert_eq!(volume_gain(100.0), 1.0);
+        assert_eq!(volume_gain(0.0), 0.0);
+        assert!((20.0 * volume_gain(50.0).log10() + 12.04).abs() < 0.01, "50 % is -12 dB");
+        assert_eq!(volume_gain(150.0), 1.0);
+        assert_eq!(volume_gain(f32::NAN), 1.0);
+    }
 
     #[test]
     fn stale_audio_spectrum_is_blanked() {

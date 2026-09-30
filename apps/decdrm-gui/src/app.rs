@@ -99,6 +99,8 @@ pub struct DecDrmApp {
     /// transmitting to a sound card, whatever the saved settings say.
     mute: bool,
     applied_theme: Option<ThemeChoice>,
+    /// Volume (percent) last sent to the receiver.
+    applied_volume: Option<f32>,
     last_save: Instant,
     /// Transient message under the source bar (e.g. why Start did nothing).
     notice: Option<String>,
@@ -160,6 +162,7 @@ impl DecDrmApp {
             },
             mute: args.no_audio,
             applied_theme,
+            applied_volume: None,
             last_save: now,
             notice: None,
         };
@@ -268,7 +271,13 @@ impl DecDrmApp {
     fn side_panel(&mut self, ui: &mut Ui) {
         panels::broadcast::clock(ui, self.rx.snap.time.as_ref());
         panels::broadcast::alternative_frequencies(ui, &self.rx.snap.afs);
-        if let Some(id) = panels::services::show(ui, &self.rx) {
+        let clicked = panels::services::show(ui, &self.rx, &mut self.settings.volume);
+        // A moved volume slider goes to the running receiver at once.
+        if self.applied_volume != Some(self.settings.volume) {
+            self.rx.set_volume(crate::settings::volume_gain(self.settings.volume));
+            self.applied_volume = Some(self.settings.volume);
+        }
+        if let Some(id) = clicked {
             // An audio service is decoded (and its text shown); a data service's
             // content is brought up in the data views.
             self.rx.select_service(id);

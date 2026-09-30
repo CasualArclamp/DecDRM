@@ -255,6 +255,8 @@ pub struct Settings {
     pub play_audio: bool,
     /// Sound-card output by name (`None` = system default).
     pub output_device: Option<String>,
+    /// Playback volume, percent (0–100; see [`volume_gain`]).
+    pub volume: f32,
     /// Save received data objects (slides, website files, programme guides) below this
     /// directory (the engine's `data_dir`); `None` saves nothing but the website files
     /// the browser needs (see `website`).
@@ -276,6 +278,8 @@ pub struct Settings {
     pub tx_duration_s: f64,
 }
 
+pub use decdrm_engine::volume_gain;
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -289,6 +293,7 @@ impl Default for Settings {
             realtime: true,
             play_audio: true,
             output_device: None,
+            volume: 100.0,
             data_dir: None,
             theme: ThemeChoice::System,
             plot_tab: PlotTab::Overview,
@@ -347,6 +352,7 @@ impl Settings {
             },
             play_audio: self.play_audio,
             output_device: self.output_device.clone(),
+            volume: volume_gain(self.volume),
             data_dir: self.data_dir.clone(),
             ..EngineConfig::default()
         })
@@ -524,6 +530,7 @@ mod tests {
             realtime: false,
             play_audio: false,
             output_device: Some("Speakers".into()),
+            volume: 35.0,
             data_dir: Some(PathBuf::from("received")),
             theme: ThemeChoice::Light,
             plot_tab: PlotTab::History,
@@ -541,6 +548,7 @@ mod tests {
         assert!(text.contains("format = \"iq-swapped\""), "{text}");
         assert!(text.contains("tx_output = \"device\""), "{text}");
         assert!(text.contains("plot_tab = \"history\""), "{text}");
+        assert!(text.contains("volume = 35.0"), "{text}");
         assert_eq!(parse(&text).unwrap(), s);
     }
 

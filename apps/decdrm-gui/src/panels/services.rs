@@ -275,9 +275,10 @@ fn service_bar(ui: &mut Ui, short_id: u8, service: Option<&ServiceView>, selecte
     response.clicked()
 }
 
-/// Draw the panel; returns the short id of a service the user clicked. (The caller
-/// acts on it: selecting needs `&mut RxSession`, and this function only reads.)
-pub fn show(ui: &mut Ui, rx: &RxSession) -> Option<u8> {
+/// Draw the panel with the playback `volume` (percent) slider; returns the short id of
+/// a service the user clicked. (The caller acts on it: selecting needs
+/// `&mut RxSession`, and this function only reads it.)
+pub fn show(ui: &mut Ui, rx: &RxSession, volume: &mut f32) -> Option<u8> {
     heading(ui, "Services");
     let mut clicked = None;
     ui.spacing_mut().item_spacing.y = 4.0;
@@ -339,7 +340,22 @@ pub fn show(ui: &mut Ui, rx: &RxSession) -> Option<u8> {
             ui.label(RichText::new(format!("{:+.1} ppm", a.drift_ppm)).monospace());
             ui.end_row();
         });
+    volume_slider(ui, volume);
     clicked
+}
+
+/// Playback volume in percent (a squared law, see `settings::volume_gain`), adjustable
+/// while the receiver runs.
+fn volume_slider(ui: &mut Ui, volume: &mut f32) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Volume").weak());
+        ui.spacing_mut().slider_width = 180.0;
+        let db = 20.0 * crate::settings::volume_gain(*volume).max(1e-6).log10();
+        let response = ui.add(egui::Slider::new(volume, 0.0..=100.0).show_value(false).step_by(1.0));
+        response.on_hover_text(format!("Playback volume ({db:+.1} dB); the sound card's own level is separate"));
+        let text = if *volume <= 0.0 { "muted".to_string() } else { format!("{:.0} %", *volume) };
+        ui.label(RichText::new(text).monospace());
+    });
 }
 
 #[cfg(test)]

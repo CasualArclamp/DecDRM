@@ -120,7 +120,8 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       minutes of signal with error rates per 10 s, LEDs, Dream-style service bars (codec,
       SBR/PS, rates, bit rate, EEP/UEP, text, data applications, CA), text, slideshow,
       Journaline, broadcast website (opens the HTML start page in the system browser on
-      a click), EPG, broadcast clock with local time, alternative frequencies, data
+      a click), EPG, broadcast clock with local time, alternative frequencies, playback
+      volume, data
       directory) and transmitter tab (TOML editor with error locations, validation,
       transmit to file/sound card, status, TX spectrum).
 - [x] **M7 Transmitter** — full TX chain, FDK AAC/HE-AAC encoding, all data services,

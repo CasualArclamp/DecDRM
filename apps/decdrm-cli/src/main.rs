@@ -66,6 +66,9 @@ struct RxArgs {
     /// Sound-card output device for --play.
     #[arg(long)]
     output_device: Option<String>,
+    /// Playback volume for --play, percent (0-100; a squared law, 50 is about -12 dB).
+    #[arg(long, value_name = "PERCENT", default_value_t = 100.0)]
+    volume: f32,
     /// Write the decoded audio to a WAV/FLAC file.
     #[arg(long, value_name = "FILE")]
     out: Option<PathBuf>,
@@ -168,6 +171,7 @@ fn rx(a: RxArgs) -> Result<()> {
         receiver,
         play_audio: a.play,
         output_device: a.output_device.clone(),
+        volume: decdrm_engine::volume_gain(a.volume),
         record_audio: a.out.clone(),
         data_dir: a.data_dir.clone(),
         log: a.log.clone().map(|p| LogConfig { interval_s: a.log_interval, ..LogConfig::new(p) }),

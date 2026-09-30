@@ -80,7 +80,7 @@ the browser plays the SDR's audio into the cable, and DecDRM records the other e
 
    ```bash
    decdrm devices                                   # list the sound cards
-   decdrm rx --device "CABLE Output" --format iq --play
+   decdrm rx --device "CABLE Output" --format iq --play --volume 70
    ```
 
    In the GUI, choose *Sound card*, pick the cable, set the format (*I/Q* for IQ mode),
@@ -155,6 +155,11 @@ The services appear as four bars, one per Short Id, as in Dream. Each bar shows:
 
 Click a bar to decode that service; hover for the details (service ID, streams, packet
 ids).
+
+The *Audio* section under the text message shows the decoder and playback figures
+and the **volume** slider. The slider acts at once, even on audio already queued, and
+leaves recordings and the audio spectrum unchanged. It uses a squared law, so 50 % is
+about −12 dB; in the CLI, use `--volume PERCENT` with `--play`.
 
 ## Services, data and logs
 

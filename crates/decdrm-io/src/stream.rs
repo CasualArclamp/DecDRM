@@ -38,7 +38,7 @@
 //! or consume the missing frames, then re-check the ring buffer: simple, and without any
 //! signalling from the real-time thread.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -513,7 +513,6 @@ pub struct OutputStats {
     pub state: OutputState,
 }
 
-#[derive(Default)]
 pub(crate) struct OutputShared {
     /// Frames rendered (the device clock).
     pub(crate) frames_rendered: AtomicU64,
@@ -526,6 +525,23 @@ pub(crate) struct OutputShared {
     pub(crate) start_threshold: AtomicUsize,
     /// When set, running dry is expected (end of stream) and not counted as an underrun.
     pub(crate) draining: AtomicBool,
+    /// Playback volume: a linear gain as `f32` bits (1.0 = unchanged).
+    pub(crate) volume: AtomicU32,
+}
+
+impl Default for OutputShared {
+    fn default() -> Self {
+        Self {
+            frames_rendered: AtomicU64::new(0),
+            fill_integral: AtomicU64::new(0),
+            underruns: AtomicU64::new(0),
+            underrun_frames: AtomicU64::new(0),
+            playing: AtomicBool::new(false),
+            start_threshold: AtomicUsize::new(0),
+            draining: AtomicBool::new(false),
+            volume: AtomicU32::new(1.0f32.to_bits()),
+        }
+    }
 }
 
 /// The half of an output stream that runs inside the audio callback.
@@ -538,6 +554,8 @@ pub(crate) struct Renderer {
     fade_in_left: usize,
     fade_out_left: usize,
     last_frame: Vec<f32>,
+    /// Volume applied at the end of the previous callback (ramped to the new setting).
+    gain: f32,
 }
 
 impl Renderer {
@@ -614,6 +632,19 @@ impl Renderer {
                 frame.fill(0.0);
             }
         }
+
+        // Volume, ramped linearly over this callback when it changes (a step would be
+        // heard as a click or "zipper" noise).
+        let target = f32::from_bits(self.shared.volume.load(Relaxed));
+        if target != 1.0 || self.gain != 1.0 {
+            let start = self.gain;
+            let step = (target - start) / frames.max(1) as f32;
+            for (i, frame) in out.chunks_exact_mut(ch).enumerate() {
+                let g = if step == 0.0 { target } else { start + step * (i + 1) as f32 };
+                frame.iter_mut().for_each(|s| *s *= g);
+            }
+            self.gain = target;
+        }
         self.shared.frames_rendered.fetch_add(frames as u64, Relaxed);
     }
 }
@@ -673,6 +704,7 @@ impl OutputStream {
             fade_in_left: 0,
             fade_out_left: 0,
             last_frame: vec![0.0; ch],
+            gain: 1.0,
         };
         let stream = OutputStream {
             stream: None,
@@ -685,6 +717,19 @@ impl OutputStream {
             capacity_frames,
         };
         (stream, renderer, sink)
+    }
+
+    /// Set the playback volume: a linear gain (0 = silent, 1 = unchanged, at most 4)
+    /// applied as the samples leave for the device, so it takes effect within one
+    /// callback; changes are ramped over a callback to avoid clicks.
+    pub fn set_volume(&self, gain: f32) {
+        let gain = if gain.is_finite() { gain.clamp(0.0, 4.0) } else { 1.0 };
+        self.shared.volume.store(gain.to_bits(), Relaxed);
+    }
+
+    /// The playback volume (linear gain).
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.shared.volume.load(Relaxed))
     }
 
     /// The device's format: queue audio at this rate and channel count.
@@ -960,6 +1005,29 @@ mod tests {
         assert!(buf[240] < 1.0 && buf[240] > 0.9);
         assert!(buf[240 + FADE_OUT_FRAMES..].iter().all(|&s| s == 0.0));
         assert_eq!(out.stats().frames_played, 4 * 480);
+    }
+
+    #[test]
+    fn volume_is_ramped_then_applied() {
+        let fmt = AudioFormat::new(48_000, 1);
+        let (mut out, mut r, _sink) = OutputStream::parts(fmt, 10_000, 0);
+        out.write(&vec![1.0; 1000]).unwrap();
+        let mut first = vec![0.0f32; FADE_IN_FRAMES + 44];
+        r.render(&mut first);
+        assert!(first[FADE_IN_FRAMES..].iter().all(|&s| s == 1.0), "unity by default, after the fade-in");
+        let mut buf = vec![0.0f32; 100];
+        assert_eq!(out.volume(), 1.0);
+        out.set_volume(0.25);
+        r.render(&mut buf);
+        assert!((buf[0] - (1.0 - 0.75 / 100.0)).abs() < 1e-6, "ramp starts near the old gain: {}", buf[0]);
+        assert!(buf.windows(2).all(|w| w[1] < w[0]), "falls smoothly");
+        assert!((buf[99] - 0.25).abs() < 1e-6);
+        r.render(&mut buf);
+        assert!(buf.iter().all(|&s| (s - 0.25).abs() < 1e-6), "then flat at the new gain");
+        out.set_volume(f32::NAN);
+        assert_eq!(out.volume(), 1.0, "invalid values mean unity");
+        out.set_volume(9.0);
+        assert_eq!(out.volume(), 4.0);
     }
 
     #[test]

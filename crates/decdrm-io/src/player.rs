@@ -295,6 +295,17 @@ impl AudioPlayer {
         self.resampler.as_ref().map_or(0.0, |rs| rs.ratio_adjust_ppm())
     }
 
+    /// Set the playback volume (linear gain, see [`OutputStream::set_volume`]); it takes
+    /// effect at once, not after the queued audio.
+    pub fn set_volume(&self, gain: f32) {
+        self.output.set_volume(gain);
+    }
+
+    /// The playback volume (linear gain).
+    pub fn volume(&self) -> f32 {
+        self.output.volume()
+    }
+
     /// The sound card's format.
     pub fn device_format(&self) -> AudioFormat {
         self.output.format()
