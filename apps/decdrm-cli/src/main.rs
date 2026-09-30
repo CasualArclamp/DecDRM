@@ -134,6 +134,9 @@ stopping (Ctrl-C again to quit immediately)");
 fn devices() -> Result<()> {
     for (title, list) in [("Input", decdrm_io::list_input_devices()?), ("Output", decdrm_io::list_output_devices()?)] {
         println!("{title} devices:");
+        if list.is_empty() {
+            println!("  (none)");
+        }
         for d in list {
             let fmt = d.default_format.map(|f| format!("{} Hz, {} ch", f.sample_rate, f.channels)).unwrap_or_default();
             println!("  {}{} [{}] {}", if d.is_default { "* " } else { "  " }, d.name, d.host, fmt);
