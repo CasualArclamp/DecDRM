@@ -20,10 +20,23 @@ struct Outcome {
     codec: String,
     msc_ok: u64,
     msc_bad: u64,
+    fac_ok: u64,
+    fac_bad: u64,
+    sdc_ok: u64,
+    sdc_bad: u64,
+    /// Data units of applications DecDRM does not interpret.
+    raw_units: usize,
+    /// Timing jumps the receiver resynchronised after.
+    resyncs: usize,
 }
 
-/// Decode up to `seconds` of a recording; `None` if the file is absent.
+/// Decode up to `seconds` of a recording (a real signal); `None` if the file is absent.
 fn run(file: &str, seconds: f64) -> Option<Outcome> {
+    run_input(file, seconds, InputFormat::Real(RealChannel::Mix))
+}
+
+/// The same for an input format.
+fn run_input(file: &str, seconds: f64, input: InputFormat) -> Option<Outcome> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples").join(file);
     if !path.exists() {
         eprintln!("skipping: {} not found", path.display());
@@ -31,7 +44,7 @@ fn run(file: &str, seconds: f64) -> Option<Outcome> {
     }
     let mut source = Source::open(&InputSpec::File { path, realtime: false }).expect("open recording");
     let ch = source.info().channels;
-    let cfg = ReceiverConfig { input: InputFormat::Real(RealChannel::Mix), channels: ch, ..Default::default() };
+    let cfg = ReceiverConfig { input, channels: ch, ..Default::default() };
     let mut session = Session::new(cfg);
     let mut o = Outcome::default();
     while source.position_s() < seconds {
@@ -42,6 +55,8 @@ fn run(file: &str, seconds: f64) -> Option<Outcome> {
                 SessionEvent::Data { event: DataEvent::SlideShowImage { name, .. }, .. } => o.slides.push(name),
                 SessionEvent::Data { event: DataEvent::WebsiteFile { .. }, .. } => o.website_files += 1,
                 SessionEvent::Data { event: DataEvent::Journaline(_), .. } => o.journaline_objects += 1,
+                SessionEvent::Data { event: DataEvent::Raw { .. }, .. } => o.raw_units += 1,
+                SessionEvent::Log(l) if l.contains("timing jump") => o.resyncs += 1,
                 _ => {}
             }
         }
@@ -52,7 +67,46 @@ fn run(file: &str, seconds: f64) -> Option<Outcome> {
     o.codec = session.audio_stats.codec.clone();
     o.msc_ok = session.msc_stats.ok;
     o.msc_bad = session.msc_stats.bad;
+    let st = session.status();
+    (o.fac_ok, o.fac_bad, o.sdc_ok, o.sdc_bad) = (st.fac_ok, st.fac_bad, st.sdc_ok, st.sdc_bad);
     Some(o)
+}
+
+/// Korean Central Broadcasting's second programme on 6140 kHz, received with KiwiSDRs
+/// in I/Q mode (12 kHz). It is signalled as a data service (user application 0x000,
+/// packet mode) whose MSC carries a format no standard receiver knows; DecDRM captures
+/// the data units.
+const KCBS_LABEL: &str = "조선중앙제2라지오방송";
+const IQ: InputFormat = InputFormat::Iq { swap: false };
+
+/// From Japan on a good night (SNR ~24 dB): everything decodes.
+#[test]
+fn kcbs_data_service_good_night() {
+    let Some(o) = run_input("SND.jj8ntm.proxy.kiwisdr.com_2026-09-30T12_58_36Z_6140.00_iq.wav", 60.0, IQ) else { return };
+    assert_eq!(o.labels, [KCBS_LABEL]);
+    assert_eq!((o.fac_bad, o.sdc_bad, o.msc_bad), (0, 0, 0), "FAC/SDC/MSC errors");
+    assert!(o.msc_ok >= 78 && o.raw_units >= 78, "{} MSC frames, {} data units", o.msc_ok, o.raw_units);
+}
+
+/// From Japan, with a KiwiSDR stream glitch at 28 s: one resynchronisation, and the MSC
+/// keeps decoding around it.
+#[test]
+fn kcbs_timing_jump_in_a_web_sdr_stream() {
+    let Some(o) = run_input("SND.jj8ntm.proxy.kiwisdr.com_2026-09-30T12_52_02Z_6140.00_iq.wav", 60.0, IQ) else { return };
+    assert_eq!(o.labels, [KCBS_LABEL]);
+    assert_eq!(o.resyncs, 1, "timing jumps");
+    assert!(o.msc_ok >= 77 && o.msc_bad <= 2, "MSC {} ok, {} bad", o.msc_ok, o.msc_bad);
+}
+
+/// From Australia over a very bad path (SNR ~9 dB, delay spread beyond mode B's guard
+/// interval, ~2 Hz Doppler): the 16-QAM MSC is beyond reach (as with the simulated DRM
+/// channels 5/6 at that SNR), but the FAC and part of the SDC decode.
+#[test]
+fn kcbs_very_bad_path() {
+    let Some(o) = run_input("SND.kiwisdr.areg.org.au_2026-09-30T12_46_51Z_6140.00_iq.wav", 60.0, IQ) else { return };
+    assert_eq!(o.labels, [KCBS_LABEL]);
+    assert!(o.fac_ok >= 95 && o.fac_bad <= 5, "FAC {} ok, {} bad", o.fac_ok, o.fac_bad);
+    assert!(o.sdc_ok >= 10, "SDC {} ok, {} bad", o.sdc_ok, o.sdc_bad);
 }
 
 #[test]

@@ -58,7 +58,10 @@ pub struct ChanStats {
     pub fac_chan_pow: Real,
     /// Doppler spread estimate (2σ), Hz.
     pub doppler_hz: Real,
-    /// Delay spread estimate, ms.
+    /// Delay spread estimate, ms: the smallest of the per-symbol estimates (the span
+    /// of the impulse response holding its energy above the noise) over the last
+    /// second, as Dream displays it — a single estimate is inflated by the noise in the
+    /// impulse response. The frequency Wiener filter uses the current estimate.
     pub delay_ms: Real,
 }
 
@@ -108,6 +111,8 @@ pub struct ChannelEstimator {
     fac_pow_acc: Real,
     fac_cnt: usize,
     pub stats: ChanStats,
+    /// Per-symbol delay spread estimates of the last second, ms (for `stats.delay_ms`).
+    delay_hist: VecDeque<Real>,
     /// Latest outputs of the impulse-response tracker.
     pub last_track: TrackOutput,
 }
@@ -171,6 +176,7 @@ impl ChannelEstimator {
             fac_pow_acc: 0.0,
             fac_cnt: 0,
             stats: ChanStats::default(),
+            delay_hist: VecDeque::new(),
             last_track: TrackOutput::default(),
             map,
         };
@@ -398,7 +404,14 @@ impl ChannelEstimator {
         }
         self.stats.doppler_hz = 2.0 * self.tw.sigma();
         let ir_sample_ms = map.mode().fft_size() as Real / (Real::from(SAMPLE_RATE) * (self.num_pil * self.x) as Real) * 1000.0;
-        self.stats.delay_ms = (self.last_track.pds_len * ir_sample_ms).max(0.0);
+        let (gn, gd) = map.mode().guard_ratio();
+        let symbol_s = map.mode().fft_size() as Real * (1.0 + gn as Real / gd as Real) / Real::from(SAMPLE_RATE);
+        let keep = (1.0 / symbol_s).ceil() as usize;
+        self.delay_hist.push_back((self.last_track.pds_len * ir_sample_ms).max(0.0));
+        while self.delay_hist.len() > keep {
+            self.delay_hist.pop_front();
+        }
+        self.stats.delay_ms = self.delay_hist.iter().copied().fold(Real::INFINITY, Real::min);
     }
 
     /// Per-carrier SNR (dB) of the MSC cells, for plotting.

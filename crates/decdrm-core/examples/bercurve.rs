@@ -119,7 +119,10 @@ fn main() {
         a.iter,
         a.secs
     );
-    println!("{:>6} {:>10} {:>9} {:>7} {:>8} {:>8} {:>7}", "SNR", "BER", "bits", "FER", "frames", "rx SNR", "MER");
+    println!(
+        "{:>6} {:>10} {:>9} {:>7} {:>8} {:>8} {:>7} {:>7} {:>7}",
+        "SNR", "BER", "bits", "FER", "frames", "rx SNR", "MER", "FAC ok", "SDC ok"
+    );
     for &snr in &a.snrs {
         let mut tx = Transmitter::new(tx_cfg).expect("transmitter");
         let layout = tx.layout();
@@ -188,11 +191,14 @@ fn main() {
         }
         let st = rx.status();
         let ber = if bits > 0 { errors as f64 / bits as f64 } else { f64::NAN };
+        let share = |ok: u64, bad: u64| if ok + bad > 0 { format!("{:.0}%", 100.0 * ok as f64 / (ok + bad) as f64) } else { "-".into() };
         println!(
-            "{snr:>6.1} {ber:>10.2e} {bits:>9} {:>7.3} {frames:>8} {:>8} {:>7}",
+            "{snr:>6.1} {ber:>10.2e} {bits:>9} {:>7.3} {frames:>8} {:>8} {:>7} {:>7} {:>7}",
             if frames > 0 { frame_errors as f64 / frames as f64 } else { f64::NAN },
             st.snr_db.map_or("-".into(), |v| format!("{v:.1}")),
             st.mer_db.map_or("-".into(), |v| format!("{v:.1}")),
+            share(st.fac_ok, st.fac_bad),
+            share(st.sdc_ok, st.sdc_bad),
         );
     }
 }
