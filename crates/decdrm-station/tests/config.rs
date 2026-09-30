@@ -328,6 +328,15 @@ fn raw_applications_and_alternative_frequencies_are_checked() {
     ] {
         assert!(has(&p, needle), "{needle}: {p:#?}");
     }
+    let p = problems(&(base() + "
+    [simulate]
+    channel = 7
+    snr_db = 100
+    sample_rate_offset_ppm = 9000
+"));
+    for needle in ["channel 7 is not a DRM channel model", "snr_db 100", "sample_rate_offset_ppm 9000"] {
+        assert!(has(&p, needle), "{needle}: {p:#?}");
+    }
     // Written back as TOML, the [afs] section survives; an empty one is left out.
     let cfg = parse(&text);
     let again = parse(&cfg.to_toml_string().unwrap());

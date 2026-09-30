@@ -272,6 +272,25 @@ multiplex: streams, bit rates, codec settings and what goes where.
   - `[[afs.other]]`: a service on `drm`, `am`, `fm` (`mhz`) or `dab` (`channels`);
   - `[[afs.schedule]]` and `[[afs.region]]`, which the lists refer to.
 
+### Test signals: the channel simulator
+
+`[simulate]` passes the signal through a DRM channel model before the outputs:
+- channel models 1–6 of ES 201 980 annex B (multipath with Rayleigh fading);
+- white noise at a given SNR;
+- a frequency offset;
+- a receiver clock error.
+
+Use it to test receivers, DecDRM or others, against a known channel:
+
+```bash
+decdrm tx station.toml --duration 60 --output ch3_18dB.wav --channel-model 3 --snr 18
+decdrm rx ch3_18dB.wav                  # the SNR shown should be close to 18 dB
+```
+
+The SNR is measured in the nominal channel bandwidth (10 kHz for a 10 kHz signal), as
+the receiver reports it. Roughly, 64-QAM needs 15 dB on channel 1 and 22–25 dB on the
+fading channels 3–5; 16-QAM needs about 6 dB less.
+
 ### The GUI's Transmitter tab
 
 The GUI's *Transmitter* page edits the station file:

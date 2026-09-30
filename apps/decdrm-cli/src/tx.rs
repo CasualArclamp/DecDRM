@@ -22,6 +22,14 @@ pub struct TxArgs {
     /// Only check the configuration and print the multiplex.
     #[arg(long)]
     check: bool,
+    /// Pass the signal through DRM channel model 1-6 (ES 201 980 annex B) before the
+    /// outputs, overriding the file's [simulate] section.
+    #[arg(long, value_name = "1-6")]
+    channel_model: Option<u8>,
+    /// Add white noise for this SNR (dB, in the nominal channel bandwidth); implies
+    /// channel model 1 (AWGN) unless one is set.
+    #[arg(long, value_name = "DB", allow_negative_numbers = true)]
+    snr: Option<f64>,
 }
 
 pub fn run(a: TxArgs) -> Result<()> {
@@ -30,6 +38,15 @@ pub fn run(a: TxArgs) -> Result<()> {
         // Relative to the current directory, not to the configuration file.
         cfg.output.file = Some(std::path::absolute(out).with_context(|| format!("output path {}", out.display()))?);
         cfg.output.device = None;
+    }
+    if a.channel_model.is_some() || a.snr.is_some() {
+        let sim = cfg.simulate.get_or_insert_with(|| decdrm_station::SimulateSettings::new(1, None));
+        if let Some(model) = a.channel_model {
+            sim.channel = model;
+        }
+        if a.snr.is_some() {
+            sim.snr_db = a.snr;
+        }
     }
     let plan = cfg.validate()?;
     print!("{}", plan.describe(&cfg));

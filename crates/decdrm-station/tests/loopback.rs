@@ -703,6 +703,49 @@ fn tpeg_raw_data_and_alternative_frequencies() {
     }
 }
 
+/// The channel simulator (`[simulate]`): the receiver measures the SNR, the frequency
+/// offset and the clock error that were put in, and still decodes everything.
+#[test]
+fn channel_simulator_impairs_the_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let toml = r#"
+        [channel]
+        mode = "B"
+        occupancy = 3
+        msc_mode = "16-QAM"
+        interleaving = "short"
+        [output]
+        file = "sim.wav"
+        [[service]]
+        label = "Simulated"
+        id = 0xD0D0B1
+        [service.audio]
+        codec = "aac"
+        core_rate = 12000
+        input = { tone_hz = 800.0 }
+        [simulate]
+        channel = 1
+        snr_db = 20
+        frequency_offset_hz = 35.0
+        sample_rate_offset_ppm = 100
+    "#;
+    let (_, _, status) = transmit(dir.path(), toml, 40);
+    assert_clean_encoding(&status);
+    let d = decode(&dir.path().join("sim.wav"), false);
+    let st = d.session.status();
+    println!("receiver: SNR {:?} dB, DC {:?} Hz, SRO {:.2} Hz", st.snr_db, st.dc_frequency_hz, st.sro_hz);
+    assert!(st.snr_db.is_some_and(|snr| (snr - 20.0).abs() < 1.5), "SNR {:?}", st.snr_db);
+    // The DC carrier at 12 kHz + 35 Hz: the receiver reports it after correcting its
+    // clock, i.e. on the transmitter's frequency scale.
+    let dc = st.dc_frequency_hz.unwrap();
+    assert!((dc - 12_035.0).abs() < 1.0, "DC {dc} Hz");
+    // 100 ppm = 4.8 Hz at 48 kHz; the receiver corrects the opposite sign.
+    assert!((st.sro_hz + 4.8).abs() < 0.5, "SRO {} Hz", st.sro_hz);
+    let a = &d.session.audio_stats;
+    // AAC with a 12 kHz core: 5 frames per 400 ms, 200 in the 16 s of signal.
+    assert!(a.frames_ok > 150 && a.frames_concealed == 0, "{} ok, {} concealed", a.frames_ok, a.frames_concealed);
+}
+
 /// A non-looping input file ends the programme: the station reports it (the CLI then
 /// stops), and the file gets the frames plus the channel filter's tail.
 #[test]

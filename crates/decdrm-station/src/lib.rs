@@ -50,7 +50,7 @@ pub use audio::AudioCounters;
 pub use config::{
     AppKind, AppSettings, AudioInputSettings, AudioSettings, ChannelSettings, Codec, EpgProgramme, FacLanguage,
     JournalineFile, JournalinePage, OutputSettings, Part, ProgrammeType, SampleFormat, ServiceSettings, SignalFormat,
-    StationConfig, TimeSettings,
+    SimulateSettings, StationConfig, TimeSettings,
 };
 pub use data::load_journaline;
 pub use error::{ConfigProblems, Result, StationError};

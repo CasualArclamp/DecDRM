@@ -20,6 +20,8 @@ use crate::output::DeviceSink;
 use crate::plan::{FRAME_SECONDS, MultiplexPlan, StreamContent};
 use crate::sdc::{SdcScheduler, entities};
 use decdrm_core::Cplx;
+use decdrm_core::channel::ChannelSimulator;
+use decdrm_core::channel::resample::Resampler;
 use decdrm_core::fac::ServiceParams;
 use decdrm_core::mux::msc::multiplex;
 use decdrm_core::tx::Transmitter;
@@ -164,6 +166,13 @@ pub struct Station {
     names: Vec<String>,
     status: StationStatus,
     baseband: Vec<Cplx>,
+    /// Channel simulator (`[simulate]`: fading, frequency offset, noise) and its output.
+    simulator: Option<ChannelSimulator>,
+    impaired: Vec<Cplx>,
+    /// The simulated receiver clock error, applied to the output samples so that it
+    /// scales the whole spectrum (the IF too), as a sound card's clock does.
+    clock: Option<Resampler>,
+    clock_buf: (Vec<Cplx>, Vec<Cplx>),
     samples: Vec<f32>,
     stop: StopHandle,
 }
@@ -246,6 +255,14 @@ impl Station {
         let device = DeviceSink::open(&cfg.output, channels)?;
 
         let output_file = cfg.output.file.as_ref().map(|f| cfg.resolve(f));
+        let simulator = cfg.simulate.as_ref().and_then(|s| s.channel_config()).map(|c| {
+            ChannelSimulator::new(plan.layout, decdrm_core::channel::ChannelConfig { sample_rate_offset_ppm: 0.0, ..c })
+        });
+        let clock = cfg
+            .simulate
+            .as_ref()
+            .filter(|s| s.sample_rate_offset_ppm != 0.0)
+            .map(|s| Resampler::new(1.0 + s.sample_rate_offset_ppm * 1e-6));
         let mut station = Self {
             status: StationStatus { sdc_capacity: plan.sdc_capacity, output_file, ..Default::default() },
             cfg,
@@ -261,6 +278,10 @@ impl Station {
             start_unix,
             names,
             baseband: Vec::new(),
+            simulator,
+            impaired: Vec::new(),
+            clock,
+            clock_buf: (Vec::new(), Vec::new()),
             samples: Vec::new(),
             stop: StopHandle::default(),
         };
@@ -328,8 +349,19 @@ impl Station {
         let fac = self.fac.next_fac();
         self.baseband.clear();
         self.tx.transmit_frame_into(&fac, &msc, sdc.as_deref(), &mut self.baseband)?;
+        // Rust note: `signal` borrows either buffer; the borrow checker accepts the
+        // mutable use of the other fields below because they are distinct fields.
+        let signal = match self.simulator.as_mut() {
+            Some(sim) => {
+                self.impaired.clear();
+                sim.process(&self.baseband, &mut self.impaired);
+                &self.impaired
+            }
+            None => &self.baseband,
+        };
         self.samples.clear();
-        self.output.process(&self.baseband, &mut self.samples);
+        self.output.process(signal, &mut self.samples);
+        self.apply_clock();
         self.write_outputs()?;
         self.status.frames += 1;
         self.update_levels();
@@ -351,6 +383,7 @@ impl Station {
     pub fn finish(mut self) -> Result<StationStatus> {
         self.samples.clear();
         self.output.flush(&mut self.samples);
+        self.apply_clock();
         self.write_outputs()?;
         if let Some(f) = self.file.take() {
             f.finalize().map_err(StationError::Output)?;
@@ -360,6 +393,28 @@ impl Station {
         }
         self.update_status();
         Ok(self.status)
+    }
+
+    /// Resample `samples` for the simulated receiver clock error, if any.
+    fn apply_clock(&mut self) {
+        let Some(r) = self.clock.as_mut() else { return };
+        let ch = self.output.channels();
+        let (input, output) = &mut self.clock_buf;
+        input.clear();
+        input.extend(
+            self.samples
+                .chunks_exact(ch)
+                .map(|f| Cplx::new(f64::from(f[0]), f.get(1).map_or(0.0, |&q| f64::from(q)))),
+        );
+        output.clear();
+        r.process(input, output);
+        self.samples.clear();
+        for c in output.iter() {
+            self.samples.push(c.re as f32);
+            if ch > 1 {
+                self.samples.push(c.im as f32);
+            }
+        }
     }
 
     fn write_outputs(&mut self) -> Result<()> {

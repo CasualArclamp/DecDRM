@@ -30,6 +30,15 @@ format = "real"              # "real" IF signal (1 channel) or "iq" (2 channels,
 level_dbfs = -15             # RMS level per channel; OFDM peaks are ~10 dB higher
 band_limit = true            # transmit channel filter against the OFDM side lobes
 
+# --- Channel simulator (for testing receivers): impairs the signal before the outputs --
+# [simulate]                 # the CLI's --channel-model N / --snr DB set or override this
+# channel = 3                # DRM channel model (ES 201 980 annex B): 1 AWGN, 2 Rice with delay,
+                             # 3 US Consortium, 4 CCIR Poor, 5 and 6 (severe Doppler and delay)
+# snr_db = 20                # SNR in the nominal channel bandwidth (omit: no noise)
+# frequency_offset_hz = 0.0  # carrier frequency offset
+# sample_rate_offset_ppm = 0 # the receiver's clock error (scales the whole spectrum)
+# seed = 1                   # same seed, same fading and noise
+
 # --- SDC time and date (type 8), sent at the start and then once per minute ---------
 [time]
 enabled = true

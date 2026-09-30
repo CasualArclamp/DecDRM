@@ -41,6 +41,9 @@ pub struct StationConfig {
     /// Alternative frequencies (SDC types 3, 4, 7 and 11; see [`crate::afs`]).
     #[serde(default, skip_serializing_if = "AfsSettings::is_empty")]
     pub afs: AfsSettings,
+    /// Channel simulator impairing the output, for testing receivers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulate: Option<SimulateSettings>,
     /// The services, in Short Id order (`[[service]]` tables in the file).
     #[serde(rename = "service", default)]
     pub services: Vec<ServiceSettings>,
@@ -247,6 +250,79 @@ pub enum SampleFormat {
 // ---------------------------------------------------------------------------------
 // Time
 // ---------------------------------------------------------------------------------
+
+/// The channel simulator (`[simulate]`): the signal passes through a DRM channel model
+/// of ES 201 980 annex B (multipath with Rayleigh fading) with a frequency offset, a
+/// receiver clock error and white noise before it reaches the outputs — a test signal
+/// for receivers. See [`decdrm_core::channel`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimulateSettings {
+    /// DRM channel model 1–6: 1 AWGN, 2 Rice with delay, 3 US Consortium, 4 CCIR Poor,
+    /// 5 and 6 (strong Doppler and delay spread, for modes C and D).
+    #[serde(default = "default_channel_model")]
+    pub channel: u8,
+    /// Signal-to-noise ratio in the nominal channel bandwidth (as the receiver reports
+    /// it), dB; none: no noise.
+    #[serde(default)]
+    pub snr_db: Option<f64>,
+    /// Frequency offset added to the signal, Hz.
+    #[serde(default)]
+    pub frequency_offset_hz: f64,
+    /// Clock error of the simulated receiver, ppm (positive: it samples faster). It
+    /// scales the whole output spectrum, the IF too, as a sound card's clock error does.
+    #[serde(default)]
+    pub sample_rate_offset_ppm: f64,
+    /// Seed of the fading and noise generators (the same seed gives the same signal).
+    #[serde(default = "default_seed")]
+    pub seed: u64,
+}
+
+fn default_channel_model() -> u8 {
+    1
+}
+
+fn default_seed() -> u64 {
+    1
+}
+
+impl SimulateSettings {
+    /// A simulation of DRM channel `channel` at `snr_db` (none: no noise).
+    pub fn new(channel: u8, snr_db: Option<f64>) -> Self {
+        Self { channel, snr_db, frequency_offset_hz: 0.0, sample_rate_offset_ppm: 0.0, seed: default_seed() }
+    }
+
+    /// The simulator's settings; `None` for an invalid channel model number.
+    pub fn channel_config(&self) -> Option<decdrm_core::channel::ChannelConfig> {
+        Some(decdrm_core::channel::ChannelConfig {
+            model: decdrm_core::channel::ChannelModel::drm(self.channel)?,
+            snr_db: self.snr_db,
+            freq_offset_hz: self.frequency_offset_hz,
+            sample_rate_offset_ppm: self.sample_rate_offset_ppm,
+            seed: self.seed,
+        })
+    }
+
+    /// One-line description, e.g. `DRM channel 3 (US Consortium), SNR 15.0 dB`.
+    pub fn describe(&self) -> String {
+        let mut s = format!(
+            "DRM channel {} ({})",
+            self.channel,
+            decdrm_core::channel::ChannelModel::drm_name(self.channel)
+        );
+        match self.snr_db {
+            Some(snr) => s += &format!(", SNR {snr:.1} dB"),
+            None => s += ", no noise",
+        }
+        if self.frequency_offset_hz != 0.0 {
+            s += &format!(", {:+.1} Hz", self.frequency_offset_hz);
+        }
+        if self.sample_rate_offset_ppm != 0.0 {
+            s += &format!(", receiver clock {:+.0} ppm", self.sample_rate_offset_ppm);
+        }
+        s
+    }
+}
 
 /// The SDC time and date entity (type 8), sent at the start and then once per minute
 /// (ES 201 980 §6.4.3.9; Dream sends it at the minute edge too).

@@ -324,6 +324,9 @@ impl MultiplexPlan {
             };
             let _ = writeln!(s, "stream {}: {} bytes ({:.2} kbit/s) {part} - {what}", st.id, st.bytes(), st.bitrate() / 1000.0);
         }
+        if let Some(sim) = &cfg.simulate {
+            let _ = writeln!(s, "channel simulator: {}", sim.describe());
+        }
         let afs = &cfg.afs;
         if !afs.is_empty() {
             let count = |n: usize, what: &str| match n {
@@ -662,6 +665,24 @@ fn build(cfg: &StationConfig) -> Result<MultiplexPlan> {
     // --- Alternative frequencies.
     for problem in crate::afs::problems(&cfg.afs, cfg.services.len()) {
         p.push(problem);
+    }
+
+    // --- Channel simulator.
+    if let Some(sim) = &cfg.simulate {
+        if !(1..=6).contains(&sim.channel) {
+            p.push(format!("simulate: channel {} is not a DRM channel model (1-6)", sim.channel));
+        }
+        if let Some(snr) = sim.snr_db
+            && !(-20.0..=80.0).contains(&snr)
+        {
+            p.push(format!("simulate: snr_db {snr} is outside -20..80 dB"));
+        }
+        if !(-2000.0..=2000.0).contains(&sim.frequency_offset_hz) {
+            p.push(format!("simulate: frequency_offset_hz {} is outside ±2000 Hz", sim.frequency_offset_hz));
+        }
+        if !(-5000.0..=5000.0).contains(&sim.sample_rate_offset_ppm) {
+            p.push(format!("simulate: sample_rate_offset_ppm {} is outside ±5000 ppm", sim.sample_rate_offset_ppm));
+        }
     }
     // Nothing below makes sense without a valid channel and services.
     p.finish()?;

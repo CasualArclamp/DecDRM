@@ -37,7 +37,8 @@ encoding) and libopus.
   slideshow, website, Journaline, EPG, TPEG and raw data, alternative frequencies,
   every MSC mode incl. hierarchical 64-QAM and unequal protection, WAV/FLAC or
   sound-card output (clock-drift compensated with a sound-card input), plus a channel
-  simulator (the DRM channel models 1–6) for testing.
+  simulator (the DRM channel models 1–6, noise, frequency and clock offsets:
+  `[simulate]` or `decdrm tx … --channel-model 3 --snr 18`) for testing receivers.
 - Desktop GUI (egui): spectrum, waterfall, constellations, audio spectrum, channel,
   impulse response, SNR per carrier, reception history, status LEDs, services, text,
   slideshow, Journaline browser, broadcast website, EPG, broadcast clock, alternative

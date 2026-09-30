@@ -136,9 +136,18 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       10 with an `ENC1` config (Dream-safe), 1.5–24 kbit/s tiers, per-region CRC-8,
       optional repetition of the base layers, latent interpolation for lost frames.
       At 15 dB (mode B, 64-QAM) 2.1 % of frames concealed against 26.5 % for HE-AAC.
-- [ ] **M10 Polish** — performance, Linux verification, docs.
-      *Status:* manual GitHub Actions workflow (`.github/workflows/linux.yml`) builds
-      and tests the workspace on Ubuntu; receiver runs ~75–100× real time.
+- [x] **M10 Polish** — performance, Linux verification, docs.
+      *Done:* performance measured, no hot spot worth optimising: the receiver decodes
+      10 kHz signals at 100–150× real time and 20 kHz ones at ~45× on one core;
+      EnCodec encodes/decodes at ~15× real time; the GUI needs 2–6 % of a core while
+      decoding live (~12 frames/s, < 1 ms per frame; a frame per input event while the
+      mouse moves). Linux: the manual GitHub Actions workflow builds, tests and lints
+      the workspace, then smoke-tests device listing without a sound card, a CLI
+      transmit → receive round trip and the GUI under Xvfb/Mesa (screenshot artifact).
+      Docs: `docs/USER_GUIDE.md`; rustdoc builds without warnings. The station's
+      `[simulate]` section (and `decdrm tx --channel-model/--snr`) exposes the channel
+      simulator as a test-signal generator; its clock error is applied to the output
+      samples, so it scales the IF like a real sound-card clock.
 
 ## Conventions
 
