@@ -897,6 +897,7 @@ dependencies = [
  "clap",
  "decdrm-core",
  "decdrm-data",
+ "decdrm-encodec",
  "decdrm-engine",
  "decdrm-io",
  "decdrm-station",

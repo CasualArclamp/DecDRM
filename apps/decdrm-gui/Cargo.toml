@@ -18,6 +18,9 @@ path = "src/main.rs"
 # candle): `cargo run --release -p decdrm-gui --features encodec`. Fetch the weights
 # with `decdrm models download encodec`.
 encodec = ["decdrm-engine/encodec", "decdrm-station/encodec"]
+# EnCodec with its weights built in (a single-file executable, 93 MB more; see
+# `scripts/build-portable.ps1`).
+embed-weights = ["encodec", "dep:decdrm-encodec", "decdrm-encodec/embed-weights"]
 
 [dependencies]
 decdrm-engine = { path = "../../crates/decdrm-engine" }
@@ -25,6 +28,8 @@ decdrm-core = { path = "../../crates/decdrm-core" }
 decdrm-data = { path = "../../crates/decdrm-data" }
 decdrm-io = { path = "../../crates/decdrm-io" }
 decdrm-station = { path = "../../crates/decdrm-station" }
+# Only to switch on its `embed-weights` feature.
+decdrm-encodec = { path = "../../crates/decdrm-encodec", optional = true }
 anyhow.workspace = true
 # Same features as the CLI, so both share one compiled copy.
 clap = { version = "4.6", features = ["derive"] }

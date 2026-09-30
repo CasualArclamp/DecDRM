@@ -1,5 +1,7 @@
 # Build output
 /target/
+# Portable executables (scripts/build-portable.ps1)
+/exe/
 **/*.rs.bk
 
 # Local-only material (large or third-party docs, not redistributed)

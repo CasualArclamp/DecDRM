@@ -16,7 +16,9 @@
 //! **Lookup** ([`find_weights`]): with `$DECDRM_MODELS` set, only there. Otherwise
 //! `models/encodec_24khz/model.safetensors` in the executable's directory and up to four
 //! of its parents, so that development builds (`target/release/decdrm`, test binaries in
-//! `target/debug/deps`) find a `models` directory at the workspace root.
+//! `target/debug/deps`) find a `models` directory at the workspace root. Builds with the
+//! `embed-weights` feature (single-file portable executables) fall back to the weights
+//! built into them ([`EMBEDDED_WEIGHTS`]).
 
 use crate::sha256::Sha256;
 use std::io::Read;
@@ -39,6 +41,21 @@ pub const WEIGHTS_SHA256: &str = "37a7cb100f71a29e6c1d815aca8666a1d7ea8885ebe44c
 
 /// Parent directories of the executable searched besides its own.
 const PARENT_LEVELS: usize = 4;
+
+/// The weights built into the executable (`embed-weights` feature), else `None`.
+#[cfg(feature = "embed-weights")]
+pub static EMBEDDED_WEIGHTS: Option<&[u8]> = Some(include_bytes!(env!("DECDRM_EMBEDDED_WEIGHTS")));
+/// The weights built into the executable (`embed-weights` feature), else `None`.
+#[cfg(not(feature = "embed-weights"))]
+pub static EMBEDDED_WEIGHTS: Option<&[u8]> = None;
+
+/// What [`find_weights`] returns for the built-in weights (not a file).
+pub const EMBEDDED_PATH: &str = "<built into the executable>";
+
+/// Whether `path` stands for the built-in weights.
+pub fn is_embedded(path: &Path) -> bool {
+    EMBEDDED_WEIGHTS.is_some() && path == Path::new(EMBEDDED_PATH)
+}
 
 /// `$DECDRM_MODELS`, if set and not empty.
 fn env_models_dir() -> Option<PathBuf> {
@@ -93,10 +110,17 @@ impl std::fmt::Display for WeightsNotFound {
 
 impl std::error::Error for WeightsNotFound {}
 
-/// The first existing weights file of [`candidate_paths`].
+/// The first existing weights file of [`candidate_paths`], else [`EMBEDDED_PATH`] when
+/// the weights are built in.
 pub fn find_weights() -> Result<PathBuf, WeightsNotFound> {
     let searched = candidate_paths();
-    searched.iter().find(|p| p.is_file()).cloned().ok_or(WeightsNotFound { searched })
+    if let Some(p) = searched.iter().find(|p| p.is_file()) {
+        return Ok(p.clone());
+    }
+    if EMBEDDED_WEIGHTS.is_some() {
+        return Ok(PathBuf::from(EMBEDDED_PATH));
+    }
+    Err(WeightsNotFound { searched })
 }
 
 /// Why fetching or checking the weights failed.
@@ -118,14 +142,22 @@ pub enum DownloadError {
     Checksum { path: PathBuf, got: String, want: &'static str },
 }
 
-/// Check size and SHA-256 of a weights file.
+/// Check size and SHA-256 of a weights file (or of the built-in weights).
 pub fn verify_weights(path: &Path) -> Result<(), DownloadError> {
     let io = |source| DownloadError::Io { path: path.to_path_buf(), source };
+    if let (true, Some(bytes)) = (is_embedded(path), EMBEDDED_WEIGHTS) {
+        return check_weights(path, bytes.len() as u64, bytes);
+    }
     let got = std::fs::metadata(path).map_err(io)?.len();
+    check_weights(path, got, std::fs::File::open(path).map_err(io)?)
+}
+
+/// Check the size `got` and the SHA-256 of weights read from `file`.
+fn check_weights(path: &Path, got: u64, mut file: impl Read) -> Result<(), DownloadError> {
+    let io = |source| DownloadError::Io { path: path.to_path_buf(), source };
     if got != WEIGHTS_SIZE {
         return Err(DownloadError::Size { path: path.to_path_buf(), got, want: WEIGHTS_SIZE });
     }
-    let mut file = std::fs::File::open(path).map_err(io)?;
     let mut hash = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     loop {
@@ -215,5 +247,19 @@ mod tests {
             return;
         }
         verify_weights(&path).unwrap();
+    }
+
+    /// Built-in weights (`embed-weights` builds) are found last and verify.
+    #[test]
+    fn embedded_weights() {
+        assert!(!is_embedded(Path::new("x")));
+        match EMBEDDED_WEIGHTS {
+            Some(_) => {
+                assert!(is_embedded(Path::new(EMBEDDED_PATH)));
+                assert!(find_weights().is_ok());
+                verify_weights(Path::new(EMBEDDED_PATH)).unwrap();
+            }
+            None => assert!(!is_embedded(Path::new(EMBEDDED_PATH))),
+        }
     }
 }

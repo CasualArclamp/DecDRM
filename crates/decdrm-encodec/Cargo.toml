@@ -17,6 +17,11 @@ encodec = ["dep:candle-core", "dep:decdrm-codecs"]
 # Additionally cross-check the streaming model against candle-transformers' batch
 # EnCodec implementation (`cargo test -p decdrm-encodec --features reference`).
 reference = ["encodec", "dep:candle-nn", "dep:candle-transformers"]
+# Build the weights (93 MB) into the executable, used when no weights file is found:
+# for single-file portable builds (`scripts/build-portable.ps1`). Needs the weights at
+# build time, in `$DECDRM_MODELS` or the workspace's `models` directory
+# (`decdrm models download encodec`).
+embed-weights = ["encodec"]
 
 [dependencies]
 thiserror.workspace = true

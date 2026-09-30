@@ -16,6 +16,9 @@ path = "src/main.rs"
 # candle): `cargo build --release -p decdrm-cli --features encodec`. The weights are
 # fetched with `decdrm models download encodec` (available in every build).
 encodec = ["decdrm-engine/encodec", "decdrm-station/encodec"]
+# EnCodec with its weights built in (a single-file executable, 93 MB more; see
+# `scripts/build-portable.ps1`).
+embed-weights = ["encodec", "decdrm-encodec/embed-weights"]
 
 [dependencies]
 decdrm-engine = { path = "../../crates/decdrm-engine" }

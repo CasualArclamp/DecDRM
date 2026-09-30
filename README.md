@@ -62,6 +62,13 @@ Requirements: Rust 1.88 or newer (1.95 for the GUI), a C/C++ compiler (MSVC Buil
 on Windows, gcc on Linux) and CMake for the vendored codecs, and on Linux the ALSA
 development package (`libasound2-dev`).
 
+**Portable Windows executables**: `decdrm-gui.exe` and `decdrm.exe` that run on any
+64-bit Windows 10/11 with nothing installed (C runtime linked statically, EnCodec with
+its weights built in, about 100 MB each) are attached to the
+[releases](https://github.com/CasualArclamp/DecDRM/releases), or built into `exe\`
+with `powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1` (after
+`decdrm models download encodec`).
+
 ## Usage
 
 The [user guide](docs/USER_GUIDE.md) covers receiving from web SDRs through a virtual

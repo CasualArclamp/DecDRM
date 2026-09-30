@@ -470,8 +470,18 @@ impl EncodecModel {
     /// `facebook/encodec_24khz` (under 0.1 s; the decoder half and the codebooks take
     /// about 50 MB of memory, the whole model about 90 MB).
     pub fn load(path: &Path, parts: ModelParts) -> Result<Self, EncodecError> {
-        let data = std::fs::read(path).map_err(|e| EncodecError::Weights { path: path.to_path_buf(), message: e.to_string() })?;
-        let st = SliceSafetensors::new(&data)
+        // Rust note: `file` is declared outside the `match` so that the slice borrowed
+        // from it lives on after the `match`; the built-in weights are a `'static` slice.
+        let file;
+        let data: &[u8] = match weights::EMBEDDED_WEIGHTS {
+            Some(bytes) if weights::is_embedded(path) => bytes,
+            _ => {
+                file = std::fs::read(path)
+                    .map_err(|e| EncodecError::Weights { path: path.to_path_buf(), message: e.to_string() })?;
+                &file
+            }
+        };
+        let st = SliceSafetensors::new(data)
             .map_err(|e| EncodecError::Weights { path: path.to_path_buf(), message: format!("not a safetensors file: {e}") })?;
         let l = Loader { st, path };
         let encoder = if parts.encoder() { Some((l.encoder()?, l.quantizer_enc()?)) } else { None };

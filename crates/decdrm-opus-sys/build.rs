@@ -20,10 +20,17 @@ fn main() {
         println!("cargo:rerun-if-changed={}", opus_root.join(dir).display());
     }
 
+    // On MSVC the C runtime must be the one Rust links: the static one (/MT) in builds
+    // with `-C target-feature=+crt-static` (portable executables), else the DLL (/MD).
+    // Opus' CMakeLists sets CMAKE_MSVC_RUNTIME_LIBRARY from its OPUS_STATIC_RUNTIME
+    // option, overriding the compiler flags.
+    let static_crt = env::var("CARGO_CFG_TARGET_FEATURE").is_ok_and(|f| f.split(',').any(|x| x == "crt-static"));
     let dst = cmake::Config::new(&opus_root)
-        // Always optimised (the codec is far too slow unoptimised) and, on MSVC, always the
-        // release C runtime (/MD) that Rust links against.
+        // Always optimised (the codec is far too slow unoptimised) and, on MSVC, always a
+        // release C runtime.
         .profile("Release")
+        .static_crt(static_crt)
+        .define("OPUS_STATIC_RUNTIME", if static_crt { "ON" } else { "OFF" })
         .define("BUILD_SHARED_LIBS", "OFF")
         .define("OPUS_BUILD_SHARED_LIBRARY", "OFF")
         .define("OPUS_BUILD_PROGRAMS", "OFF")
