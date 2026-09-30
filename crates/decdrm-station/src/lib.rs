@@ -7,7 +7,8 @@
 //! services (AAC, HE-AAC, HE-AAC v2, xHE-AAC, Opus or — with the `encodec` feature —
 //! DecDRM's experimental EnCodec, from a file, a sound card or a test tone, with text
 //! messages) and data services (MOT slideshow, broadcast website,
-//! Journaline, EPG), whose applications may also ride along with an audio service.
+//! Journaline, EPG, TPEG or raw data), whose applications may also ride along with an
+//! audio service; plus alternative-frequency signalling ([`afs`]).
 //!
 //! ```text
 //! StationConfig ──validate──▶ MultiplexPlan (streams, lengths, codec parameters)
@@ -32,6 +33,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod afs;
 mod audio;
 pub mod config;
 mod data;
@@ -43,6 +45,7 @@ mod sdc;
 mod station;
 pub mod time;
 
+pub use afs::{AfsMultiplexSettings, AfsOtherSettings, AfsRegionSettings, AfsScheduleSettings, AfsSettings, OtherSystem};
 pub use audio::AudioCounters;
 pub use config::{
     AppKind, AppSettings, AudioInputSettings, AudioSettings, ChannelSettings, Codec, EpgProgramme, FacLanguage,

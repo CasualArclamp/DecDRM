@@ -10,9 +10,11 @@
 //!   programmes, binary encoded (TS 102 371) in a directory-mode MOT carousel with
 //!   ScopeStart/ScopeEnd/ScopeId (the described service, see
 //!   [`StationConfig::epg_scope`]).
+//! * TPEG and raw — the bytes of a file in "general data" MSC data groups of
+//!   `segment_size` bytes, cycled ([`RawSource`]); receivers capture them as they are.
 
 use crate::config::{AppKind, AppSettings, EpgFile, EpgProgramme, JournalineFile, JournalinePage, JournalineRow, StationConfig};
-use decdrm_data::encoder::DataUnitSource;
+use decdrm_data::encoder::{DataUnitSource, RawSource};
 use decdrm_data::epg::{self, EpgElement, EpgValue};
 use decdrm_data::journaline::{JournalineEncoder, ListItem, MenuItem, NmlObject, ROOT_OBJECT_ID};
 use decdrm_data::mot::{MotEncoder, content_type};
@@ -24,6 +26,8 @@ use std::path::{Path, PathBuf};
 
 /// Largest MOT segment size (13-bit field).
 const MAX_SEGMENT_SIZE: usize = decdrm_data::mot::MAX_SEGMENT_SIZE;
+/// TPEG and raw: default bytes per data group.
+const RAW_GROUP_BYTES: usize = 512;
 
 /// A boxed data-unit source that can move to another thread.
 pub(crate) type Source = Box<dyn DataUnitSource + Send>;
@@ -78,6 +82,13 @@ pub(crate) fn check_content(cfg: &StationConfig, app: &AppSettings) -> Result<()
             let programmes = epg_programmes(cfg, app)?;
             epg_object(&programmes, 0)?;
         }
+        AppKind::Tpeg | AppKind::Raw => {
+            let file = required_path(cfg, app)?;
+            let len = std::fs::metadata(&file).map_err(|e| format!("{}: {e}", file.display()))?.len();
+            if len == 0 {
+                return Err(format!("{} is empty", file.display()));
+            }
+        }
     }
     Ok(())
 }
@@ -126,6 +137,19 @@ pub(crate) fn build_source(cfg: &StationConfig, app: &AppSettings, epg_scope: u3
             mot.add_object(header, body).map_err(|e| e.to_string())?;
             Box::new(mot)
         }
+        AppKind::Tpeg | AppKind::Raw => {
+            let file = required_path(cfg, app)?;
+            let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            if bytes.is_empty() {
+                return Err(format!("{} is empty", file.display()));
+            }
+            let mut raw = RawSource::new();
+            raw.set_repeat(true);
+            for chunk in bytes.chunks(app.segment_size.unwrap_or(RAW_GROUP_BYTES)) {
+                raw.push_general_data(chunk.to_vec());
+            }
+            Box::new(raw)
+        }
     })
 }
 
@@ -134,7 +158,7 @@ pub(crate) fn build_source(cfg: &StationConfig, app: &AppSettings, epg_scope: u3
 pub(crate) fn stream_encoder(packet_len: usize, apps: Vec<(&AppSettings, u8, Source)>) -> Result<DataEncoder, String> {
     let mut iter = apps.into_iter();
     let (first, id, source) = iter.next().ok_or("a data stream without applications")?;
-    let mut cfg = DataServiceConfig::packet(first.kind.user_application(), id, 0);
+    let mut cfg = DataServiceConfig::packet(first.user_application(), id, 0);
     cfg.packet_len = packet_len;
     let mut enc = DataEncoder::new(&cfg, source).map_err(|e| e.to_string())?;
     for (_, id, source) in iter {

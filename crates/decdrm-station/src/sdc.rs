@@ -4,8 +4,9 @@
 //! Every block starts with the multiplex description (type 0), which a receiver needs
 //! before it can decode anything. The time and date (type 8) follows when a new minute
 //! has started (and in the first block). The remaining entities — audio information
-//! (type 9) and application information (type 5) first, then labels (type 1) and
-//! language/country (type 12) — go round robin: each block takes as many as fit,
+//! (type 9) and application information (type 5) first, then labels (type 1),
+//! language/country (type 12) and the alternative frequencies (types 3, 11, 4 and 7,
+//! see [`crate::afs`]) — go round robin: each block takes as many as fit,
 //! starting with the first one that did not fit last time, so when the SDC is too small
 //! for everything the entities cycle over several super frames and none starves.
 //! Version flags are 0: the configuration never changes while the station runs.
@@ -53,7 +54,7 @@ pub(crate) fn entities(cfg: &StationConfig, plan: &MultiplexPlan) -> SdcEntities
             audio.push(e(EntityBody::Audio(a.params.to_entity(sp.short_id))));
         }
         for a in &sp.apps {
-            let user_app = a.kind.user_application().id();
+            let user_app = a.user_app.id();
             apps.push(e(EntityBody::Application(application_info(sp.short_id, a.stream, a.packet_id, a.packet_length, user_app))));
         }
         labels.push(e(EntityBody::Label(Label::new(sp.short_id, &s.label))));
@@ -80,6 +81,7 @@ pub(crate) fn entities(cfg: &StationConfig, plan: &MultiplexPlan) -> SdcEntities
     others.extend(apps);
     others.extend(labels);
     others.extend(languages);
+    others.extend(crate::afs::entities(&cfg.afs).into_iter().map(e));
     SdcEntities { multiplex: e(EntityBody::Multiplex(plan.multiplex.clone())), others }
 }
 
@@ -95,6 +97,10 @@ fn describe(e: &SdcEntity) -> String {
         EntityBody::Label(l) => format!("label of service {}", l.short_id),
         EntityBody::LanguageCountry(l) => format!("language and country of service {}", l.short_id),
         EntityBody::TimeDate(_) => "time and date".into(),
+        EntityBody::AfsMultiplex(_) => "alternative frequency list (type 3)".into(),
+        EntityBody::AfsOtherService(o) => format!("alternative frequencies of service {} (type 11)", o.id),
+        EntityBody::AfsSchedule(s) => format!("AFS schedule {}", s.schedule_id),
+        EntityBody::AfsRegion(r) => format!("AFS region {}", r.region_id),
         other => format!("entity type {}", other.entity_type()),
     }
 }

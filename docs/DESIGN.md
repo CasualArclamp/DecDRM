@@ -96,10 +96,14 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       figures (fading points from 60 s runs, ±0.5 dB).
 - [x] **M3 Codecs & text** — xHE-AAC, Opus, text messages, concealment, drift-compensated
       live playback. *Done* (xHE-AAC on FMGold, Opus in all three signalling variants).
-- [ ] **M4 Data services** — Journaline, MOT Slideshow, BWS, EPG, TPEG/raw; clock & AFS.
-      *Status:* decoders done and verified on recordings (slideshow, Journaline, BWS);
-      EPG verified with our transmitter, TPEG untested for lack of samples; clock and
-      AFS shown in the CLI and the GUI (`Snapshot::afs`, `time`).
+- [x] **M4 Data services** — Journaline, MOT Slideshow, BWS, EPG, TPEG/raw; clock & AFS.
+      *Done:* decoders verified on recordings (slideshow, Journaline, BWS) and with our
+      transmitter (EPG, TPEG, raw applications, alternative frequencies — there are no
+      recordings of those here). TPEG and uninterpreted applications are captured to
+      `<data dir>/raw/` (data fields of the CRC-checked data groups; stream-mode bytes);
+      the station sends them from a file (`type = "tpeg"` / `"raw"` with `app_id`).
+      Clock and AFS (SDC types 3, 4, 7, 11; the station's `[afs]` section) shown in the
+      CLI and the GUI (`Snapshot::afs`, `time`).
 - [x] **M5 Live input & logging** — sound-card input (VAC), CSV/JSON logs & metrics.
       *Done:* sound-card input (CLI `--device`, GUI); `decdrm rx --log FILE.csv|.jsonl`
       writes metrics rows (and events in JSON Lines).

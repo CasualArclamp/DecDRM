@@ -83,13 +83,15 @@ level_dbfs = -12             # ... and its peak level
 # A data application that rides along with the audio service (SDC type 5 with this
 # service's Short Id), e.g. a slideshow for the programme:
 # [[service.app]]
-# type = "slideshow"         # "slideshow", "website", "journaline" or "epg"
-# path = "slides"            # folder of JPEG/PNG images (cycled in name order)
+# type = "slideshow"         # "slideshow", "website", "journaline", "epg", "tpeg" or "raw"
+# path = "slides"            # folder of JPEG/PNG images (cycled in name order); tpeg/raw: a file
+                             # sent in data groups of segment_size bytes, over and over
+# app_id = 0x123             # raw only: user application type (receivers capture its data)
 # bitrate = 2000             # requested bit/s, rounded up to whole packets per frame
 # packet_length = 45         # packet data field bytes (1-255; +3 bytes header and CRC)
 # packet_id = 0              # 0-3 (default: first free one in the stream)
 # stream = "data"            # share one packet stream with other applications (same packet length)
-# segment_size = 512         # MOT segment size
+# segment_size = 512         # MOT segment size (tpeg/raw: bytes per data group)
 
 # A data service: Journaline news pages and an EPG in one shared packet stream.
 [[service]]
@@ -121,3 +123,32 @@ description = "Music and news to start the day"
 title = "DecDRM Hour"
 start = "2026-09-29T09:00:00Z"
 duration_min = 60
+
+# --- Alternative frequencies (SDC types 3, 11, 4, 7): receivers show them -------------
+# [[afs.multiplex]]           # this multiplex on other frequencies
+# khz = [5990, 7440]
+# synchronous = false         # same content and timing (single-frequency network)
+# services = [0]              # only these services there (default: all)
+# schedule = 1                # when (an [[afs.schedule]] id; default: always)
+# region = 1                  # where (an [[afs.region]] id; default: everywhere)
+#
+# [[afs.other]]               # a service of this station on another broadcast system
+# service = 0                 # its Short Id here
+# system = "fm"               # "drm", "am", "fm" or "dab"
+# id = 0xD3C2                 # FM: RDS PI (ECC+PI: 24 bits); DRM/AM: 24-bit id; DAB: service id
+# mhz = [98.1]                # FM, MHz; khz = [...] for DRM/AM; channels = ["12B"] for DAB
+# same_service = true         # the same programme (false: an alternative one)
+#
+# [[afs.schedule]]
+# id = 1                      # 1-15; several entries with one id form one schedule
+# days = "Mon-Fri"            # "daily", "weekdays", "weekend", "Mon, Wed" ...
+# start = "06:00"             # UTC
+# duration_min = 180
+#
+# [[afs.region]]
+# id = 1                      # 1-15
+# latitude = 45               # southern edge, degrees
+# longitude = -10             # western edge, degrees
+# latitude_extent = 15        # degrees to the north
+# longitude_extent = 30       # degrees to the east
+# ciraf = [27, 28]            # CIRAF zones (optional)

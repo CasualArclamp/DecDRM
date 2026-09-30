@@ -15,6 +15,7 @@
 //!   serde first reads a string, then our `TryFrom<String>` implementation parses it and
 //!   its error message ends up in the TOML error, with line and column.
 
+use crate::afs::AfsSettings;
 use crate::error::{Result, StationError};
 use decdrm_core::fac::{Interleaving, LANGUAGES, MscMode, PROGRAMME_TYPES, SdcMode};
 use decdrm_core::params::{RobustnessMode, SpectrumOccupancy};
@@ -37,6 +38,9 @@ pub struct StationConfig {
     /// SDC time and date entity.
     #[serde(default)]
     pub time: TimeSettings,
+    /// Alternative frequencies (SDC types 3, 4, 7 and 11; see [`crate::afs`]).
+    #[serde(default, skip_serializing_if = "AfsSettings::is_empty")]
+    pub afs: AfsSettings,
     /// The services, in Short Id order (`[[service]]` tables in the file).
     #[serde(rename = "service", default)]
     pub services: Vec<ServiceSettings>,
@@ -459,18 +463,25 @@ impl Default for AudioInputSettings {
     }
 }
 
-/// A data application: slideshow, broadcast website, Journaline or EPG, in packet mode.
+/// A data application: slideshow, broadcast website, Journaline, EPG, TPEG or raw data,
+/// in packet mode.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppSettings {
-    /// slideshow, website, journaline or epg.
+    /// slideshow, website, journaline, epg, tpeg or raw.
     #[serde(rename = "type")]
     pub kind: AppKind,
     /// Slideshow: folder of JPEG/PNG images. Website: root directory. Journaline:
     /// page file (TOML, or JSON with a `.json` extension). EPG: optional TOML file with
-    /// `[[programme]]` entries (instead of or in addition to inline ones).
+    /// `[[programme]]` entries (instead of or in addition to inline ones). TPEG and raw:
+    /// a file whose bytes are sent in MSC data groups, over and over.
     #[serde(default)]
     pub path: Option<PathBuf>,
+    /// Raw: the user application type it is signalled as (SDC type 5, DAB application
+    /// domain, 0x000–0x7FF) — one that DecDRM does not interpret, so receivers capture
+    /// its data.
+    #[serde(default)]
+    pub app_id: Option<u16>,
     /// Website: start page (default `index.html` when present).
     #[serde(default)]
     pub index: Option<String>,
@@ -494,7 +505,8 @@ pub struct AppSettings {
     /// Carry this stream in the hierarchical part (HMsym/HMmix only).
     #[serde(default)]
     pub hierarchical: bool,
-    /// MOT segment size in bytes (slideshow, website, EPG).
+    /// MOT segment size in bytes (slideshow, website, EPG); TPEG and raw: bytes per MSC
+    /// data group (default 512).
     #[serde(default)]
     pub segment_size: Option<usize>,
     /// Journaline: deflate-compress pages. Website: gzip the MOT directory.
@@ -519,6 +531,7 @@ impl AppSettings {
         Self {
             kind,
             path: None,
+            app_id: None,
             index: None,
             bitrate: default_app_bitrate(),
             packet_length: default_packet_length(),
@@ -529,6 +542,14 @@ impl AppSettings {
             segment_size: None,
             compress: false,
             programmes: Vec::new(),
+        }
+    }
+
+    /// The user application this application is signalled as in SDC type 5.
+    pub fn user_application(&self) -> decdrm_data::UserApplication {
+        match self.kind {
+            AppKind::Raw => decdrm_data::UserApplication::from_id(decdrm_data::AppDomain::Dab, self.app_id.unwrap_or(0)),
+            kind => kind.user_application(),
         }
     }
 }
@@ -866,6 +887,12 @@ pub enum AppKind {
     Journaline,
     /// Electronic Programme Guide (TS 102 818 / TS 102 371).
     Epg,
+    /// TPEG traffic and travel information (user application 0x004): the bytes of a
+    /// file, which DecDRM transmits and captures without interpreting them.
+    Tpeg,
+    /// Any other application, by its user application type (`app_id`): the bytes of a
+    /// file, captured by the receiver.
+    Raw,
 }
 
 string_setting!(
@@ -875,19 +902,26 @@ string_setting!(
         "website" | "bws" | "broadcastwebsite" => Ok(AppKind::Website),
         "journaline" => Ok(AppKind::Journaline),
         "epg" | "spi" => Ok(AppKind::Epg),
-        _ => Err(format!("unknown data application type \"{s}\" (use slideshow, website, journaline or epg)")),
+        "tpeg" => Ok(AppKind::Tpeg),
+        "raw" | "other" => Ok(AppKind::Raw),
+        _ => Err(format!(
+            "unknown data application type \"{s}\" (use slideshow, website, journaline, epg, tpeg or raw)"
+        )),
     },
     |k: AppKind| match k {
         AppKind::Slideshow => "slideshow",
         AppKind::Website => "website",
         AppKind::Journaline => "journaline",
         AppKind::Epg => "epg",
+        AppKind::Tpeg => "tpeg",
+        AppKind::Raw => "raw",
     }
     .to_string()
 );
 
 impl AppKind {
-    /// The user application this kind is signalled as in SDC type 5.
+    /// The user application this kind is signalled as in SDC type 5 (for `Raw`, see
+    /// [`AppSettings::user_application`]).
     pub fn user_application(self) -> decdrm_data::UserApplication {
         use decdrm_data::UserApplication as U;
         match self {
@@ -895,6 +929,8 @@ impl AppKind {
             AppKind::Website => U::BroadcastWebsite,
             AppKind::Journaline => U::Journaline,
             AppKind::Epg => U::Epg,
+            AppKind::Tpeg => U::Tpeg,
+            AppKind::Raw => U::Other(0),
         }
     }
 }

@@ -291,6 +291,50 @@ fn settings_that_would_be_ignored_are_rejected() {
     assert!(has(&p, "programme_type is only used by audio services"), "{p:?}");
 }
 
+/// Raw applications need a user application type that DecDRM does not interpret;
+/// alternative frequencies are checked against the services and the system's rules.
+#[test]
+fn raw_applications_and_alternative_frequencies_are_checked() {
+    let text = base()
+        + r#"
+    [[service.app]]
+    type = "raw"
+    path = "missing.bin"
+    [[service.app]]
+    type = "raw"
+    app_id = 2
+    path = "missing.bin"
+    [[service.app]]
+    type = "tpeg"
+    app_id = 0x123
+    path = "missing.bin"
+    [[afs.other]]
+    service = 3
+    system = "dab"
+    channels = ["12B"]
+    [[afs.multiplex]]
+    khz = [5990]
+    schedule = 4
+    "#;
+    let p = problems(&text);
+    for needle in [
+        "application 0 (raw): needs `app_id`",
+        "application 1 (raw): app_id 0x002 is an application DecDRM interprets",
+        "application 2 (tpeg): app_id is only used with type = \"raw\"",
+        "missing.bin",
+        "afs.other 0: there is no service 3",
+        "afs.other 0: a DAB service needs its `id`",
+        "afs.multiplex 0: schedule 4 is not defined",
+    ] {
+        assert!(has(&p, needle), "{needle}: {p:#?}");
+    }
+    // Written back as TOML, the [afs] section survives; an empty one is left out.
+    let cfg = parse(&text);
+    let again = parse(&cfg.to_toml_string().unwrap());
+    assert_eq!(again.afs, cfg.afs);
+    assert!(!parse(&base()).to_toml_string().unwrap().contains("afs"));
+}
+
 #[test]
 fn every_problem_is_reported() {
     let text = r#"

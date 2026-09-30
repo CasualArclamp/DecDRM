@@ -236,6 +236,8 @@ impl AudioPlan {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppPlan {
     pub kind: AppKind,
+    /// The user application it is signalled as (SDC type 5).
+    pub user_app: decdrm_data::UserApplication,
     pub stream: u8,
     pub packet_id: u8,
     /// Packet data field bytes (SDC type 5 "packet length").
@@ -310,13 +312,35 @@ impl MultiplexPlan {
                         .iter()
                         .map(|r| {
                             let app = cfg.services[r.service].applications().nth(r.index).expect("valid app index");
-                            format!("{} of service {} (packet id {})", app.kind, r.service, r.packet_id)
+                            let kind = match app.kind {
+                                AppKind::Raw => format!("raw {:#05X}", app.app_id.unwrap_or(0)),
+                                kind => kind.to_string(),
+                            };
+                            format!("{kind} of service {} (packet id {})", r.service, r.packet_id)
                         })
                         .collect();
                     format!("{} ({}-byte packets)", list.join(", "), packet_len)
                 }
             };
             let _ = writeln!(s, "stream {}: {} bytes ({:.2} kbit/s) {part} - {what}", st.id, st.bytes(), st.bitrate() / 1000.0);
+        }
+        let afs = &cfg.afs;
+        if !afs.is_empty() {
+            let count = |n: usize, what: &str| match n {
+                0 => None,
+                1 => Some(format!("1 {what}")),
+                n => Some(format!("{n} {what}s")),
+            };
+            let parts: Vec<String> = [
+                count(afs.multiplexes.len(), "frequency list"),
+                count(afs.others.len(), "other-system list"),
+                count(afs.schedules.len(), "schedule"),
+                count(afs.regions.len(), "region"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            let _ = writeln!(s, "alternative frequencies: {}", parts.join(", "));
         }
         s
     }
@@ -620,10 +644,24 @@ fn build(cfg: &StationConfig) -> Result<MultiplexPlan> {
             if app.bitrate == 0 {
                 p.push(format!("{name}: bitrate must be positive"));
             }
+            match (app.kind, app.app_id) {
+                (AppKind::Raw, None) => p.push(format!("{name}: needs `app_id`, the user application type (0x000-0x7FF)")),
+                (AppKind::Raw, Some(id)) if id > 0x7FF => p.push(format!("{name}: app_id {id:#X} is outside 0x000-0x7FF")),
+                (AppKind::Raw, Some(id)) if !matches!(app.user_application(), decdrm_data::UserApplication::Other(_)) => p.push(format!(
+                    "{name}: app_id {id:#05X} is an application DecDRM interprets; use its type (slideshow, website, tpeg, epg or journaline)"
+                )),
+                (AppKind::Raw, Some(_)) => {}
+                (_, Some(_)) => p.push(format!("{name}: app_id is only used with type = \"raw\"")),
+                (_, None) => {}
+            }
             if let Err(e) = crate::data::check_content(cfg, app) {
                 p.push(format!("{name}: {e}"));
             }
         }
+    }
+    // --- Alternative frequencies.
+    for problem in crate::afs::problems(&cfg.afs, cfg.services.len()) {
+        p.push(problem);
     }
     // Nothing below makes sense without a valid channel and services.
     p.finish()?;
@@ -773,6 +811,7 @@ fn build(cfg: &StationConfig) -> Result<MultiplexPlan> {
                     let settings = cfg.services[app.service].applications().nth(app.index).expect("valid app index");
                     services[app.service].apps.push(AppPlan {
                         kind: settings.kind,
+                        user_app: settings.user_application(),
                         stream: stream.id,
                         packet_id: app.packet_id,
                         packet_length: settings.packet_length as u8,

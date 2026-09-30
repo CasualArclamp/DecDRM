@@ -7,6 +7,8 @@
 //!   output, 4-QAM SDC.
 //! * `aac_hmmix_*` — hierarchical 64-QAM (Journaline in the hierarchical stream), an
 //!   EPG in part A (unequal error protection), AAC with a 24 kHz core, FLAC output.
+//! * `tpeg_raw_*` — TPEG and raw data applications (captured byte for byte) and
+//!   alternative-frequency signalling.
 //!
 //! Run with `--nocapture` to see the multiplex plans and what was decoded.
 
@@ -590,6 +592,115 @@ fn example_station_runs() {
     let epg = d.data.iter().filter(|(sid, e)| *sid == 1 && matches!(e, DataEvent::Epg { .. })).count();
     assert!(journaline >= 4 && epg >= 1, "{journaline} Journaline pages, {epg} EPG objects");
     assert_eq!(d.session.ensemble().service(1).unwrap().label.as_deref(), Some("DecDRM News"));
+}
+
+/// The data fields of the data groups of application `app_id` of service `short_id`, in
+/// order (what the engine's data store captures).
+fn captured(d: &Decoded, short_id: u8, app_id: u16) -> Vec<u8> {
+    d.data
+        .iter()
+        .filter_map(|(sid, e)| match e {
+            DataEvent::Raw { user_app_id, data_group } if *sid == short_id && *user_app_id == app_id => {
+                Some(decdrm_data::datagroup::DataGroup::parse(data_group).expect("intact data group").data)
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// TPEG and raw data applications and alternative frequencies (SDC types 3, 4, 7, 11):
+/// the receiver captures the data byte for byte and lists the frequencies, with the
+/// schedule active at the signalled time.
+#[test]
+fn tpeg_raw_data_and_alternative_frequencies() {
+    let dir = tempfile::tempdir().unwrap();
+    let tpeg: Vec<u8> = (0..3000u32).map(|i| (i * 7 % 251) as u8).collect();
+    std::fs::write(dir.path().join("tpeg.bin"), &tpeg).unwrap();
+    let other = b"DecDRM raw application data. ".repeat(20);
+    std::fs::write(dir.path().join("other.bin"), &other).unwrap();
+    let toml = r#"
+        [channel]
+        mode = "B"
+        occupancy = 3
+        interleaving = "short"
+        [output]
+        file = "afs.flac"
+        [time]
+        start = "2026-09-30T07:59:50Z"   # a Wednesday, inside the schedule below
+        [[service]]
+        label = "Radio"
+        id = 0xD0D0A1
+        [service.audio]
+        codec = "aac"
+        core_rate = 12000
+        input = { tone_hz = 1000.0 }
+        [[service]]
+        label = "Traffic"
+        id = 0xD0D0A2
+        [service.data]
+        type = "tpeg"
+        path = "tpeg.bin"
+        bitrate = 4000
+        segment_size = 200
+        [[service.app]]
+        type = "raw"
+        app_id = 0x123
+        path = "other.bin"
+        bitrate = 1000
+        [[afs.multiplex]]
+        khz = [5990, 7440]
+        schedule = 1
+        [[afs.other]]
+        service = 0
+        system = "fm"
+        id = 0xD3C2
+        mhz = [98.1]
+        region = 1
+        [[afs.schedule]]
+        id = 1
+        days = "Mon-Fri"
+        start = "06:00"
+        duration_min = 180
+        [[afs.region]]
+        id = 1
+        latitude = 45
+        longitude = -10
+        latitude_extent = 15
+        longitude_extent = 30
+        ciraf = [27, 28]
+    "#;
+    let (_, _, status) = transmit(dir.path(), toml, 40);
+    assert_clean_encoding(&status);
+    let d = decode(&dir.path().join("afs.flac"), false);
+
+    // The capture starts somewhere in the carousel: it must be a gapless run of the file
+    // repeated, at least one full copy long.
+    for (app_id, file) in [(0x004, &tpeg), (0x123, &other)] {
+        let got = captured(&d, 1, app_id);
+        let cycle = file.repeat(2 + got.len() / file.len());
+        assert!(got.len() >= file.len(), "application {app_id:#X}: only {} bytes captured", got.len());
+        assert!(
+            cycle.windows(got.len()).any(|w| w == got.as_slice()),
+            "application {app_id:#X}: the {} bytes captured are not the file's",
+            got.len()
+        );
+    }
+    let apps: Vec<Option<u16>> =
+        d.session.ensemble().service(1).unwrap().applications.iter().map(|a| a.user_app_id()).collect();
+    assert_eq!(apps, [Some(0x004), Some(0x123)]);
+
+    let ens = d.session.ensemble();
+    let lines = decdrm_engine::afs::describe(ens.alternative_frequencies(), ens.time());
+    println!("AFS: {lines:#?}");
+    for needle in [
+        "this multiplex: 5990 kHz, 7440 kHz · schedule 1 (active)",
+        "service 0 also on FM id D3C2: 98.1 MHz · region 1",
+        "schedule 1: Mon Tue Wed Thu Fri 06:00 UTC for 180 min",
+        "region 1: lat 45..60°, lon -10..20°, CIRAF 27 28",
+    ] {
+        assert!(lines.iter().any(|l| l == needle), "missing \"{needle}\" in {lines:#?}");
+    }
 }
 
 /// A non-looping input file ends the programme: the station reports it (the CLI then

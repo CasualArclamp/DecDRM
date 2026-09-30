@@ -31,12 +31,13 @@ encoding) and libopus.
 - Wiener channel estimation in time and frequency with Doppler and delay-spread
   adaptation, impulse-response based timing tracking, iterative multilevel decoding.
 - Services: AAC, HE-AAC v1/v2, xHE-AAC, Opus (Dream's extension), text messages,
-  MOT slideshow, Broadcast Website, Journaline, EPG, TPEG/raw capture, broadcast time,
-  alternative frequencies.
-- Transmitter: up to four services with AAC/HE-AAC/Opus audio, text, slideshow,
-  website, Journaline and EPG, every MSC mode incl. hierarchical 64-QAM and unequal
-  protection, WAV/FLAC or sound-card output, plus a channel simulator (the DRM channel
-  models 1–6) for testing.
+  MOT slideshow, Broadcast Website, Journaline, EPG, TPEG/raw capture (`--data-dir`),
+  broadcast time, alternative frequencies.
+- Transmitter: up to four services with AAC/HE-AAC/xHE-AAC/Opus audio, text,
+  slideshow, website, Journaline, EPG, TPEG and raw data, alternative frequencies,
+  every MSC mode incl. hierarchical 64-QAM and unequal protection, WAV/FLAC or
+  sound-card output (clock-drift compensated with a sound-card input), plus a channel
+  simulator (the DRM channel models 1–6) for testing.
 - Desktop GUI (egui): spectrum, waterfall, constellations, audio spectrum, channel,
   impulse response, SNR per carrier, reception history, status LEDs, services, text,
   slideshow, Journaline browser, broadcast website, EPG, broadcast clock, alternative
