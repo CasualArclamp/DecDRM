@@ -135,6 +135,9 @@
 //! (`$DECDRM_MODELS`, else `models` next to the executable).
 
 #![forbid(unsafe_code)]
+// The crate docs describe the `encodec` build; without the feature most items they link
+// to are compiled out.
+#![cfg_attr(not(feature = "encodec"), allow(rustdoc::broken_intra_doc_links))]
 
 pub mod config;
 mod crc;
@@ -162,7 +165,10 @@ pub use plan::{PlanError, choose_config};
 pub use weights::{WeightsNotFound, find_weights};
 
 #[cfg(feature = "encodec")]
-pub use decoder::{Concealment, CrcPolicy, DecodedSuperFrame, DecoderStats, EncodecDecoder, open_decoder};
+pub use decoder::{
+    Concealment, CrcPolicy, DecodedSuperFrame, DecoderStats, EncodecDecoder, FADE_FRAMES, HOLD_FRAMES,
+    MAX_INTERPOLATION_FRAMES, open_decoder,
+};
 #[cfg(feature = "encodec")]
 pub use encoder::{EncodecDrmEncoder, EncodecEncoder};
 #[cfg(feature = "encodec")]

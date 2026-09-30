@@ -1,7 +1,7 @@
 //! Thin wrapper around `rustfft` with reusable scratch space.
 //!
-//! Conventions: `forward` computes X[k] = Σ x[n]·e^{−j2πkn/N} and `inverse` computes
-//! x[n] = Σ X[k]·e^{+j2πkn/N} (no normalisation in either direction).
+//! Conventions: `forward` computes `X[k] = Σ x[n]·e^{−j2πkn/N}` and `inverse` computes
+//! `x[n] = Σ X[k]·e^{+j2πkn/N}` (no normalisation in either direction).
 
 use crate::Cplx;
 use rustfft::{Fft as RFft, FftPlanner};

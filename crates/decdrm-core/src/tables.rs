@@ -153,9 +153,9 @@ pub struct ScatteredPilotParams {
     pub k0: i32,
     /// Row size of the W and Z matrices.
     pub wz_cols: usize,
-    /// W₁₀₂₄[n][m], row-major `y × wz_cols`.
+    /// `W₁₀₂₄[n][m]`, row-major `y × wz_cols`.
     pub w: &'static [i32],
-    /// Z₂₅₆[n][m], row-major `y × wz_cols`.
+    /// `Z₂₅₆[n][m]`, row-major `y × wz_cols`.
     pub z: &'static [i32],
     /// Q₁₀₂₄.
     pub q: i32,

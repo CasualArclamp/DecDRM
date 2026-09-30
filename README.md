@@ -42,6 +42,8 @@ encoding) and libopus.
   impulse response, SNR per carrier, reception history, status LEDs, services, text,
   slideshow, Journaline browser, broadcast website, EPG, broadcast clock, alternative
   frequencies, and a transmitter tab.
+- Light on the CPU: the receiver decodes 10 kHz signals at 100–150× real time (20 kHz
+  at ~45×) on one core; the GUI needs a few percent of a core while decoding live.
 - Experimental **EnCodec** (Meta's neural codec) as a DecDRM-only audio codec: 1.5–24
   kbit/s, CRC-protected layers and concealment — at 15 dB SNR it lost 2 % of audio
   frames where HE-AAC lost 26 %. Standard receivers (and Dream) ignore it.
@@ -59,6 +61,9 @@ on Windows, gcc on Linux) and CMake for the vendored codecs, and on Linux the AL
 development package (`libasound2-dev`).
 
 ## Usage
+
+The [user guide](docs/USER_GUIDE.md) covers receiving from web SDRs through a virtual
+audio cable, the displays, data services, logs, the station file and troubleshooting.
 
 ```bash
 # decode a recording (real IF / audio input at any sample rate)
