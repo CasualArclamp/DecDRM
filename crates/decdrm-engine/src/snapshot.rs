@@ -80,7 +80,8 @@ pub struct ServiceView {
 /// Audio coding of a service (SDC type 9), the facts Dream's service bars show.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AudioCodingView {
-    /// "AAC", "xHE-AAC", "Opus", "EnCodec" or "reserved".
+    /// "AAC", "xHE-AAC", "Opus", "EnCodec", "reserved", or "EVS" (sent in a data
+    /// application, see `decdrm_evs::kcbs`).
     pub codec: String,
     /// Spectral band replication (AAC; HE-AAC).
     pub sbr: bool,
@@ -97,7 +98,7 @@ pub struct AudioCodingView {
     pub text: bool,
     /// MPEG Surround side information (AAC, xHE-AAC).
     pub surround: bool,
-    /// Further codec detail, e.g. the EnCodec bit-rate tier.
+    /// Further codec detail, e.g. the EnCodec bit-rate tier or the EVS bandwidth.
     pub detail: Option<String>,
 }
 

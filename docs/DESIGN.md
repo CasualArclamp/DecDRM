@@ -12,7 +12,7 @@ and the milestone plan. Keep the milestone checklist current.
 | Purpose | Personal / hobby. |
 | Relationship to Dream | Spec-first idiomatic Rust, freely translating Dream's proven algorithms (sync, Wiener channel estimation, MLC decoding). Licence therefore **GPL-2.0-or-later**. Reference: Dream `branches/dream-mjf` r1548. |
 | Receiver performance | Match or beat Dream on weak/fading signals (Wiener channel estimation, soft-decision Viterbi, iterative MLC, sample-rate-offset tracking). |
-| Audio decoding | Behind a Rust codec interface. AAC / HE-AAC v1/v2 and **xHE-AAC** via **FDK-AAC** (vendored, built from source, statically linked). **Opus** (Dream's extension) via libopus. CELP/HVXC: detected and reported as unsupported. |
+| Audio decoding | Behind a Rust codec interface. AAC / HE-AAC v1/v2 and **xHE-AAC** via **FDK-AAC** (vendored, built from source, statically linked). **Opus** (Dream's extension) via libopus. CELP/HVXC: detected and reported as unsupported. **EVS** sent as data by KCBS (6140 kHz): recognised always; decoded with the 3GPP reference decoder (feature `evs`) built from a user-supplied source zip, never committed (3GPP/ETSI copyright, patent-licensed codec: private use). |
 | Data services | Text messages, Journaline, MOT Slideshow, EPG, Broadcast Website, TPEG/unknown (raw data saved). Broadcast clock and alternative-frequency (AFS) info from the SDC. |
 | Inputs | Recorded files (WAV/FLAC; real IF or I/Q; any sample rate) and live sound card (including a virtual audio cable fed by web SDRs such as KiwiSDR). No direct SDR drivers, no network clients. |
 | Outputs | Live audio (with clock-drift compensation) and logs/metrics (CSV/JSON). |
@@ -165,6 +165,19 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       `[simulate]` section (and `decdrm tx --channel-model/--snr`) exposes the channel
       simulator as a test-signal generator; its clock error is applied to the output
       samples, so it scales the IF like a real sound-card clock.
+- [x] **KCBS EVS** (2026-10-01) — Korean Central Broadcasting on 6140 kHz signals its
+      only service as data (user application 0x000) but sends 3GPP EVS audio.
+      *Done:* framing reverse-engineered from recordings (`decdrm_evs::kcbs`: one
+      716-byte data group per 400 ms with 20 EVS frames of 264 bits = 13.2 kbit/s,
+      super-wideband ACELP, the first byte of every fourth frame moved to the front; a
+      52-byte side channel with a 1.2 s counter). Confirmed with the 3GPP decoder
+      against a random-payload control (voiced pitch strength 0.56 vs 0.27, spectral
+      flux 7.8 vs 12 dB). `decdrm-evs` builds the TS 26.443 float decoder from the zip
+      in `reference/evs/` (feature `decoder`; engine/CLI/GUI feature `evs`) behind a
+      frame-by-frame shim that matches the reference program to 1 LSB. The engine
+      locks a data channel as EVS after two matching data groups (all 20 frames
+      signalling one bandwidth; random data ~10⁻⁸), plays it like an audio service
+      (lost data groups concealed) and shows it as EVS in the service bars.
 
 ## Conventions
 

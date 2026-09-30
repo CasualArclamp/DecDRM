@@ -66,6 +66,7 @@ pub fn codec_title(a: &AudioCodingView) -> String {
             Some(d) => format!("EnCodec {d}"),
             None => "EnCodec".into(),
         },
+        "EVS" => "EVS 13.2".into(),
         other => other.into(),
     }
 }
@@ -77,6 +78,11 @@ pub fn tags(s: &ServiceView) -> Vec<Tag> {
     let mut t = Vec::new();
     if let Some(a) = &s.audio {
         t.push(tag(codec_title(a), TagKind::Codec));
+        if a.codec == "EVS"
+            && let Some(bandwidth) = &a.detail
+        {
+            t.push(tag(bandwidth.clone(), TagKind::Feature));
+        }
         if a.sbr {
             t.push(tag("SBR", TagKind::Feature));
         }
@@ -196,7 +202,7 @@ fn details(s: &ServiceView) -> String {
     if s.ca {
         lines.push("Conditional access: scrambled".into());
     }
-    lines.push(if s.is_audio { "Click to listen".into() } else { "Click to show its data".into() });
+    lines.push(if s.is_audio || s.audio.is_some() { "Click to listen".into() } else { "Click to show its data".into() });
     lines.join("\n")
 }
 

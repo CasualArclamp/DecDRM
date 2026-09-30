@@ -93,6 +93,12 @@ decdrm tx crates/decdrm-station/examples/station.toml --duration 30 --output drm
 cargo run --release -p decdrm-gui -- recording.flac
 ```
 
+EVS audio of Korean Central Broadcasting (6140 kHz), which it sends as a data service,
+decodes with the 3GPP reference decoder: put its source zip (3GPP TS 26.443,
+`26443-j00.zip`, downloaded in a browser) into `reference/evs/` and build with
+`--features decdrm-cli/evs,decdrm-gui/evs` (private use: 3GPP/ETSI copyright,
+patent-licensed codec; see the [user guide](docs/USER_GUIDE.md#services-and-audio)).
+
 EnCodec (optional, pulls in the candle ML library):
 
 ```bash
