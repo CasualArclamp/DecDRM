@@ -208,11 +208,26 @@ fn draw_tag(ui: &mut Ui, t: &Tag) {
         TagKind::Data => (v.widgets.inactive.bg_fill, v.hyperlink_color),
         TagKind::Warning => (v.warn_fg_color.gamma_multiply(0.25), v.warn_fg_color),
     };
-    egui::Frame::new()
-        .fill(fill)
-        .corner_radius(egui::CornerRadius::same(3))
-        .inner_margin(egui::Margin::symmetric(5, 1))
-        .show(ui, |ui| ui.label(RichText::new(&t.text).size(12.0).color(color)));
+    // A tag is one unbreakable piece: an `egui::Frame` always starts at the cursor, so in
+    // a wrapping row a tag that did not fit wrapped its text a character per line instead
+    // of moving to the next row. A galley without wrapping (cut with "…" only when wider
+    // than the whole bar) allocated in one go lets `horizontal_wrapped` place it.
+    let margin = egui::vec2(5.0, 1.0);
+    let max_width = (ui.max_rect().width() - 2.0 * margin.x).max(20.0);
+    let galley = egui::WidgetText::from(RichText::new(&t.text).size(12.0).color(color)).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        max_width,
+        egui::TextStyle::Body,
+    );
+    let (rect, response) = ui.allocate_exact_size(galley.size() + 2.0 * margin, egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(3), fill);
+        ui.painter().galley(rect.min + margin, galley.clone(), color);
+    }
+    if galley.elided {
+        response.on_hover_text(&t.text);
+    }
 }
 
 /// One service bar (Dream's service buttons): Short Id, label and bit rate, then the
