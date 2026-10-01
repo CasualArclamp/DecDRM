@@ -17,7 +17,11 @@ pub mod signalling;
 #[cfg(feature = "decoder")]
 mod decoder;
 #[cfg(feature = "decoder")]
+mod guard;
+#[cfg(feature = "decoder")]
 pub use decoder::{EvsDecoder, EvsError};
+#[cfg(feature = "decoder")]
+pub use guard::GuardedDecoder;
 
 /// Whether the EVS decoder is built in (the `decoder` feature).
 pub const BUILT_IN: bool = cfg!(feature = "decoder");

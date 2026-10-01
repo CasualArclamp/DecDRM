@@ -90,7 +90,8 @@ fn kcbs_data_service_good_night() {
     assert!(o.msc_ok >= 78, "{} MSC frames", o.msc_ok);
     if decdrm_evs::BUILT_IN {
         assert!(o.codec.starts_with("EVS 13.2 kbit/s SWB"), "{}", o.codec);
-        assert!(o.audio_ok >= 1500 && o.audio_concealed == 0, "EVS frames {} ok, {} concealed", o.audio_ok, o.audio_concealed);
+        // Concealed: only frames the burst guard replaced (two per burst).
+        assert!(o.audio_ok >= 1500 && o.audio_concealed <= 60, "EVS frames {} ok, {} concealed", o.audio_ok, o.audio_concealed);
         assert_eq!(o.raw_units, 1, "only the data group before the channel locked");
     } else {
         assert!(o.raw_units >= 78, "{} data units", o.raw_units);
@@ -106,8 +107,8 @@ fn kcbs_timing_jump_in_a_web_sdr_stream() {
     assert_eq!(o.resyncs, 1, "timing jumps");
     assert!(o.msc_ok >= 77 && o.msc_bad <= 2, "MSC {} ok, {} bad", o.msc_ok, o.msc_bad);
     if decdrm_evs::BUILT_IN {
-        // The lost data group is concealed (20 frames).
-        assert!(o.audio_ok >= 1480 && o.audio_concealed <= 40, "EVS frames {} ok, {} concealed", o.audio_ok, o.audio_concealed);
+        // The lost data group is concealed (20 frames), plus the bursts the guard replaced.
+        assert!(o.audio_ok >= 1480 && o.audio_concealed <= 80, "EVS frames {} ok, {} concealed", o.audio_ok, o.audio_concealed);
     }
 }
 

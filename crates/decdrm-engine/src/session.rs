@@ -105,8 +105,10 @@ struct EvsPlayer {
     short_id: u8,
     /// A data group was decoded (so there is something to conceal from).
     started: bool,
+    /// Bursts the guard has replaced so far (to count new ones).
+    bursts: u64,
     #[cfg(feature = "evs")]
-    decoder: decdrm_evs::EvsDecoder,
+    decoder: decdrm_evs::GuardedDecoder,
 }
 
 /// Receiver plus the service decoding pipelines.
@@ -508,12 +510,9 @@ impl Session {
                 // The frame types KCBS's encoder gets wrong are decoded as lost (EVS
                 // concealment); they still count as received.
                 let frame = (!decdrm_evs::kcbs::unreliable(f)).then_some(&f[..]);
-                match evs_decode(p, frame) {
-                    Some(pcm) => {
-                        self.audio_stats.frames_ok += 1;
-                        out.push(SessionEvent::Audio(pcm));
-                    }
-                    None => self.audio_stats.frames_concealed += 1,
+                self.audio_stats.frames_ok += 1;
+                if let Some(pcm) = evs_decode(p, frame) {
+                    out.push(SessionEvent::Audio(pcm));
                 }
             }
         }
@@ -527,12 +526,14 @@ impl Session {
                 }
             }
         }
+        // Each burst the guard caught replaced two frames.
+        self.audio_stats.frames_concealed += 2 * evs_new_bursts(p);
     }
 
     #[cfg(feature = "evs")]
     fn open_evs_player(&mut self, short_id: u8, out: &mut Vec<SessionEvent>) -> Option<EvsPlayer> {
         let channel = self.evs.iter().find(|c| c.short_id == short_id)?;
-        match decdrm_evs::EvsDecoder::new(48_000) {
+        match decdrm_evs::GuardedDecoder::new(48_000) {
             Ok(decoder) => {
                 self.audio_stats = AudioStats { codec: format!("{} (KCBS framing, its faulty frame types concealed)", channel.describe()), ..AudioStats::default() };
                 out.push(SessionEvent::Log(format!(
@@ -541,7 +542,7 @@ impl Session {
                     channel.app.user_app_id().unwrap_or(0)
                 )));
                 self.text = None;
-                Some(EvsPlayer { short_id, started: false, decoder })
+                Some(EvsPlayer { short_id, started: false, bursts: 0, decoder })
             }
             Err(e) => {
                 out.push(SessionEvent::Log(format!("audio service {short_id}: {e}")));
@@ -614,16 +615,31 @@ fn observe_evs(channels: &mut Vec<EvsChannel>, short_id: u8, app: &ApplicationIn
     }
 }
 
-/// The next 20 ms of EVS audio: `frame` decoded, or concealment for `None`.
+/// Decode the next frame (`None`: conceal it) and return 20 ms of EVS audio: the frame
+/// before it (the burst guard runs one frame behind), `None` at the very start.
 #[cfg(feature = "evs")]
 fn evs_decode(p: &mut EvsPlayer, frame: Option<&[u8]>) -> Option<PcmFrame> {
     let rate = p.decoder.rate();
-    p.decoder.decode(frame).ok().map(|samples| PcmFrame { sample_rate: rate, channels: 1, samples, concealed: frame.is_none() })
+    let samples = p.decoder.push(frame).ok().filter(|s| !s.is_empty())?;
+    Some(PcmFrame { sample_rate: rate, channels: 1, samples, concealed: frame.is_none() })
 }
 
 #[cfg(not(feature = "evs"))]
 fn evs_decode(_p: &mut EvsPlayer, _frame: Option<&[u8]>) -> Option<PcmFrame> {
     None
+}
+
+/// Bursts the guard replaced since the last call.
+#[cfg(feature = "evs")]
+fn evs_new_bursts(p: &mut EvsPlayer) -> u64 {
+    let new = p.decoder.bursts - p.bursts;
+    p.bursts = p.decoder.bursts;
+    new
+}
+
+#[cfg(not(feature = "evs"))]
+fn evs_new_bursts(_p: &mut EvsPlayer) -> u64 {
+    0
 }
 
 /// The service-bar description of EVS audio: mono at the codec's internal rate,
