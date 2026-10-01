@@ -8,6 +8,7 @@ pub mod epg;
 pub mod history;
 pub mod journaline;
 pub mod log;
+pub mod meter;
 pub mod plots;
 pub mod schedule;
 pub mod services;

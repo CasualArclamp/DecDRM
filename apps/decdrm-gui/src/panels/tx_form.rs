@@ -5,6 +5,7 @@
 //! frequencies, EPG programmes, …) stays exactly as written. The "TOML" view shows the
 //! same text, which is what gets saved and transmitted.
 
+use super::meter::{MeterKind, meter_with_text};
 use super::source::DeviceLists;
 use decdrm_core::fac::{LANGUAGES, PROGRAMME_TYPES};
 use eframe::egui::{self, Color32, RichText, Ui};
@@ -18,6 +19,8 @@ pub struct FormCtx<'a> {
     pub base_dir: &'a Path,
     /// The multiplex of the last successful check, for the capacity bar.
     pub bar: Option<&'a PlanBar>,
+    /// Input levels (RMS, peak dBFS) of the services while transmitting, by position.
+    pub levels: Vec<Option<(f32, f32)>>,
 }
 
 /// The multiplex as a bar: MSC capacity and the streams that fill it.
@@ -87,8 +90,8 @@ pub fn show(ui: &mut Ui, doc: &mut DocumentMut, ctx: &mut FormCtx) -> bool {
 // Layout helpers
 // ---------------------------------------------------------------------------------
 
-/// A framed section with a title.
-fn card(ui: &mut Ui, title: &str, subtitle: &str, add: impl FnOnce(&mut Ui)) {
+/// A framed section with a title (also used by the status panel).
+pub fn card(ui: &mut Ui, title: &str, subtitle: &str, add: impl FnOnce(&mut Ui)) {
     egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(10)).corner_radius(egui::CornerRadius::same(6)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal_wrapped(|ui| {
@@ -643,6 +646,10 @@ fn input_settings(ui: &mut Ui, input: &mut dyn TableLike, i: usize, ctx: &mut Fo
     let kind = InputKind::of(input);
     ui.horizontal(|ui| {
         ui.label(RichText::new("Audio input").strong());
+        // While transmitting: the level going into the encoder.
+        if let Some(level) = ctx.levels.get(i).copied().flatten() {
+            meter_with_text(ui, ("tx_form_level", i), Some(level), 140.0, MeterKind::Audio);
+        }
         for k in InputKind::ALL {
             if ui.selectable_label(kind == k, k.label()).clicked() && kind != k {
                 for key in ["file", "device", "url", "tone_hz", "loop", "stream_titles"] {
@@ -1080,7 +1087,7 @@ fn clock(ui: &mut Ui, doc: &mut DocumentMut) -> bool {
 }
 
 /// The multiplex as a bar: one segment per stream, sized by its bytes.
-fn capacity_bar(ui: &mut Ui, bar: &PlanBar) {
+pub fn capacity_bar(ui: &mut Ui, bar: &PlanBar) {
     let used: usize = bar.segments.iter().map(|s| s.bytes).sum();
     let kbps = |bytes: usize| bytes as f64 * 8.0 / 400.0;
     ui.horizontal_wrapped(|ui| {

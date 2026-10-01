@@ -8,15 +8,16 @@
 //! against the file's directory; the untitled example uses a directory next to the
 //! GUI settings (see [`tx_config::example_dir`]).
 
+use super::meter::{GOOD, HOT, MeterKind, WARN, level_meter, meter_with_text};
 use super::plots::spectrum_plot;
 use super::source::DeviceLists;
-use super::tx_form::{self, FormCtx, PlanBar};
-use super::{Palette, heading, placeholder, value};
+use super::tx_form::{self, FormCtx, PlanBar, capacity_bar, card};
+use super::{Palette, placeholder, value};
 use crate::indicators::fmt_time;
 use crate::settings::{Settings, TxOutput};
 use crate::transmitter::TxSession;
 use crate::tx_config::{self, EXAMPLE_STATION, Overrides};
-use decdrm_station::{AudioStatus, MultiplexPlan, ServiceStatus, StationConfig, StationStatus};
+use decdrm_station::{MultiplexPlan, StationConfig};
 use eframe::egui::{self, Color32, RichText, Ui};
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::path::{Path, PathBuf};
@@ -296,13 +297,13 @@ impl TxPage {
         allow_device: bool,
     ) {
         egui::Panel::top("tx_toolbar").show(ui, |ui| {
-            self.toolbar(ui, settings, devices, tx, allow_device);
+            self.toolbar(ui, settings, devices);
         });
         egui::Panel::right("tx_side")
             .resizable(true)
             .default_size(480.0)
             .min_size(360.0)
-            .show(ui, |ui| self.side(ui, tx));
+            .show(ui, |ui| self.side(ui, settings, tx, allow_device));
         // Check again once form edits have settled, so the multiplex bar follows them.
         if let Some(at) = self.recheck_at {
             let now = Instant::now();
@@ -321,14 +322,24 @@ impl TxPage {
                     .on_hover_text("Edit the configuration file itself (everything, with comments)");
             });
             ui.separator();
+            let levels: Vec<Option<(f32, f32)>> = if tx.is_running() && tx.snap.started {
+                tx.snap
+                    .status
+                    .services
+                    .iter()
+                    .map(|sv| sv.audio.as_ref().map(|a| (a.counters.input_rms_dbfs, a.counters.input_peak_dbfs)))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             match self.view {
-                View::Form => self.form(ui, devices),
+                View::Form => self.form(ui, devices, levels),
                 View::Toml => self.editor(ui),
             }
         });
     }
 
-    fn form(&mut self, ui: &mut Ui, devices: &mut DeviceLists) {
+    fn form(&mut self, ui: &mut Ui, devices: &mut DeviceLists, levels: Vec<Option<(f32, f32)>>) {
         if self.doc.as_ref().is_none_or(|(text, _)| *text != self.text) {
             let parsed = self.text.parse::<toml_edit::DocumentMut>().map_err(|e| e.to_string());
             self.doc = Some((self.text.clone(), parsed));
@@ -355,7 +366,7 @@ impl TxPage {
             .id_salt("tx_form_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let mut ctx = FormCtx { devices, base_dir: &dir, bar: self.bar.as_ref() };
+                let mut ctx = FormCtx { devices, base_dir: &dir, bar: self.bar.as_ref(), levels };
                 changed = tx_form::show(ui, doc, &mut ctx);
             });
         if changed {
@@ -367,14 +378,7 @@ impl TxPage {
         }
     }
 
-    fn toolbar(
-        &mut self,
-        ui: &mut Ui,
-        settings: &mut Settings,
-        devices: &mut DeviceLists,
-        tx: &mut TxSession,
-        allow_device: bool,
-    ) {
+    fn toolbar(&mut self, ui: &mut Ui, settings: &mut Settings, devices: &mut DeviceLists) {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Station").strong());
             if ui
@@ -449,19 +453,6 @@ impl TxPage {
                     .max_decimals(1)
                     .suffix(" s"),
             );
-            ui.separator();
-            if tx.is_running() {
-                let stop = ui.add_enabled(!tx.is_stopping(), egui::Button::new("■ Stop"));
-                if stop.clicked() {
-                    tx.stop();
-                }
-            } else if ui
-                .button(RichText::new("▶ Transmit").strong())
-                .on_hover_text("Check the configuration and start the transmitter")
-                .clicked()
-            {
-                self.transmit(settings, tx, allow_device);
-            }
         });
         if let Some(n) = &self.notice {
             ui.colored_label(ui.visuals().warn_fg_color, n);
@@ -532,86 +523,268 @@ impl TxPage {
             });
     }
 
-    fn side(&mut self, ui: &mut Ui, tx: &TxSession) {
+    /// The status panel: state and the Transmit button, output, spectrum, services,
+    /// multiplex.
+    fn side(&mut self, ui: &mut Ui, settings: &Settings, tx: &mut TxSession, allow_device: bool) {
         let pal = Palette::for_ui(ui);
         egui::ScrollArea::vertical()
             .id_salt("tx_side_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                status_section(ui, tx, &pal);
-                ui.separator();
-                heading(ui, "Services");
-                services_table(ui, &tx.snap.status);
+                self.header_card(ui, settings, tx, allow_device, &pal);
+                self.problems_card(ui, &pal);
+                output_card(ui, tx, &pal);
                 if !tx.spectrum.points.is_empty() {
-                    ui.separator();
-                    heading(ui, "Output spectrum");
-                    spectrum_plot(
-                        ui,
-                        "tx_spectrum",
-                        "output spectrum",
-                        &tx.spectrum,
-                        &pal,
-                        180.0,
-                    );
+                    card(ui, "Output spectrum", "", |ui| {
+                        spectrum_plot(ui, "tx_spectrum", "output spectrum", &tx.spectrum, &pal, 160.0);
+                    });
                 }
-                ui.separator();
-                self.check_section(ui, &pal);
+                services_card(ui, tx, &pal);
+                self.multiplex_card(ui);
                 if !tx.messages.is_empty() {
-                    egui::CollapsingHeader::new("Messages")
+                    egui::CollapsingHeader::new(format!("Messages ({})", tx.messages.len()))
                         .id_salt("tx_messages")
                         .show(ui, |ui| {
                             for m in &tx.messages {
-                                ui.add(
-                                    egui::Label::new(RichText::new(m).monospace().small()).wrap(),
-                                );
+                                ui.add(egui::Label::new(RichText::new(m).monospace().small()).wrap());
                             }
                         });
                 }
             });
     }
 
-    fn check_section(&self, ui: &mut Ui, pal: &Palette) {
-        let Some((checked, text)) = &self.checked else {
-            heading(ui, "Multiplex");
-            placeholder(
-                ui,
-                "Validate (or Transmit) to check the configuration and see the multiplex.",
-            );
-            return;
+    /// State light, what is on the air, how long, and the Transmit / Stop button.
+    fn header_card(&mut self, ui: &mut Ui, settings: &Settings, tx: &mut TxSession, allow_device: bool, pal: &Palette) {
+        let snap = &tx.snap;
+        let (state, light) = if tx.is_running() {
+            if !snap.started {
+                ("Starting", WARN)
+            } else if tx.is_stopping() {
+                ("Stopping", WARN)
+            } else {
+                ("On the air", GOOD)
+            }
+        } else if tx.error.is_some() {
+            ("Failed", HOT)
+        } else if snap.started {
+            ("Finished", ui.visuals().weak_text_color())
+        } else {
+            ("Idle", ui.visuals().weak_text_color())
         };
-        if *text != self.text {
-            ui.label(
-                RichText::new("The text has changed since this check.")
-                    .italics()
-                    .weak(),
-            );
+        let mut start = false;
+        let mut stop = false;
+        card(ui, "Transmission", "", |ui| {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 6.0, light);
+                ui.label(RichText::new(state).strong().size(17.0));
+                if !tx.label.is_empty() {
+                    ui.label(RichText::new(&tx.label).weak());
+                }
+            });
+            ui.add_space(4.0);
+            let width = ui.available_width();
+            if tx.is_running() {
+                let button = egui::Button::new(RichText::new("\u{25A0}  Stop").strong().size(16.0).color(Color32::WHITE))
+                    .fill(HOT)
+                    .min_size(egui::vec2(width, 34.0));
+                if ui.add_enabled(!tx.is_stopping(), button).clicked() {
+                    stop = true;
+                }
+            } else {
+                let button = egui::Button::new(RichText::new("\u{25B6}  Transmit").strong().size(16.0).color(Color32::WHITE))
+                    .fill(ui.visuals().selection.bg_fill)
+                    .min_size(egui::vec2(width, 34.0));
+                if ui.add(button).on_hover_text("Check the configuration and start the transmitter").clicked() {
+                    start = true;
+                }
+            }
+            if let Some(e) = &tx.error {
+                ui.add(egui::Label::new(RichText::new(e).color(pal.error)).wrap());
+            }
+            if !snap.started {
+                return;
+            }
+            let s = &snap.status;
+            ui.add_space(4.0);
+            egui::Grid::new("tx_time").num_columns(2).spacing([12.0, 3.0]).show(ui, |ui| {
+                let elapsed = tx.elapsed().map_or(0.0, |d| d.as_secs_f64());
+                value(ui, "On the air", format!("{} ({} frames)", fmt_time(s.seconds), s.frames));
+                ui.end_row();
+                let speed = if elapsed > 0.5 && s.device.is_none() {
+                    format!("  (\u{d7}{:.1} real time)", s.seconds / elapsed)
+                } else {
+                    String::new()
+                };
+                value(ui, "Elapsed", format!("{}{speed}", fmt_time(elapsed)));
+                ui.end_row();
+            });
+            if let Some(limit) = snap.frames_limit.filter(|n| *n > 0) {
+                let fraction = (s.frames as f32 / limit as f32).clamp(0.0, 1.0);
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .desired_width(ui.available_width())
+                        .text(format!("{} of {}", fmt_time(s.seconds), fmt_time(limit as f64 * 0.4))),
+                );
+            }
+        });
+        if stop {
+            tx.stop();
         }
-        match checked {
-            Checked::Ok { plan, output } => {
-                heading(ui, "Multiplex");
-                ui.add(egui::Label::new(RichText::new(output).weak()).wrap());
-                ui.add(egui::Label::new(RichText::new(plan).monospace()).wrap());
-            }
-            Checked::Problems(problems) => {
-                let n = problems.list.len();
-                heading(ui, &format!("{n} problem{}", if n == 1 { "" } else { "s" }));
-                if let Some((line, column)) = problems.location {
-                    ui.label(
-                        RichText::new(format!(
-                            "line {line}, column {column} (marked in the editor)"
-                        ))
-                        .color(pal.error)
-                        .strong(),
-                    );
-                }
-                for p in &problems.list {
-                    ui.add(
-                        egui::Label::new(RichText::new(format!("– {p}")).color(pal.error)).wrap(),
-                    );
-                }
-            }
+        if start {
+            self.transmit(settings, tx, allow_device);
         }
     }
+
+    /// The problems of the last check, if it failed.
+    fn problems_card(&self, ui: &mut Ui, pal: &Palette) {
+        let Some((Checked::Problems(problems), text)) = &self.checked else { return };
+        let n = problems.list.len();
+        card(ui, &format!("{n} problem{}", if n == 1 { "" } else { "s" }), "", |ui| {
+            if *text != self.text {
+                ui.label(RichText::new("The configuration has changed since this check.").italics().weak());
+            }
+            if let Some((line, column)) = problems.location {
+                ui.label(RichText::new(format!("line {line}, column {column} (marked in the TOML view)")).color(pal.error).strong());
+            }
+            for p in &problems.list {
+                ui.add(egui::Label::new(RichText::new(format!("\u{2013} {p}")).color(pal.error)).wrap());
+            }
+        });
+    }
+
+    /// The multiplex of the last good check: the bar, details folded away.
+    fn multiplex_card(&self, ui: &mut Ui) {
+        card(ui, "Multiplex", "", |ui| {
+            match (&self.bar, &self.checked) {
+                (Some(bar), Some((Checked::Ok { plan, output }, text))) => {
+                    capacity_bar(ui, bar);
+                    if *text != self.text {
+                        ui.label(RichText::new("Changed since this check.").italics().weak());
+                    }
+                    egui::CollapsingHeader::new("Details").id_salt("tx_plan_details").show(ui, |ui| {
+                        ui.add(egui::Label::new(RichText::new(output).weak()).wrap());
+                        ui.add(egui::Label::new(RichText::new(plan).monospace().small()).wrap());
+                    });
+                }
+                _ => placeholder(ui, "Checked when the configuration changes, or press Validate."),
+            }
+        });
+    }
+}
+
+/// Output level, destination, clipping, SDC.
+fn output_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
+    let snap = &tx.snap;
+    let s = &snap.status;
+    card(ui, "Output", "", |ui| {
+        if !snap.started {
+            placeholder(ui, "The output level, destination and SDC use appear while transmitting.");
+            return;
+        }
+        let live = tx.is_running();
+        ui.horizontal(|ui| {
+            let width = (ui.available_width() - 150.0).max(120.0);
+            level_meter(ui, "tx_out_meter", live.then_some((s.output_rms_dbfs, s.output_peak_dbfs)), width, MeterKind::Signal);
+            ui.label(RichText::new(format!("{:.1} dBFS RMS\npeak {:.1}", s.output_rms_dbfs, s.output_peak_dbfs)).monospace().small());
+        });
+        ui.add_space(2.0);
+        egui::Grid::new("tx_output_status").num_columns(2).spacing([12.0, 3.0]).show(ui, |ui| {
+            if let Some(dev) = &s.device {
+                value(ui, "Sound card", dev.as_str());
+                ui.end_row();
+                if let Some(ms) = s.device_buffer_ms {
+                    value(ui, "Queued", format!("{ms:.0} ms")).on_hover_text("Signal waiting on the sound card, not yet played.");
+                    ui.end_row();
+                }
+                let under = RichText::new(s.device_underruns.to_string()).monospace();
+                ui.label(RichText::new("Underruns").weak());
+                ui.label(if s.device_underruns > 0 { under.color(pal.error) } else { under })
+                    .on_hover_text("Times the sound card ran out of signal.");
+                ui.end_row();
+            }
+            if let Some(f) = &s.output_file {
+                ui.label(RichText::new("File").weak());
+                ui.add(egui::Label::new(RichText::new(f.display().to_string()).monospace()).wrap());
+                ui.end_row();
+            }
+            let clipped = RichText::new(s.clipped_samples.to_string()).monospace();
+            ui.label(RichText::new("Clipped").weak());
+            ui.label(if s.clipped_samples > 0 { clipped.color(pal.error) } else { clipped })
+                .on_hover_text("Output samples limited to full scale so far.");
+            ui.end_row();
+            ui.label(RichText::new("SDC").weak());
+            let fill = if s.sdc_capacity > 0 { s.sdc_bytes_used as f32 / s.sdc_capacity as f32 } else { 0.0 };
+            ui.add(
+                egui::ProgressBar::new(fill.clamp(0.0, 1.0))
+                    .desired_width(200.0)
+                    .text(format!("{} / {} bytes", s.sdc_bytes_used, s.sdc_capacity)),
+            )
+            .on_hover_text(format!("Data field bytes used by the last SDC block, of its capacity ({} blocks sent).", s.sdc_blocks));
+            ui.end_row();
+            if let Some(t) = &s.time_sent {
+                value(ui, "Time sent", t.as_str());
+                ui.end_row();
+            }
+        });
+    });
+}
+
+/// One block per service: its bit rate, the input level meter, codec and input, data.
+fn services_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
+    let s = &tx.snap.status;
+    let live = tx.is_running() && tx.snap.started;
+    card(ui, "Services", "", |ui| {
+        if s.services.is_empty() {
+            placeholder(ui, "The services appear when the transmitter starts.");
+            return;
+        }
+        for (k, sv) in s.services.iter().enumerate() {
+            if k > 0 {
+                ui.separator();
+            }
+            ui.horizontal(|ui| {
+                egui::Frame::new()
+                    .fill(ui.visuals().selection.bg_fill)
+                    .corner_radius(egui::CornerRadius::same(3))
+                    .inner_margin(egui::Margin::symmetric(6, 1))
+                    .show(ui, |ui| ui.label(RichText::new(sv.short_id.to_string()).monospace().strong().color(Color32::WHITE)));
+                ui.label(RichText::new(&sv.label).strong()).on_hover_text(format!("service id {:06X}", sv.service_id));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(format!("{:.2} kbit/s", sv.bitrate / 1000.0)).monospace());
+                });
+            });
+            if let Some(a) = &sv.audio {
+                let level = live.then_some((a.counters.input_rms_dbfs, a.counters.input_peak_dbfs));
+                meter_with_text(ui, ("tx_service_meter", sv.short_id), level, (ui.available_width() - 90.0).max(120.0), MeterKind::Audio);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("{} @ {:.1} kbit/s \u{b7} {}", a.codec, f64::from(a.encoder_bitrate) / 1000.0, a.input)).weak(),
+                    )
+                    .wrap(),
+                );
+                let mut notes = Vec::new();
+                if a.input_finished {
+                    notes.push("input ended".to_string());
+                }
+                if a.counters.frames_dropped > 0 {
+                    notes.push(format!("{} frames dropped", a.counters.frames_dropped));
+                }
+                if a.counters.encoder_errors > 0 {
+                    notes.push(format!("{} encoder errors", a.counters.encoder_errors));
+                }
+                if !notes.is_empty() {
+                    ui.colored_label(pal.error, notes.join(", "));
+                }
+                if let Some(ppm) = a.counters.input_drift_ppm {
+                    ui.label(RichText::new(format!("following the input clock: {ppm:+.0} ppm")).weak().small());
+                }
+            }
+            for app in &sv.apps {
+                ui.label(RichText::new(format!("+ {} \u{b7} {:.2} kbit/s", app.kind, app.bitrate / 1000.0)).weak());
+            }
+        }
+    });
 }
 
 fn output_file_picker(ui: &mut Ui, settings: &mut Settings) {
@@ -665,244 +838,5 @@ fn output_device_picker(ui: &mut Ui, settings: &mut Settings, devices: &mut Devi
         .clicked()
     {
         devices.refresh();
-    }
-}
-
-/// Where, how long and how loud: the running (or last) transmission.
-fn status_section(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
-    let snap = &tx.snap;
-    let s = &snap.status;
-    heading(ui, "Transmission");
-    let state = if tx.is_running() {
-        if !snap.started {
-            "Starting…"
-        } else if tx.is_stopping() {
-            "Stopping…"
-        } else {
-            "Transmitting"
-        }
-    } else if tx.error.is_some() {
-        "Failed"
-    } else if snap.started {
-        "Finished"
-    } else {
-        "Idle"
-    };
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(state).strong());
-        if !tx.label.is_empty() {
-            ui.label(RichText::new(&tx.label).weak());
-        }
-    });
-    if let Some(e) = &tx.error {
-        ui.add(egui::Label::new(RichText::new(e).color(pal.error)).wrap());
-    }
-    if !snap.started {
-        return;
-    }
-    egui::Grid::new("tx_status")
-        .num_columns(2)
-        .spacing([12.0, 3.0])
-        .show(ui, |ui| {
-            let elapsed = tx.elapsed().map_or(0.0, |d| d.as_secs_f64());
-            let limit = snap
-                .frames_limit
-                .map(|n| format!(" of {}", fmt_time(n as f64 * 0.4)))
-                .unwrap_or_default();
-            value(
-                ui,
-                "Signal",
-                format!("{}{limit} ({} frames)", fmt_time(s.seconds), s.frames),
-            );
-            ui.end_row();
-            let speed = if elapsed > 0.5 && s.device.is_none() {
-                format!("  (×{:.1} real time)", s.seconds / elapsed)
-            } else {
-                String::new()
-            };
-            value(ui, "Elapsed", format!("{}{speed}", fmt_time(elapsed)));
-            ui.end_row();
-            ui.label(RichText::new("Output").weak());
-            output_meter(ui, s);
-            ui.end_row();
-            let clipped = RichText::new(s.clipped_samples.to_string()).monospace();
-            ui.label(RichText::new("Clipped").weak());
-            ui.label(if s.clipped_samples > 0 {
-                clipped.color(pal.error)
-            } else {
-                clipped
-            })
-            .on_hover_text("Output samples limited to full scale so far.");
-            ui.end_row();
-            if let Some(dev) = &s.device {
-                value(ui, "Sound card", dev.as_str());
-                ui.end_row();
-                let under = RichText::new(s.device_underruns.to_string()).monospace();
-                ui.label(RichText::new("Underruns").weak());
-                ui.label(if s.device_underruns > 0 {
-                    under.color(pal.error)
-                } else {
-                    under
-                })
-                .on_hover_text("Times the sound card ran out of signal.");
-                ui.end_row();
-                if let Some(ms) = s.device_buffer_ms {
-                    value(ui, "Queued", format!("{ms:.0} ms"))
-                        .on_hover_text("Signal waiting on the sound card, not yet played.");
-                    ui.end_row();
-                }
-            }
-            if let Some(f) = &s.output_file {
-                ui.label(RichText::new("File").weak());
-                ui.add(egui::Label::new(RichText::new(f.display().to_string()).monospace()).wrap());
-                ui.end_row();
-            }
-            ui.label(RichText::new("SDC").weak());
-            let fill = if s.sdc_capacity > 0 {
-                s.sdc_bytes_used as f32 / s.sdc_capacity as f32
-            } else {
-                0.0
-            };
-            ui.add(
-                egui::ProgressBar::new(fill.clamp(0.0, 1.0))
-                    .desired_width(200.0)
-                    .text(format!(
-                        "{} / {} bytes, {} blocks",
-                        s.sdc_bytes_used, s.sdc_capacity, s.sdc_blocks
-                    )),
-            )
-            .on_hover_text("Data field bytes used by the last SDC block, of its capacity.");
-            ui.end_row();
-            if let Some(t) = &s.time_sent {
-                value(ui, "Time sent", t.as_str());
-                ui.end_row();
-            }
-        });
-}
-
-/// RMS and peak level of the last frame (the OFDM peaks are ~10 dB above the RMS).
-fn output_meter(ui: &mut Ui, s: &StationStatus) {
-    let fraction = ((s.output_rms_dbfs + 60.0) / 60.0).clamp(0.0, 1.0);
-    let hot = s.output_peak_dbfs >= -0.1;
-    let fill = if hot {
-        Color32::from_rgb(230, 55, 50)
-    } else {
-        ui.visuals().selection.bg_fill
-    };
-    ui.add(
-        egui::ProgressBar::new(fraction)
-            .desired_width(200.0)
-            .fill(fill)
-            .text(format!(
-                "RMS {:.1} · peak {:.1} dBFS",
-                s.output_rms_dbfs, s.output_peak_dbfs
-            )),
-    )
-    .on_hover_text("Level of the last 400 ms of output (bar: RMS on a 60 dB scale).");
-}
-
-/// What a service carries, in one line.
-pub fn service_content(sv: &ServiceStatus) -> String {
-    let mut parts = Vec::new();
-    if let Some(a) = &sv.audio {
-        parts.push(format!(
-            "{} @ {:.1} kbit/s",
-            a.codec,
-            f64::from(a.encoder_bitrate) / 1000.0
-        ));
-    }
-    for app in &sv.apps {
-        parts.push(format!("{} {:.2} kbit/s", app.kind, app.bitrate / 1000.0));
-    }
-    if parts.is_empty() {
-        "–".into()
-    } else {
-        parts.join(" + ")
-    }
-}
-
-/// One line per service (id, label, bit rate, input level), its content below.
-fn services_table(ui: &mut Ui, s: &StationStatus) {
-    if s.services.is_empty() {
-        placeholder(
-            ui,
-            "No services yet (they appear when the transmitter starts).",
-        );
-        return;
-    }
-    for sv in &s.services {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(format!("{}  {}", sv.short_id, sv.label)).strong())
-                .on_hover_text(format!("service id {:06X}", sv.service_id));
-            ui.label(RichText::new(format!("{:.2} kbit/s", sv.bitrate / 1000.0)).monospace());
-            if let Some(a) = &sv.audio {
-                ui.label(RichText::new(input_text(a)).monospace())
-                    .on_hover_text(format!(
-                        "input: {}
-RMS {:.1} / peak {:.1} dBFS of the last 400 ms",
-                        a.input, a.counters.input_rms_dbfs, a.counters.input_peak_dbfs
-                    ));
-            }
-        });
-        ui.indent(("tx_service", sv.short_id), |ui| {
-            ui.add(egui::Label::new(RichText::new(service_content(sv)).weak()).wrap());
-        });
-    }
-}
-
-/// Input level of an audio service, with its end and dropped frames if any.
-pub fn input_text(a: &AudioStatus) -> String {
-    let mut text = format!("input {:.1} dBFS", a.counters.input_rms_dbfs);
-    if a.input_finished {
-        text.push_str(" (ended)");
-    }
-    if a.counters.frames_dropped > 0 {
-        text.push_str(&format!(", {} frames dropped", a.counters.frames_dropped));
-    }
-    text
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use decdrm_station::{AppKind, AppStatus};
-
-    #[test]
-    fn service_content_lines() {
-        let mut sv = ServiceStatus {
-            short_id: 0,
-            label: "Radio".into(),
-            audio: Some(AudioStatus {
-                codec: "HE-AAC mono, 12 kHz core".into(),
-                encoder_bitrate: 11_200,
-                ..AudioStatus::default()
-            }),
-            ..ServiceStatus::default()
-        };
-        assert_eq!(
-            service_content(&sv),
-            "HE-AAC mono, 12 kHz core @ 11.2 kbit/s"
-        );
-        sv.apps.push(AppStatus {
-            kind: AppKind::Slideshow,
-            stream_id: 1,
-            packet_id: 0,
-            bitrate: 2_000.0,
-        });
-        assert_eq!(
-            service_content(&sv),
-            "HE-AAC mono, 12 kHz core @ 11.2 kbit/s + slideshow 2.00 kbit/s"
-        );
-        assert_eq!(service_content(&ServiceStatus::default()), "–");
-    }
-
-    #[test]
-    fn input_levels() {
-        let mut a = AudioStatus::default();
-        a.counters.input_rms_dbfs = -15.04;
-        assert_eq!(input_text(&a), "input -15.0 dBFS");
-        a.input_finished = true;
-        a.counters.frames_dropped = 2;
-        assert_eq!(input_text(&a), "input -15.0 dBFS (ended), 2 frames dropped");
     }
 }
