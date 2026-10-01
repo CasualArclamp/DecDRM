@@ -198,8 +198,9 @@ pub struct OutputSettings {
     pub device_buffer_ms: u32,
     /// Real IF signal or complex I/Q.
     pub format: SignalFormat,
-    /// Real output: frequency of the DRM DC carrier, Hz (default: 12 kHz, or the
-    /// centre of the band for 18/20 kHz channels).
+    /// Real output: frequency of the DRM DC carrier, Hz. Default: the signal centred
+    /// at 12 kHz — the DC carrier at 12 kHz for 9/10 kHz channels, ≈ 9.6–9.8 kHz for
+    /// 4.5/5 kHz (all carriers above it), ≈ 7–7.3 kHz for 18/20 kHz.
     pub if_hz: Option<f64>,
     /// I/Q output: frequency of the DRM DC carrier, Hz (0 = zero IF).
     pub iq_offset_hz: f64,

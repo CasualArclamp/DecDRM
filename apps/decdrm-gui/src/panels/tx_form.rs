@@ -8,6 +8,8 @@
 use super::meter::{MeterKind, meter_with_text};
 use super::source::DeviceLists;
 use decdrm_core::fac::{LANGUAGES, PROGRAMME_TYPES};
+use decdrm_core::params::{ChannelLayout, RobustnessMode, SpectrumOccupancy};
+use decdrm_core::tx::output::{OutputFormat, recommended_if_range_hz, suggested_if_hz};
 use eframe::egui::{self, Color32, RichText, Ui};
 use std::path::Path;
 use toml_edit::{ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, Value};
@@ -1023,8 +1025,23 @@ fn extra_apps(ui: &mut Ui, svc: &mut Table, i: usize, ctx: &mut FormCtx, parts: 
 const FORMATS: &[(&str, &str)] = &[("real", "Real IF (1 channel)"), ("iq", "I/Q (2 channels)")];
 const SAMPLE_FORMATS: &[(&str, &str)] = &[("int16", "16-bit"), ("int24", "24-bit"), ("float32", "32-bit float")];
 
+/// The channel layout (robustness mode and bandwidth) of the document, if valid.
+fn channel_layout(doc: &DocumentMut) -> Option<ChannelLayout> {
+    let ch = doc.get("channel").and_then(Item::as_table_like);
+    let mode = match canon(&ch.and_then(|ch| get_str(ch, "mode")).unwrap_or_else(|| "B".into())).as_str() {
+        "a" => RobustnessMode::A,
+        "b" => RobustnessMode::B,
+        "c" => RobustnessMode::C,
+        "d" => RobustnessMode::D,
+        _ => return None,
+    };
+    let occupancy = u8::try_from(ch.and_then(|ch| get_int(ch, "occupancy")).unwrap_or(3)).ok()?;
+    ChannelLayout::new(mode, SpectrumOccupancy::new(occupancy)?)
+}
+
 fn output(ui: &mut Ui, doc: &mut DocumentMut, ctx: &mut FormCtx) -> bool {
     let mut changed = false;
+    let layout = channel_layout(doc);
     let out = section(doc, "output");
     grid(ui, "tx_form_output", |ui| {
         row_label(ui, "Signal");
@@ -1052,21 +1069,32 @@ fn output(ui: &mut Ui, doc: &mut DocumentMut, ctx: &mut FormCtx) -> bool {
         } else {
             row_label(ui, "IF (DC carrier)");
             let mut auto = !out.contains_key("if_hz");
+            let suggested = layout.map_or(12_000.0, suggested_if_hz);
             ui.horizontal(|ui| {
-                if ui.checkbox(&mut auto, "Automatic").on_hover_text("12 kHz, or the band centre for 18/20 kHz").changed() {
+                let hint = "Centre the signal at 12 kHz: the DC carrier at 12 kHz for 9 and 10 kHz, lower for 4.5 and 5 kHz \
+                     (all their carriers lie above it) and for 18 and 20 kHz";
+                if ui.checkbox(&mut auto, "Automatic").on_hover_text(hint).changed() {
                     if auto {
                         remove(out, "if_hz");
                     } else {
-                        set(out, "if_hz", 12_000.0);
+                        set(out, "if_hz", suggested);
                     }
                     changed = true;
                 }
+                let mut f = if auto { suggested } else { get_num(out, "if_hz").unwrap_or(suggested) };
                 if !auto {
-                    let mut f = get_num(out, "if_hz").unwrap_or(12_000.0);
-                    if ui.add(egui::DragValue::new(&mut f).range(3_000.0..=21_000.0).speed(10.0).suffix(" Hz")).changed() {
+                    // The form offers what keeps the signal clear of 0 Hz and 24 kHz; a
+                    // value written in the TOML view stays as it is.
+                    let (min, max) = layout.map_or((3_000.0, 21_000.0), recommended_if_range_hz);
+                    let edit = egui::DragValue::new(&mut f).range(min..=max).clamp_existing_to_range(false).speed(10.0).suffix(" Hz");
+                    if ui.add(edit).changed() {
                         set(out, "if_hz", f);
                         changed = true;
                     }
+                }
+                if let Some(l) = layout {
+                    let (_, (lo, hi)) = crate::tx_config::signal_band(l, OutputFormat::Real { if_hz: f });
+                    ui.label(RichText::new(format!("signal {:.1}–{:.1} kHz", lo / 1e3, hi / 1e3)).weak());
                 }
             });
             ui.end_row();

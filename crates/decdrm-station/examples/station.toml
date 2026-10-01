@@ -25,7 +25,8 @@ sample_format = "int16"      # "int16", "int24" or "float32" (WAV only)
 # device = "CABLE-A Input"   # sound card (name or unique part of it; "default" = system default)
 # device_buffer_ms = 400     # audio queued ahead on the sound card
 format = "real"              # "real" IF signal (1 channel) or "iq" (2 channels, I left)
-# if_hz = 12000              # real: DRM DC carrier frequency (default 12 kHz, band centre for 18/20 kHz)
+# if_hz = 12000              # real: DRM DC carrier frequency; default: the signal centred at 12 kHz
+                             # (DC carrier 12 kHz for 9/10 kHz, ~9.7 kHz for 4.5/5 kHz, ~7 kHz for 18/20)
 # iq_offset_hz = 0           # iq: DC carrier offset
 # iq_swap = false            # iq: I on the right channel
 level_dbfs = -15             # RMS level per channel; OFDM peaks are ~10 dB higher

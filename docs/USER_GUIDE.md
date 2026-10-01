@@ -351,7 +351,11 @@ multiplex: streams, bit rates, codec settings and what goes where.
     protection; it must be more robust, i.e. lower, than `protection_b`).
 - **`[output]`:**
   - `file` (WAV/FLAC) and/or `device` (sound card);
-  - `format`: `real` IF at `if_hz` (default 12 kHz), or `iq`;
+  - `format`: `real` IF with the DC carrier at `if_hz`, or `iq`. By default a real
+    signal is centred at 12 kHz: the DC carrier sits at 12 kHz for 9/10 kHz, at about
+    9.7 kHz for 4.5/5 kHz (their carriers all lie above it) and at about 7 kHz for
+    18/20 kHz. Set `if_hz` to place it elsewhere, e.g. lower for a transmitter with
+    a narrow audio input;
   - `level_dbfs` (RMS level; OFDM peaks are about 10 dB higher) and `band_limit`.
 - **`[time]`:** sends the SDC clock from the system time or a fixed `start`, with an
   optional local time offset.

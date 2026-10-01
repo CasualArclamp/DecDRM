@@ -92,19 +92,25 @@ pub fn carrier_span_hz(layout: ChannelLayout) -> (Real, Real) {
     (Real::from(kmin) * df, Real::from(kmax) * df)
 }
 
-/// A sensible real IF for `layout`: 12 kHz when the whole signal fits comfortably
-/// into 0..24 kHz with it (all 4.5–10 kHz layouts), otherwise the IF that centres
-/// the signal in the band (≈ 7–7.5 kHz for the 18 and 20 kHz layouts), rounded to
-/// 100 Hz.
+/// A sensible real IF for `layout`: the one that centres the signal in the 0..24 kHz
+/// band, at 12 kHz, rounded to 100 Hz. That is 12 kHz itself for the 9 and 10 kHz
+/// layouts (symmetric about the DC carrier, Dream's `VIRTUAL_INTERMED_FREQ`), ≈ 9.6–9.8
+/// kHz for 4.5 and 5 kHz (all carriers lie above the DC carrier), and ≈ 7–7.3 kHz for
+/// 18 and 20 kHz (most carriers lie above it).
 pub fn suggested_if_hz(layout: ChannelLayout) -> Real {
     let (lo, hi) = carrier_span_hz(layout);
+    let centre = Real::from(SAMPLE_RATE) / 4.0;
+    ((centre - (lo + hi) / 2.0) / 100.0).round() * 100.0
+}
+
+/// Real IFs (Hz) that keep the whole signal of `layout` inside the band with the
+/// guard a receiver taking the audio directly needs at 0 Hz and fs/2 (its Hilbert
+/// transformer), rounded inwards to 100 Hz. [`OutputStage::new`] accepts more: any
+/// IF that keeps the carriers strictly inside 0..fs/2.
+pub fn recommended_if_range_hz(layout: ChannelLayout) -> (Real, Real) {
+    let (lo, hi) = carrier_span_hz(layout);
     let nyq = Real::from(SAMPLE_RATE) / 2.0;
-    let fits = |f: Real| f + lo >= REAL_EDGE_GUARD_HZ && f + hi <= nyq - REAL_EDGE_GUARD_HZ;
-    if fits(12_000.0) {
-        12_000.0
-    } else {
-        ((nyq / 2.0 - (lo + hi) / 2.0) / 100.0).round() * 100.0
-    }
+    (((REAL_EDGE_GUARD_HZ - lo) / 100.0).ceil() * 100.0, ((nyq - REAL_EDGE_GUARD_HZ - hi) / 100.0).floor() * 100.0)
 }
 
 /// Streaming FIR with real taps over complex samples.
@@ -325,12 +331,20 @@ mod tests {
                 let f = suggested_if_hz(l);
                 let (lo, hi) = carrier_span_hz(l);
                 assert!(f + lo > 1000.0 && f + hi < nyq - 1000.0, "{l}: IF {f}");
-                if so.value() <= 3 {
+                // Centred at 12 kHz; the symmetric 9/10 kHz layouts at exactly 12 kHz.
+                assert!((f + (lo + hi) / 2.0 - 12_000.0).abs() <= 50.0, "{l}: IF {f}");
+                if matches!(so.value(), 2 | 3) {
                     assert_eq!(f, 12_000.0, "{l}");
                 }
+                let (min, max) = recommended_if_range_hz(l);
+                assert!(min <= f && f <= max, "{l}: IF {f} outside {min}..{max}");
+                assert!(min + lo >= 1500.0 && max + hi <= nyq - 1500.0, "{l}");
                 assert!(OutputStage::new(l, OutputConfig::real(f)).is_ok());
             }
         }
+        // 4.5 and 5 kHz have all carriers above the DC carrier: it moves down.
+        assert_eq!(suggested_if_hz(layout(RobustnessMode::B, SpectrumOccupancy::SO_0)), 9_800.0);
+        assert_eq!(suggested_if_hz(layout(RobustnessMode::B, SpectrumOccupancy::SO_1)), 9_600.0);
         let so5 = layout(RobustnessMode::A, SpectrumOccupancy::SO_5);
         assert!(OutputStage::new(so5, OutputConfig::real(12_000.0)).is_err());
         assert!(OutputStage::new(so5, OutputConfig::iq(12_000.0)).is_err());
