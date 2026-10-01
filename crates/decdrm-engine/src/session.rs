@@ -74,6 +74,13 @@ struct DataPipeline {
     decoder: DataDecoder,
 }
 
+/// The service-bar caveat for EVS audio in the KCBS framing: its frames follow EVS in
+/// structure, but part of them is nonstandard, most likely selectively encrypted (frame
+/// types with rigidly structured fields fail the decoder's bit-error checks, the
+/// speech decodes garbled, and the side data carries a counter like a cipher's), so it
+/// plays only when the service is selected.
+const EVS_WARNING: &str = "likely encrypted";
+
 /// A data channel whose data groups carry EVS audio in the KCBS framing
 /// ([`decdrm_evs::kcbs`]): how many data groups in a row matched, and the audio
 /// bandwidth their frames signal.
@@ -438,8 +445,10 @@ impl Session {
             }
         }
 
-        // Data groups of data channels carrying EVS audio, by service.
+        // Data groups of data channels carrying EVS audio, by service; the service whose
+        // EVS audio is being played (its data groups are not captured as well).
         let mut evs_fields: Vec<(u8, Vec<u8>)> = Vec::new();
+        let evs_playing = self.evs_target().filter(|_| decdrm_evs::BUILT_IN);
         for d in &mut self.data {
             if let Some(Some(lf)) = logical.get(d.app.stream_id as usize) {
                 for event in d.decoder.push_frame_with_hint(&lf.data, frame.complete) {
@@ -456,8 +465,8 @@ impl Session {
                         && observe_evs(&mut self.evs, d.short_id, &d.app, &group.data, out)
                     {
                         evs_fields.push((d.short_id, group.data));
-                        // Decoded as audio rather than captured, when it can be.
-                        if decdrm_evs::BUILT_IN {
+                        // Decoded as audio rather than captured while it plays.
+                        if evs_playing == Some(d.short_id) {
                             continue;
                         }
                     }
@@ -476,18 +485,14 @@ impl Session {
         }
     }
 
-    /// The service whose EVS audio to decode: none while an ordinary audio service
-    /// plays; the selected service if it carries EVS audio; with nothing selected, the
-    /// first that does.
+    /// The service whose EVS audio to decode: only one the user selected (it decodes
+    /// garbled, see [`EVS_WARNING`], so it never plays by itself), and none while an
+    /// ordinary audio service plays.
     fn evs_target(&self) -> Option<u8> {
         if self.audio.is_some() {
             return None;
         }
-        let carries = |id: u8| self.evs.iter().any(|c| c.short_id == id && c.locked());
-        match self.selected {
-            Some(id) => carries(id).then_some(id),
-            None => self.evs.iter().find(|c| c.locked()).map(|c| c.short_id),
-        }
+        self.selected.filter(|&id| self.evs.iter().any(|c| c.short_id == id && c.locked()))
     }
 
     /// Decode the EVS audio of [`Self::evs_target`] from this multiplex frame's data
@@ -534,7 +539,7 @@ impl Session {
         let channel = self.evs.iter().find(|c| c.short_id == short_id)?;
         match decdrm_evs::KcbsDecoder::new() {
             Ok(decoder) => {
-                self.audio_stats = AudioStats { codec: format!("{} (KCBS framing; faulty frame types concealed, comfort noise in pauses)", channel.describe()), ..AudioStats::default() };
+                self.audio_stats = AudioStats { codec: format!("{} (KCBS framing; nonstandard, likely encrypted)", channel.describe()), ..AudioStats::default() };
                 out.push(SessionEvent::Log(format!(
                     "audio service {short_id}: {}, carried in data application {:#05X}",
                     self.audio_stats.codec,
@@ -570,6 +575,7 @@ impl Session {
                     v.audio = Some(evs_view(c));
                     v.audio_bitrate = stream_bitrate(&lengths, c.app.stream_id);
                     v.decodable = decdrm_evs::BUILT_IN;
+                    v.warning = Some(EVS_WARNING.into());
                 }
                 v
             })
@@ -590,7 +596,8 @@ fn observe_evs(channels: &mut Vec<EvsChannel>, short_id: u8, app: &ApplicationIn
             c.bandwidth = bandwidth;
             if !was && c.locked() {
                 out.push(SessionEvent::Log(format!(
-                    "service {short_id}: data application {:#05X} carries {} audio (KCBS framing){}",
+                    "service {short_id}: data application {:#05X} carries {} audio (KCBS framing), in a nonstandard \
+                     form ({EVS_WARNING}): it decodes garbled, so it plays only when the service is selected{}",
                     app.user_app_id().unwrap_or(0),
                     c.describe(),
                     if decdrm_evs::BUILT_IN { "" } else { "; this build has no EVS decoder (feature `evs`)" }
@@ -705,6 +712,7 @@ fn service_view(s: &ServiceInfo, lengths: &[StreamLengths]) -> crate::snapshot::
             AudioCodec::Encodec => decdrm_encodec::BUILT_IN,
             _ => true,
         }),
+        warning: None,
     }
 }
 

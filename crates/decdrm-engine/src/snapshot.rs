@@ -75,6 +75,9 @@ pub struct ServiceView {
     /// Whether this receiver can decode the audio: false for a reserved coding (CELP,
     /// HVXC) and for EnCodec in a build without it.
     pub decodable: bool,
+    /// A caveat for the service bar, e.g. that EVS audio sent as data is nonstandard
+    /// and likely encrypted.
+    pub warning: Option<String>,
 }
 
 /// Audio coding of a service (SDC type 9), the facts Dream's service bars show.

@@ -127,6 +127,9 @@ pub fn tags(s: &ServiceView) -> Vec<Tag> {
             t.push(tag("stream mode", TagKind::Feature));
         }
     }
+    if let Some(w) = &s.warning {
+        t.push(tag(w.clone(), TagKind::Warning));
+    }
     if s.ca {
         t.push(tag("CA", TagKind::Warning));
     }
@@ -202,7 +205,14 @@ fn details(s: &ServiceView) -> String {
     if s.ca {
         lines.push("Conditional access: scrambled".into());
     }
-    lines.push(if s.is_audio || s.audio.is_some() { "Click to listen".into() } else { "Click to show its data".into() });
+    if let Some(w) = &s.warning {
+        lines.push(format!("Caution: {w}; it decodes garbled and plays only when selected"));
+    }
+    lines.push(match (s.is_audio || s.audio.is_some(), s.warning.is_some()) {
+        (true, false) => "Click to listen".into(),
+        (true, true) => "Click to listen anyway".into(),
+        (false, _) => "Click to show its data".into(),
+    });
     lines.join("\n")
 }
 

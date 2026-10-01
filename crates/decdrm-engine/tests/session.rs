@@ -37,6 +37,11 @@ fn run(file: &str, seconds: f64) -> Option<Outcome> {
 
 /// The same for an input format.
 fn run_input(file: &str, seconds: f64, input: InputFormat) -> Option<Outcome> {
+    run_selecting(file, seconds, input, None)
+}
+
+/// The same with a service selected from the start (as `--service N` does).
+fn run_selecting(file: &str, seconds: f64, input: InputFormat, select: Option<u8>) -> Option<Outcome> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples").join(file);
     if !path.exists() {
         eprintln!("skipping: {} not found", path.display());
@@ -46,6 +51,9 @@ fn run_input(file: &str, seconds: f64, input: InputFormat) -> Option<Outcome> {
     let ch = source.info().channels;
     let cfg = ReceiverConfig { input, channels: ch, ..Default::default() };
     let mut session = Session::new(cfg);
+    if let Some(id) = select {
+        session.select_service(id);
+    }
     let mut o = Outcome::default();
     while source.position_s() < seconds {
         let Some(frames) = source.read(4800).expect("read") else { break };
@@ -80,19 +88,26 @@ const KCBS_LABEL: &str = "조선중앙제2라지오방송";
 const IQ: InputFormat = InputFormat::Iq { swap: false };
 
 /// From Japan on a good night (SNR ~24 dB): everything decodes. Its data application
-/// carries EVS audio (decdrm_evs::kcbs): with the `evs` feature 20 frames per data
-/// group from the second on, without it the data groups are captured.
+/// carries EVS audio (decdrm_evs::kcbs) in a nonstandard, likely encrypted form: not
+/// played unless the service is selected (its data groups are captured instead); when
+/// selected, with the `evs` feature, 20 frames per data group from the second on.
 #[test]
 fn kcbs_data_service_good_night() {
-    let Some(o) = run_input("SND.jj8ntm.proxy.kiwisdr.com_2026-09-30T12_58_36Z_6140.00_iq.wav", 60.0, IQ) else { return };
+    const FILE: &str = "SND.jj8ntm.proxy.kiwisdr.com_2026-09-30T12_58_36Z_6140.00_iq.wav";
+    let Some(o) = run_input(FILE, 60.0, IQ) else { return };
     assert_eq!(o.labels, [KCBS_LABEL]);
     assert_eq!((o.fac_bad, o.sdc_bad, o.msc_bad), (0, 0, 0), "FAC/SDC/MSC errors");
     assert!(o.msc_ok >= 78, "{} MSC frames", o.msc_ok);
+    assert!(o.audio_ok == 0 && o.codec.is_empty(), "not played by itself: {} frames, {:?}", o.audio_ok, o.codec);
+    assert!(o.raw_units >= 78, "{} data units captured", o.raw_units);
+
+    let Some(o) = run_selecting(FILE, 60.0, IQ, Some(0)) else { return };
     if decdrm_evs::BUILT_IN {
         assert!(o.codec.starts_with("EVS 13.2 kbit/s SWB"), "{}", o.codec);
         // Concealed: only frames the burst guard replaced (two per burst).
         assert!(o.audio_ok >= 1500 && o.audio_concealed <= 60, "EVS frames {} ok, {} concealed", o.audio_ok, o.audio_concealed);
-        assert_eq!(o.raw_units, 1, "only the data group before the channel locked");
+        // Captured: the data groups before the channel locked and playback began.
+        assert!(o.raw_units <= 2, "{} data units captured", o.raw_units);
     } else {
         assert!(o.raw_units >= 78, "{} data units", o.raw_units);
     }
@@ -102,7 +117,7 @@ fn kcbs_data_service_good_night() {
 /// keeps decoding around it.
 #[test]
 fn kcbs_timing_jump_in_a_web_sdr_stream() {
-    let Some(o) = run_input("SND.jj8ntm.proxy.kiwisdr.com_2026-09-30T12_52_02Z_6140.00_iq.wav", 60.0, IQ) else { return };
+    let Some(o) = run_selecting("SND.jj8ntm.proxy.kiwisdr.com_2026-09-30T12_52_02Z_6140.00_iq.wav", 60.0, IQ, Some(0)) else { return };
     assert_eq!(o.labels, [KCBS_LABEL]);
     assert_eq!(o.resyncs, 1, "timing jumps");
     assert!(o.msc_ok >= 77 && o.msc_bad <= 2, "MSC {} ok, {} bad", o.msc_ok, o.msc_bad);
