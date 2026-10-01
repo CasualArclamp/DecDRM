@@ -1,6 +1,8 @@
-//! Transmitter tab: edit a station configuration (TOML), check it, and transmit it.
+//! Transmitter tab: edit a station configuration, check it, and transmit it.
 //!
-//! The editor text is what gets transmitted (saved or not). The quick overrides in
+//! Two views of the same TOML text: a form ([`super::tx_form`], editing the document in
+//! place so comments and unshown settings stay) and the text itself. The text is what
+//! gets transmitted (saved or not). The quick overrides in
 //! the toolbar (output file or sound card, duration) are applied on top of it and
 //! never written into the file. Relative paths in the configuration are resolved
 //! against the file's directory; the untitled example uses a directory next to the
@@ -8,6 +10,7 @@
 
 use super::plots::spectrum_plot;
 use super::source::DeviceLists;
+use super::tx_form::{self, FormCtx, PlanBar};
 use super::{Palette, heading, placeholder, value};
 use crate::indicators::fmt_time;
 use crate::settings::{Settings, TxOutput};
@@ -17,6 +20,14 @@ use decdrm_station::{AudioStatus, MultiplexPlan, ServiceStatus, StationConfig, S
 use eframe::egui::{self, Color32, RichText, Ui};
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// Which view of the configuration the tab shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum View {
+    Form,
+    Toml,
+}
 
 /// Outcome of the last check, and the text it was made for.
 enum Checked {
@@ -38,6 +49,13 @@ pub struct TxPage {
     notice: Option<String>,
     /// Scroll the editor to the line of the last TOML syntax error (once).
     scroll_to_error: bool,
+    view: View,
+    /// The text parsed for the form, and the document (or the parse error).
+    doc: Option<(String, Result<toml_edit::DocumentMut, String>)>,
+    /// The multiplex of the last successful check.
+    bar: Option<PlanBar>,
+    /// Check again at this time (after form edits settle).
+    recheck_at: Option<Instant>,
 }
 
 impl TxPage {
@@ -56,6 +74,10 @@ impl TxPage {
             checked: None,
             notice: None,
             scroll_to_error: false,
+            view: View::Form,
+            doc: None,
+            bar: None,
+            recheck_at: None,
         };
         if let Some(path) = settings.station_config.clone()
             && let Err(e) = page.load(&path)
@@ -170,6 +192,12 @@ impl TxPage {
         }
     }
 
+    /// Directory relative paths are resolved against, without preparing the example's
+    /// files (for the form's file pickers).
+    fn dir(&self) -> PathBuf {
+        self.path.as_deref().and_then(Path::parent).map_or_else(|| self.example_dir.clone(), Path::to_path_buf)
+    }
+
     /// Directory relative paths are resolved against.
     fn base_dir(&mut self) -> PathBuf {
         match &self.path {
@@ -200,13 +228,16 @@ impl TxPage {
         let base = self.base_dir();
         let (checked, result) =
             match tx_config::check(&self.text, &base, &Self::overrides(settings)) {
-                Ok((cfg, plan)) => (
-                    Checked::Ok {
-                        plan: plan.describe(&cfg),
-                        output: tx_config::describe_output(&cfg, &plan),
-                    },
-                    Some((cfg, plan)),
-                ),
+                Ok((cfg, plan)) => {
+                    self.bar = Some(PlanBar::of(&cfg, &plan));
+                    (
+                        Checked::Ok {
+                            plan: plan.describe(&cfg),
+                            output: tx_config::describe_output(&cfg, &plan),
+                        },
+                        Some((cfg, plan)),
+                    )
+                }
                 Err(problems) => {
                     self.scroll_to_error = problems.location.is_some();
                     (Checked::Problems(problems), None)
@@ -269,10 +300,71 @@ impl TxPage {
         });
         egui::Panel::right("tx_side")
             .resizable(true)
-            .default_size(560.0)
-            .min_size(380.0)
+            .default_size(480.0)
+            .min_size(360.0)
             .show(ui, |ui| self.side(ui, tx));
-        egui::CentralPanel::default().show(ui, |ui| self.editor(ui));
+        // Check again once form edits have settled, so the multiplex bar follows them.
+        if let Some(at) = self.recheck_at {
+            let now = Instant::now();
+            if now >= at {
+                self.recheck_at = None;
+                self.check(settings);
+            } else {
+                ui.ctx().request_repaint_after(at - now);
+            }
+        }
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.view, View::Form, RichText::new("Station").strong())
+                    .on_hover_text("Edit the configuration with a form");
+                ui.selectable_value(&mut self.view, View::Toml, RichText::new("TOML").strong())
+                    .on_hover_text("Edit the configuration file itself (everything, with comments)");
+            });
+            ui.separator();
+            match self.view {
+                View::Form => self.form(ui, devices),
+                View::Toml => self.editor(ui),
+            }
+        });
+    }
+
+    fn form(&mut self, ui: &mut Ui, devices: &mut DeviceLists) {
+        if self.doc.as_ref().is_none_or(|(text, _)| *text != self.text) {
+            let parsed = self.text.parse::<toml_edit::DocumentMut>().map_err(|e| e.to_string());
+            self.doc = Some((self.text.clone(), parsed));
+        }
+        // A first check right away, so the multiplex bar is there from the start.
+        if self.bar.is_none() && self.checked.is_none() && self.recheck_at.is_none() {
+            self.recheck_at = Some(Instant::now());
+        }
+        let dir = self.dir();
+        let Some((_, parsed)) = &mut self.doc else { return };
+        let doc = match parsed {
+            Ok(doc) => doc,
+            Err(e) => {
+                ui.colored_label(Palette::for_ui(ui).error, "The configuration is not valid TOML, so the form cannot show it:");
+                ui.add(egui::Label::new(RichText::new(e.as_str()).monospace()).wrap());
+                if ui.button("Fix it in the TOML view").clicked() {
+                    self.view = View::Toml;
+                }
+                return;
+            }
+        };
+        let mut changed = false;
+        egui::ScrollArea::vertical()
+            .id_salt("tx_form_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let mut ctx = FormCtx { devices, base_dir: &dir, bar: self.bar.as_ref() };
+                changed = tx_form::show(ui, doc, &mut ctx);
+            });
+        if changed {
+            self.text = doc.to_string();
+            if let Some((text, _)) = &mut self.doc {
+                text.clone_from(&self.text);
+            }
+            self.recheck_at = Some(Instant::now() + Duration::from_millis(400));
+        }
     }
 
     fn toolbar(

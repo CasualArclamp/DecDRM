@@ -81,6 +81,16 @@ pub struct Args {
     /// seconds, default 10).
     #[arg(long, value_name = "PNG")]
     pub screenshot: Option<PathBuf>,
+    /// Initial window size in points, e.g. `1280x1400` (for documentation screenshots).
+    #[arg(long, value_name = "WxH", value_parser = parse_size)]
+    pub window_size: Option<(f32, f32)>,
+}
+
+/// `1280x800` → (1280, 800).
+fn parse_size(s: &str) -> Result<(f32, f32), String> {
+    let (w, h) = s.split_once(['x', 'X']).ok_or("expected WIDTHxHEIGHT, e.g. 1280x800")?;
+    let num = |v: &str| v.trim().parse::<f32>().map_err(|e| e.to_string()).and_then(|n| if n >= 200.0 { Ok(n) } else { Err("too small".into()) });
+    Ok((num(w)?, num(h)?))
 }
 
 fn main() -> eframe::Result {
@@ -89,7 +99,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("DecDRM")
             .with_app_id("decdrm-gui")
-            .with_inner_size([1280.0, 800.0])
+            .with_inner_size(args.window_size.map_or([1280.0, 800.0], |(w, h)| [w, h]))
             .with_min_inner_size([900.0, 560.0]),
         ..Default::default()
     };

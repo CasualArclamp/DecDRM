@@ -48,6 +48,8 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 # Settings file.
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1"
+# The station form edits the TOML in place, keeping comments and layout.
+toml_edit = "0.25"
 # Programme guides arrive as TS 102 818 XML.
 quick-xml = "0.41"
 # Opens a received broadcast website's start page in the system's browser.

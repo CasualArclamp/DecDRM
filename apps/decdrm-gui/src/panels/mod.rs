@@ -14,6 +14,7 @@ pub mod services;
 pub mod slideshow;
 pub mod source;
 pub mod status_strip;
+pub mod tx_form;
 pub mod tx_page;
 pub mod website;
 
