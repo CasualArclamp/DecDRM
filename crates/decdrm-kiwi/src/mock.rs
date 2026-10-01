@@ -21,7 +21,8 @@ pub enum MockSession {
     TooBusy(u32),
     /// Refuse with this `badp` code.
     BadPassword(u8),
-    /// Answer the WebSocket upgrade with an HTTP 307 to this URL.
+    /// Answer the WebSocket upgrade with an HTTP/1.0 307 to this URL (as the kiwisdr.com
+    /// proxy does).
     HttpRedirect(String),
     /// Send the Kiwi's `redirect` message with this URL.
     MsgRedirect(String),
@@ -179,7 +180,7 @@ fn serve(mut s: TcpStream, session: &MockSession, cfg: &MockConfig, rec: &Record
     match session {
         MockSession::HttpRedirect(url) => {
             read_head(&mut s);
-            let _ = write!(s, "HTTP/1.1 307 Temporary Redirect\r\nLocation: {url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = write!(s, "HTTP/1.0 307 Temporary Redirect\r\nContent-Type: text/html\r\nLocation: {url}\r\nServer: frp secondary redirect\r\n\r\n307 Temporary Redirect");
             return;
         }
         MockSession::NotFound => {

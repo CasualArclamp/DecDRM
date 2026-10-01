@@ -10,12 +10,13 @@ use crate::address::KiwiAddress;
 use crate::protocol::{self, Agc, KiwiMsg, SndBlock, Tuning};
 use std::collections::VecDeque;
 use std::fmt;
+use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tungstenite::handshake::HandshakeError;
+use tungstenite::protocol::Role;
 use tungstenite::{Message, WebSocket};
 
 /// Time allowed to open the TCP connection.
@@ -338,7 +339,7 @@ fn run(cfg: &KiwiConfig, shared: &Shared) {
                 shared.end(KiwiState::Stopped, None);
                 return;
             }
-            Outcome::Redirect(target) => match KiwiAddress::parse(&target) {
+            Outcome::Redirect(target) => match KiwiAddress::parse_redirect(&target) {
                 Ok(next) if redirects < 3 => {
                     shared.log(format!("KiwiSDR: redirected to {next}"));
                     shared.lock().status.address = next.to_string();
@@ -399,8 +400,64 @@ fn connect(address: &KiwiAddress) -> Result<TcpStream, String> {
     Err(last)
 }
 
+/// What the server answered to the WebSocket upgrade request.
+enum Upgrade {
+    Open,
+    Redirect(String),
+    Refused(u16),
+}
+
+/// The WebSocket opening handshake (RFC 6455 §4.1). Done here rather than by
+/// tungstenite, which rejects HTTP/1.0 answers: the kiwisdr.com proxy redirects with
+/// `HTTP/1.0 307`. Reads the answer's head byte by byte, so nothing behind it is lost.
+fn upgrade(stream: &mut TcpStream, address: &KiwiAddress, path: &str) -> Result<Upgrade, String> {
+    let key = tungstenite::handshake::client::generate_key();
+    let host = if address.port == 80 { address.to_string().trim_end_matches(":80").to_string() } else { address.to_string() };
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nUser-Agent: DecDRM/{}\r\n\r\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    stream.write_all(request.as_bytes()).map_err(|e| describe(&e.to_string()))?;
+    let mut head = Vec::with_capacity(512);
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() > 16_384 {
+            return Err("the answer's header is too long".into());
+        }
+        match stream.read(&mut byte) {
+            Ok(0) => return Err("the server closed the connection".into()),
+            Ok(_) => head.push(byte[0]),
+            Err(e) => return Err(describe(&e.to_string())),
+        }
+    }
+    let text = String::from_utf8_lossy(&head);
+    let mut lines = text.split("\r\n");
+    let status = lines.next().unwrap_or_default();
+    let code = status
+        .strip_prefix("HTTP/1.")
+        .and_then(|rest| rest.split_whitespace().nth(1))
+        .and_then(|c| c.parse::<u16>().ok())
+        .ok_or_else(|| format!("not an HTTP answer: \"{status}\""))?;
+    let header = |name: &str| {
+        lines.clone().find_map(|l| l.split_once(':').filter(|(n, _)| n.trim().eq_ignore_ascii_case(name)).map(|(_, v)| v.trim().to_string()))
+    };
+    match code {
+        101 => {
+            let expected = tungstenite::handshake::derive_accept_key(key.as_bytes());
+            if header("sec-websocket-accept").as_deref() == Some(expected.as_str()) {
+                Ok(Upgrade::Open)
+            } else {
+                Err("the server's WebSocket acceptance does not match".into())
+            }
+        }
+        301 | 302 | 303 | 307 | 308 => header("location").map(Upgrade::Redirect).ok_or_else(|| format!("HTTP {code} without a Location")),
+        c => Ok(Upgrade::Refused(c)),
+    }
+}
+
 fn session(address: &KiwiAddress, path: &str, cfg: &KiwiConfig, shared: &Shared) -> Outcome {
-    let stream = match connect(address) {
+    let mut stream = match connect(address) {
         Ok(s) => s,
         Err(error) => return if shared.stopped() { Outcome::Stopped } else { Outcome::Lost { error, streamed: false } },
     };
@@ -413,26 +470,25 @@ fn session(address: &KiwiAddress, path: &str, cfg: &KiwiConfig, shared: &Shared)
     if shared.stopped() {
         return Outcome::Stopped;
     }
-    let url = format!("ws://{address}{}", path.replace("{ts}", &timestamp().to_string()));
-    let ws = match tungstenite::client(url.as_str(), stream) {
-        Ok((ws, _)) => ws,
-        Err(HandshakeError::Failure(tungstenite::Error::Http(response))) => {
-            let code = response.status().as_u16();
-            let location = response.headers().get("location").and_then(|v| v.to_str().ok());
-            return match (code, location) {
-                (301 | 302 | 307 | 308, Some(l)) => Outcome::Redirect(l.to_string()),
-                (404, _) if address.is_proxied() => Outcome::Fatal("this KiwiSDR is not online (the kiwisdr.com proxy has no connection to it)".into()),
-                _ => Outcome::Fatal(format!("{address} answered HTTP {code} instead of opening a WebSocket: is it a KiwiSDR?")),
-            };
+    let path = path.replace("{ts}", &timestamp().to_string());
+    match upgrade(&mut stream, address, &path) {
+        Ok(Upgrade::Open) => {}
+        Ok(Upgrade::Redirect(location)) => return Outcome::Redirect(location),
+        Ok(Upgrade::Refused(404)) if address.is_proxied() => {
+            return Outcome::Fatal("this KiwiSDR is not online (the kiwisdr.com proxy has no connection to it)".into());
+        }
+        Ok(Upgrade::Refused(code)) => {
+            return Outcome::Fatal(format!("{address} answered HTTP {code} instead of opening a WebSocket: is it a KiwiSDR?"));
         }
         Err(e) => {
             return if shared.stopped() {
                 Outcome::Stopped
             } else {
-                Outcome::Lost { error: format!("WebSocket handshake with {address} failed: {}", describe(&e.to_string())), streamed: false }
+                Outcome::Lost { error: format!("WebSocket handshake with {address} failed: {e}"), streamed: false }
             };
         }
-    };
+    }
+    let ws = WebSocket::from_raw_socket(stream, Role::Client, None);
     let mut conn = Connection { ws, streamed: false };
     conn.run(cfg, shared)
 }
@@ -497,6 +553,8 @@ impl Connection {
         let mut version: (Option<u32>, Option<u32>) = (None, None);
         let mut last_keepalive = Instant::now();
         let mut answered = false;
+        // Logged once samples arrive (a refused login follows the sample rate).
+        let mut tuned_line = None;
         loop {
             if shared.stopped() {
                 return Err(Outcome::Stopped);
@@ -537,7 +595,7 @@ impl Connection {
                                     }
                                     set_up = true;
                                     last_keepalive = Instant::now();
-                                    shared.log(format!(
+                                    tuned_line = Some(format!(
                                         "KiwiSDR: tuned to {:.3} kHz, I/Q {:+.1} … {:+.1} kHz at {rate:.3} Hz",
                                         cfg.freq_khz,
                                         f64::from(cfg.low_cut_hz) / 1e3,
@@ -606,6 +664,9 @@ impl Connection {
                         if !self.streamed {
                             self.streamed = true;
                             shared.set_state(KiwiState::Streaming);
+                            if let Some(line) = tuned_line.take() {
+                                shared.log(line);
+                            }
                             shared.log("KiwiSDR: streaming".into());
                         }
                     }
