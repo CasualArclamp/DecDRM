@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 mod models;
+mod schedule;
 mod tx;
 
 #[derive(Parser)]
@@ -29,6 +30,9 @@ enum Cmd {
     Devices,
     /// Neural codec model weights (EnCodec): download, show status.
     Models(models::ModelsArgs),
+    /// Broadcast schedule: which DRM stations are on the air now (EiBi or Dream lists;
+    /// `--update` downloads them).
+    Schedule(schedule::ScheduleArgs),
 }
 
 #[derive(clap::Args)]
@@ -131,6 +135,7 @@ stopping (Ctrl-C again to quit immediately)");
         Cmd::Rx(args) => rx(args),
         Cmd::Tx(args) => tx::run(args),
         Cmd::Models(args) => models::run(args),
+        Cmd::Schedule(args) => schedule::run(args),
     }
 }
 

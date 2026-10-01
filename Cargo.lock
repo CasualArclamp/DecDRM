@@ -821,6 +821,7 @@ dependencies = [
  "decdrm-encodec",
  "decdrm-engine",
  "decdrm-io",
+ "decdrm-schedule",
  "decdrm-station",
 ]
 

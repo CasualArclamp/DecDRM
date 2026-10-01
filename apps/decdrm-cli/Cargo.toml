@@ -27,6 +27,7 @@ embed-weights = ["encodec", "decdrm-encodec/embed-weights"]
 decdrm-engine = { path = "../../crates/decdrm-engine" }
 decdrm-encodec = { path = "../../crates/decdrm-encodec" }
 decdrm-io = { path = "../../crates/decdrm-io" }
+decdrm-schedule = { path = "../../crates/decdrm-schedule" }
 decdrm-station = { path = "../../crates/decdrm-station" }
 clap = { version = "4.6", features = ["derive"] }
 ctrlc = "3.5"
