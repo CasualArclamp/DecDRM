@@ -16,6 +16,9 @@ milestone checklist (keep it current).
 - `crates/decdrm-engine` — worker thread: source → `Session` (receiver + multiplex +
   audio/text/data pipelines) → audio out / data store; `Snapshot`s for the UIs.
 - `crates/decdrm-station` — transmitter application layer (TOML station config).
+- `crates/decdrm-schedule` — DRM broadcast schedules (Dream's DRMDX `DRMSchedule.ini`,
+  EiBi CSV): what is on the air now; GUI Schedule tab, `decdrm schedule`. Downloads only
+  on the user's request (curl/wget); `src/eibi_tables.rs` is generated from Dream.
 - `crates/decdrm-evs` — EVS (KCBS on 6140 kHz sends it as data): signalling table,
   the KCBS framing (`kcbs`), and with feature `decoder` (engine/CLI/GUI: `evs`) the
   3GPP TS 26.443 decoder built from the user's zip in `reference/evs/` — never commit
