@@ -54,10 +54,49 @@ decdrm-gui recording.flac                      # the same in the GUI (then press
   `--realtime` paces it to real time, and `--play` plays the audio, which implies real
   time. The GUI's *Real time* box does the same.
 
-### From a web SDR (KiwiSDR and others) through a virtual audio cable
+### From a KiwiSDR, directly
 
-DecDRM has no network client. It takes a web SDR's audio from a *virtual audio cable*:
-the browser plays the SDR's audio into the cable, and DecDRM records the other end.
+DecDRM connects to a KiwiSDR itself: it tunes the Kiwi to the DRM frequency in IQ mode
+(±5 kHz around it) and decodes the Kiwi's I/Q. No browser or virtual cable is needed.
+
+```bash
+decdrm rx --kiwi kiwisdr.example.org --freq 6140 --play
+decdrm rx --kiwi "http://kiwi.example:8073/?f=6140iqz10" --duration 600 --out kcbs.wav
+```
+
+- **GUI:** choose *KiwiSDR*, enter the Kiwi's address and the frequency in kHz, and
+  press *Start*. The address can be `host`, `host:port` (port 8073 if left out) or a
+  URL copied from the browser, whose `f=` also sets the frequency; the arrow next to it
+  lists the Kiwis used before. The status strip shows the connection, the Kiwi's
+  S-meter and its name (location, firmware and more on hover); the log shows the
+  connection's events.
+- **Finding a Kiwi:** *Find…* lists the public KiwiSDRs (from kiwisdr.com/public, as
+  published by rx.linkfanel.net; downloaded only when you press *Update list*). By
+  default it shows the Kiwis whose owners allow apps, that have a free channel and that
+  receive the frequency; search by place, name or antenna. Click a Kiwi to use it,
+  double-click to use it and start.
+- **From the schedule:** in the *Schedule* tab, double-click a broadcast (or right-click
+  it) to receive it on the KiwiSDR. Without a Kiwi chosen yet, the list opens first.
+- **Courtesy and limits.** A Kiwi has only a few channels (often 4–8), shared by
+  everyone:
+  - DecDRM appears as "DecDRM" in the Kiwi's list of users (change the name in the ⚙
+    menu). It takes a channel without a waterfall when one is free, leaving those to
+    the Kiwi's web page.
+  - It does not try again when a Kiwi refuses it: all channels busy, a password needed
+    (enter it in the ⚙ menu; it is not saved), or the owner's limit for apps other than
+    the Kiwi's web page. Many owners allow none or one; such a Kiwi lets DecDRM in and
+    drops it after a few seconds, and DecDRM says why. The *Find…* list shows how many
+    channels each owner gives apps.
+  - It does not reconnect when the Kiwi ends the session (time limits). A connection
+    lost on the way is retried, with growing pauses.
+- **Bandwidth:** a Kiwi's I/Q runs at about 12 kHz, enough for DRM channels up to
+  10 kHz. 18 and 20 kHz channels need a wider receiver.
+
+### From a web SDR through a virtual audio cable
+
+For other web SDRs, or a KiwiSDR whose owner admits only its web page, take the SDR's
+audio from a *virtual audio cable*: the browser plays the SDR's audio into the cable, and
+DecDRM records the other end.
 
 1. **Install a virtual cable.**
    - **Windows:** for example VB-Audio Virtual Cable. Its playback end is called "CABLE
@@ -541,4 +580,5 @@ it records ALSA's `default` device; route that to the cable's monitor as describ
 | GUI's website copies (no data folder set) | `websites/<service id>/` next to the settings file |
 | Received objects | the data folder (`--data-dir`, GUI *Data info → Folder…*): `slides/`, `website/`, `epg/`, `raw/` |
 | EnCodec weights | `models/encodec_24khz/model.safetensors` (see `decdrm models list`) |
+| KiwiSDR list (*Find…*) | `kiwi/kiwisdr_com.js` next to the GUI settings (`%APPDATA%\decdrm\kiwi` on Windows) |
 | Broadcast schedules | `schedule/` next to the GUI settings (`%APPDATA%\decdrm\schedule` on Windows): `sked-a26.csv` (EiBi), `DRMSchedule.ini` (Dream), optional `sources.toml`; `decdrm schedule --dir DIR` uses another folder |

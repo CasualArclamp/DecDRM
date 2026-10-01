@@ -218,6 +218,41 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       cached per minute and painted with `show_rows`, the received frequency from the
       *Frequency* box or the recording's file name — KiwiSDR, HDSDR, SDR# naming —
       highlighted and named in the log at Start; a click copies the frequency).
+- [x] **KiwiSDR client** (2026-10-01) — DecDRM tunes a KiwiSDR itself and decodes its
+      I/Q, instead of a browser tab and a virtual audio cable.
+      *Done:* `decdrm-kiwi`. The protocol follows the reference client kiwiclient
+      (jks-prv): `SET auth`, `SET AR OK` on `audio_rate`, the receiver set up on
+      `sample_rate` (squelch and generator off, `ident_user`, `mod=iq` ±5 kHz at the DRM
+      frequency, AGC, compression off), `SET keepalive` once a second; `SND` blocks
+      (flags, sequence, S-meter, 10-byte GPS stamp, big-endian I/Q; the first block,
+      left over from the channel's previous user, dropped); `load_cfg` gives the name and
+      location. Live findings (firmware 1.902, six public Kiwis): kiwiclient's
+      `/<ts>/SND` is upgraded but then ignored, so the client opens the web client's
+      sound-only type `/no_wf/<ts>/SND` (a channel without a waterfall when free), with
+      `/<ts>/SND` as the fallback after 5 s of silence; the kiwisdr.com proxy redirects
+      with `HTTP/1.0 307` to `<id>.proxy2.kiwisdr.com` (port 80), which tungstenite's
+      handshake rejects, so the upgrade handshake is our own (accept key checked) and
+      tungstenite only frames; owners can cap the channels of "apps" (clients that
+      never loaded the web page): such a Kiwi admits DecDRM and sends `too_busy=N` a few
+      seconds later. Policy: nothing that refuses (busy, password, app cap, down, an
+      offline proxied Kiwi) or closes the session cleanly (time limits) is retried, nor
+      a Kiwi that never streamed; a connection lost after streaming is retried with
+      backoff (2 s doubling to 30 s, 10 in a row); HTTP and Kiwi redirections followed;
+      no pretending to be a browser. `KiwiStream` runs the connection on its own thread
+      with a 30 s FIFO; stopping shuts the socket down from the caller, so a slow Kiwi
+      never holds up the engine or the GUI. Engine `InputSpec::Kiwi` (I/Q forced, the
+      resampler from the reported rate, Kiwi log and status in the snapshot), CLI
+      `decdrm rx --kiwi`, GUI *KiwiSDR* source (address with recent ones, frequency,
+      name, password kept for the run), status strip (state, S-meter, name), *Find a
+      KiwiSDR* (the public list from rx.linkfanel.net, downloaded on request; filtered
+      to Kiwis that allow apps, have a free channel and receive the frequency), and a
+      double-click in the *Schedule* tab. Tests: protocol and address units, the client
+      against `mock::MockKiwi` (bit-exact I/Q, set-up commands, keepalive rate,
+      refusals, reconnection, clean close, HTTP/1.0 and Kiwi redirections, path
+      fallback, stop within 1 s), and a station's I/Q decoded end to end through the
+      stand-in (205 audio frames, none concealed). Live: KCBS on 6140 kHz locked through
+      Kiwis in Japan (25.8 dB SNR, every 16-QAM MSC frame correct, at a Kiwi that then
+      applied its app cap) and streamed 60 s without interruption elsewhere.
 - [x] **Web stream input** (2026-10-01) — the transmitter relays an internet radio
       stream: `[service.audio.input] url = "…"`, with `stream_titles` (default on).
       *Done:* `decdrm_station::webstream`. HTTP/1.1 client of our own (SHOUTCAST's

@@ -54,6 +54,11 @@ encoding) and libopus.
   bars (codec, SBR/PS, bit rate, protection, data applications), text,
   slideshow, Journaline browser, broadcast website, EPG, broadcast clock, alternative
   frequencies, and a transmitter tab.
+- KiwiSDR client: DecDRM tunes a KiwiSDR on the internet and decodes its I/Q directly
+  (`decdrm rx --kiwi HOST --freq KHZ`; in the GUI a *KiwiSDR* source with a list of the
+  public Kiwis whose owners allow apps, and a double-click in the *Schedule* tab). It
+  respects the Kiwis' limits: busy, password or app-limited Kiwis are not retried, and
+  sessions the Kiwi ends are not reconnected.
 - Station schedule, like Dream's *Stations* dialog: the DRM broadcasts on the air now
   from EiBi's or Dream's schedule (downloaded on request), in the GUI's *Schedule* tab
   and with `decdrm schedule`; a frequency in a recording's file name (KiwiSDR
@@ -85,8 +90,9 @@ with `powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1` (afte
 
 ## Usage
 
-The [user guide](docs/USER_GUIDE.md) covers receiving from web SDRs through a virtual
-audio cable, the displays, data services, logs, the station file and troubleshooting.
+The [user guide](docs/USER_GUIDE.md) covers receiving from a KiwiSDR directly or from
+other web SDRs through a virtual audio cable, the displays, data services, logs, the
+station file and troubleshooting.
 
 ```bash
 # decode a recording (real IF / audio input at any sample rate)
@@ -98,6 +104,9 @@ decdrm rx iq_recording.wav --format iq --out audio.wav --data-dir data --log rx.
 # live from a sound-card input, e.g. a virtual audio cable, with playback
 decdrm devices
 decdrm rx --device "CABLE-A Output" --play
+
+# straight from a KiwiSDR on the internet (DecDRM tunes it and takes its I/Q)
+decdrm rx --kiwi kiwisdr.example.org --freq 6140 --play
 
 # which DRM stations are on the air now (--update first downloads EiBi's schedule)
 decdrm schedule --update

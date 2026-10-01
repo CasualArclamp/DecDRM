@@ -23,10 +23,16 @@ milestone checklist (keep it current).
   the KCBS framing (`kcbs`), and with feature `decoder` (engine/CLI/GUI: `evs`) the
   3GPP TS 26.443 decoder built from the user's zip in `reference/evs/` — never commit
   the EVS source (3GPP copyright, patent-licensed codec).
+- `crates/decdrm-kiwi` — KiwiSDR client (WebSocket protocol after kiwiclient, typed
+  path `/no_wf/<ts>/SND`, own upgrade handshake for the proxy's HTTP/1.0 redirects,
+  tungstenite framing), `KiwiStream` (thread + I/Q FIFO), the public Kiwi list parser,
+  and `mock::MockKiwi` (a stand-in Kiwi on 127.0.0.1 for tests). Engine input
+  `InputSpec::Kiwi`; CLI `decdrm rx --kiwi`; GUI *KiwiSDR* source and *Find…* window.
+  Live tests on public Kiwis only when the user agrees; never pretend to be a browser.
 - `crates/decdrm-encodec` — experimental EnCodec codec; candle only with the
   `encodec` feature (engine/station/cli/gui forward it). Weights live in the
   git-ignored `models/` (`decdrm models download encodec`).
-- `apps/decdrm-cli` (binary `decdrm`: `rx`, `tx`, `devices`), `apps/decdrm-gui` (egui,
+- `apps/decdrm-cli` (binary `decdrm`: `rx` (also `--kiwi`), `tx`, `schedule`, `devices`, `models`), `apps/decdrm-gui` (egui,
   MSRV 1.95 because of eframe).
 - `third_party/` — pinned submodules (fdk-aac v2.0.3, opus v1.6.1, libxaac v0.1.13);
   clone with `--recursive`.
