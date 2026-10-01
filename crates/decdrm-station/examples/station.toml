@@ -14,7 +14,8 @@ msc_mode = "64-QAM"          # "16-QAM", "64-QAM", "HMsym" or "HMmix" (hierarchi
 sdc_mode = "16-QAM"          # "16-QAM" or "4-QAM" (robust, about half the SDC capacity)
 interleaving = "long"        # "long" (2 s, robust against fading) or "short" (400 ms)
 protection_b = 1             # 0 = most robust; 0-1 with 16-QAM, 0-3 with 64-QAM
-protection_a = 0             # only used when a stream sets part = "A" (unequal protection)
+protection_a = 0             # only used when a stream sets part = "A" (unequal protection);
+                             # must be below protection_b (part A is the stronger part)
 protection_hierarchical = 0  # HMsym/HMmix: protection of the hierarchical stream (0-3)
 
 # --- Output --------------------------------------------------------------------------

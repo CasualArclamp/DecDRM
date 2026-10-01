@@ -346,7 +346,9 @@ multiplex: streams, bit rates, codec settings and what goes where.
 - **`[channel]`:**
   - `mode` (A–D) and `occupancy` (0–5 = 4.5, 5, 9, 10, 18, 20 kHz);
   - `msc_mode` (16-QAM, 64-QAM, HMsym, HMmix) and `sdc_mode`;
-  - `interleaving` (short/long) and the protection levels.
+  - `interleaving` (short/long) and the protection levels: `protection_b` for every
+    stream, and `protection_a` for streams with `part = "A"` (unequal error
+    protection; it must be more robust, i.e. lower, than `protection_b`).
 - **`[output]`:**
   - `file` (WAV/FLAC) and/or `device` (sound card);
   - `format`: `real` IF at `if_hz` (default 12 kHz), or `iq`;
@@ -410,7 +412,11 @@ The GUI's *Transmitter* page edits the station file:
 - *New*, *Open…*, *Save*, *Save as…*;
 - *Validate* marks problems at their line;
 - starts and stops the transmission, optionally with *Stop after* a duration;
-- shows the multiplex, per-service bit rates, levels and the transmitted spectrum.
+- shows the multiplex, per-service bit rates, levels and the transmitted spectrum;
+- the *Station* view is a form for the file (the *TOML* view shows the text). *Part A*
+  on an audio service or data application moves that stream into the more strongly
+  protected part (*Protection, part A*), outlined in the multiplex bar. The part A row
+  is greyed out while no stream uses it.
 
 ### Live transmission through a sound card
 

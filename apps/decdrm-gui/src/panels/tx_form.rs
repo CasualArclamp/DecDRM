@@ -37,6 +37,8 @@ pub struct Segment {
     pub label: String,
     pub bytes: usize,
     pub audio: bool,
+    /// Carried in part A, the higher protected part.
+    pub part_a: bool,
 }
 
 impl PlanBar {
@@ -48,17 +50,20 @@ impl PlanBar {
         let segments = plan
             .streams
             .iter()
-            .map(|s| match &s.content {
-                decdrm_station::StreamContent::Audio { service } => {
-                    Segment { label: format!("{} audio", label_of(*service)), bytes: s.bytes(), audio: true }
-                }
-                decdrm_station::StreamContent::Data { apps, .. } => {
-                    let names: Vec<String> = apps
-                        .iter()
-                        .filter_map(|a| cfg.services.get(a.service).and_then(|sv| sv.applications().nth(a.index)))
-                        .map(|app| format!("{:?}", app.kind).to_lowercase())
-                        .collect();
-                    Segment { label: names.join(" + "), bytes: s.bytes(), audio: false }
+            .map(|s| {
+                let (bytes, part_a) = (s.bytes(), s.lengths.part_a > 0);
+                match &s.content {
+                    decdrm_station::StreamContent::Audio { service } => {
+                        Segment { label: format!("{} audio", label_of(*service)), bytes, audio: true, part_a }
+                    }
+                    decdrm_station::StreamContent::Data { apps, .. } => {
+                        let names: Vec<String> = apps
+                            .iter()
+                            .filter_map(|a| cfg.services.get(a.service).and_then(|sv| sv.applications().nth(a.index)))
+                            .map(|app| format!("{:?}", app.kind).to_lowercase())
+                            .collect();
+                        Segment { label: names.join(" + "), bytes, audio: false, part_a }
+                    }
                 }
             })
             .collect();
@@ -115,11 +120,25 @@ fn row_label(ui: &mut Ui, text: &str) -> egui::Response {
 
 /// A combo box over `(value, label)` options; returns the new value when changed.
 fn combo<'a>(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, current: &str, options: &'a [(&'a str, &'a str)], width: f32) -> Option<&'a str> {
+    combo_where(ui, id, current, options, width, |_| true, "")
+}
+
+/// [`combo`] with the options `allowed` rejects greyed out, explained by `why_not`.
+fn combo_where<'a>(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    current: &str,
+    options: &'a [(&'a str, &'a str)],
+    width: f32,
+    allowed: impl Fn(&str) -> bool,
+    why_not: &str,
+) -> Option<&'a str> {
     let shown = options.iter().find(|(v, _)| canon(v) == canon(current)).map_or(current, |(_, l)| l);
     let mut picked = None;
     egui::ComboBox::from_id_salt(id).width(width).selected_text(shown).show_ui(ui, |ui| {
         for (v, l) in options {
-            if ui.selectable_label(canon(v) == canon(current), *l).clicked() && canon(v) != canon(current) {
+            let option = egui::Button::selectable(canon(v) == canon(current), *l);
+            if ui.add_enabled(allowed(v), option).on_disabled_hover_text(why_not).clicked() && canon(v) != canon(current) {
                 picked = Some(*v);
             }
         }
@@ -223,6 +242,7 @@ const PROTECTION_64: &[(&str, &str)] =
 
 fn channel(ui: &mut Ui, doc: &mut DocumentMut) -> bool {
     let mut changed = false;
+    let uep = uses_part_a(doc);
     let ch = section(doc, "channel");
     let mode = get_str(ch, "mode").unwrap_or_else(|| "B".into());
     let msc = get_str(ch, "msc_mode").unwrap_or_else(|| "64-QAM".into());
@@ -252,8 +272,15 @@ fn channel(ui: &mut Ui, doc: &mut DocumentMut) -> bool {
         if let Some(v) = combo(ui, "tx_msc", &msc, MSC_MODES, 280.0) {
             set(ch, "msc_mode", v);
             // 16-QAM has protection levels 0-1 only.
-            if canon(v) == "16qam" && get_int(ch, "protection_b").unwrap_or(0) > 1 {
-                set(ch, "protection_b", 1i64);
+            if canon(v) == "16qam" {
+                for key in ["protection_b", "protection_a"] {
+                    if get_int(ch, key).unwrap_or(0) > 1 {
+                        set(ch, key, 1i64);
+                    }
+                }
+            }
+            if uep {
+                keep_part_a_stronger(ch);
             }
             changed = true;
         }
@@ -273,18 +300,42 @@ fn channel(ui: &mut Ui, doc: &mut DocumentMut) -> bool {
         }
         ui.end_row();
         let levels = if sixteen { PROTECTION_16 } else { PROTECTION_64 };
-        row_label(ui, "Protection");
+        row_label(ui, "Protection").on_hover_text("Error protection of the multiplex: a lower code rate survives a weaker signal, a higher one carries more");
         let pb = get_int(ch, "protection_b").unwrap_or(1).to_string();
         if let Some(v) = combo(ui, "tx_prot_b", &pb, levels, 280.0) {
             set(ch, "protection_b", v.parse::<i64>().unwrap_or(0));
+            if uep {
+                keep_part_a_stronger(ch);
+            }
             changed = true;
         }
         ui.end_row();
-        row_label(ui, "Protection, part A").on_hover_text("Used by streams marked part = \"A\" (unequal error protection)");
-        let pa = get_int(ch, "protection_a").unwrap_or(0).to_string();
-        if let Some(v) = combo(ui, "tx_prot_a", &pa, levels, 280.0) {
-            set(ch, "protection_a", v.parse::<i64>().unwrap_or(0));
-            changed = true;
+        row_label(ui, "Protection, part A")
+            .on_hover_text("For the streams switched to Part A (unequal error protection); it must be more robust than Protection");
+        if uep {
+            let pb = get_int(ch, "protection_b").unwrap_or(1);
+            let pa = get_int(ch, "protection_a").unwrap_or(0).to_string();
+            ui.horizontal(|ui| {
+                let stronger = |v: &str| v.parse::<i64>().is_ok_and(|level| level < pb);
+                let why = "Part A must be protected more strongly (a lower level) than Protection";
+                if let Some(v) = combo_where(ui, "tx_prot_a", &pa, levels, 280.0, stronger, why) {
+                    set(ch, "protection_a", v.parse::<i64>().unwrap_or(0));
+                    changed = true;
+                }
+                if pb == 0 {
+                    let warn = ui.visuals().warn_fg_color;
+                    ui.colored_label(warn, "needs Protection above 0");
+                }
+            });
+        } else {
+            ui.add_enabled_ui(false, |ui| {
+                egui::ComboBox::from_id_salt("tx_prot_a_unused")
+                    .width(280.0)
+                    .selected_text("not used: no stream is in part A")
+                    .show_ui(ui, |_| {})
+                    .response
+                    .on_disabled_hover_text("Switch a service or data application to Part A to protect it more strongly than the rest");
+            });
         }
         ui.end_row();
         if hierarchical {
@@ -300,8 +351,20 @@ fn channel(ui: &mut Ui, doc: &mut DocumentMut) -> bool {
     changed
 }
 
+/// What the part A switches need while the services are drawn.
+struct Parts {
+    /// Part B's protection level; at 0 nothing is stronger, so part A is unavailable.
+    protection_b: i64,
+    /// Switches of named shared data streams: every application of the stream follows.
+    shared: Vec<(String, bool)>,
+    /// A stream was switched to part A (part A's level may need lowering).
+    turned_on: bool,
+}
+
 fn services(ui: &mut Ui, doc: &mut DocumentMut, ctx: &mut FormCtx) -> bool {
     let mut changed = false;
+    let protection_b = doc.get("channel").and_then(Item::as_table_like).and_then(|ch| get_int(ch, "protection_b")).unwrap_or(1);
+    let mut parts = Parts { protection_b, shared: Vec::new(), turned_on: false };
     if !doc.as_table().get("service").is_some_and(Item::is_array_of_tables) {
         doc.as_table_mut().insert("service", Item::ArrayOfTables(ArrayOfTables::new()));
     }
@@ -323,7 +386,7 @@ fn services(ui: &mut Ui, doc: &mut DocumentMut, ctx: &mut FormCtx) -> bool {
                 });
             });
             ui.add_space(4.0);
-            changed |= service(ui, svc, i, ctx);
+            changed |= service(ui, svc, i, ctx, &mut parts);
         });
         ui.add_space(8.0);
     }
@@ -344,6 +407,12 @@ fn services(ui: &mut Ui, doc: &mut DocumentMut, ctx: &mut FormCtx) -> bool {
             ui.label(RichText::new(format!("{count} of 4 services")).weak());
         });
         ui.add_space(8.0);
+    }
+    for (name, a) in &parts.shared {
+        sync_shared_parts(doc, name, *a);
+    }
+    if parts.turned_on {
+        keep_part_a_stronger(section(doc, "channel"));
     }
     changed
 }
@@ -383,7 +452,7 @@ fn new_service(n: usize, audio: bool) -> Table {
     t
 }
 
-fn service(ui: &mut Ui, svc: &mut Table, i: usize, ctx: &mut FormCtx) -> bool {
+fn service(ui: &mut Ui, svc: &mut Table, i: usize, ctx: &mut FormCtx, parts: &mut Parts) -> bool {
     let mut changed = false;
     let is_audio = svc.get("audio").is_some_and(Item::is_table_like);
     grid(ui, ("tx_form_service", i), |ui| {
@@ -469,13 +538,13 @@ fn service(ui: &mut Ui, svc: &mut Table, i: usize, ctx: &mut FormCtx) -> bool {
     ui.add_space(6.0);
     if is_audio {
         let audio = child(svc, "audio");
-        changed |= audio_settings(ui, audio, i, ctx);
+        changed |= audio_settings(ui, audio, i, ctx, parts);
     } else if svc.get("data").is_some_and(Item::is_table_like) {
         ui.label(RichText::new("Main application").strong());
         let data = child(svc, "data");
-        changed |= app_row(ui, data, ("tx_data", i), ctx);
+        changed |= app_row(ui, data, ("tx_data", i), ctx, parts);
     }
-    changed |= extra_apps(ui, svc, i, ctx);
+    changed |= extra_apps(ui, svc, i, ctx, parts);
     changed
 }
 
@@ -536,7 +605,7 @@ impl InputKind {
     }
 }
 
-fn audio_settings(ui: &mut Ui, audio: &mut dyn TableLike, i: usize, ctx: &mut FormCtx) -> bool {
+fn audio_settings(ui: &mut Ui, audio: &mut dyn TableLike, i: usize, ctx: &mut FormCtx, parts: &mut Parts) -> bool {
     let mut changed = false;
     let codec = get_str(audio, "codec").unwrap_or_else(|| "he-aac".into());
     let c = canon(&codec);
@@ -614,6 +683,9 @@ fn audio_settings(ui: &mut Ui, audio: &mut dyn TableLike, i: usize, ctx: &mut Fo
             }
             ui.end_row();
         }
+        row_label(ui, "Protection");
+        changed |= part_switch(ui, audio, "Part A (stronger protection)", parts);
+        ui.end_row();
         row_label(ui, "Text messages").on_hover_text("One message per line (up to 128 bytes each), sent one after the other");
         let mut text = audio
             .get("text")
@@ -779,8 +851,8 @@ const APP_KINDS: &[(&str, &str)] = &[
     ("raw", "Raw data"),
 ];
 
-/// One data application: type, file or folder, bit rate.
-fn app_row(ui: &mut Ui, app: &mut dyn TableLike, id: impl std::hash::Hash + std::fmt::Debug + Copy, ctx: &mut FormCtx) -> bool {
+/// One data application: type, file or folder, bit rate, part A.
+fn app_row(ui: &mut Ui, app: &mut dyn TableLike, id: impl std::hash::Hash + std::fmt::Debug + Copy, ctx: &mut FormCtx, parts: &mut Parts) -> bool {
     let mut changed = false;
     ui.horizontal_wrapped(|ui| {
         let kind = get_str(app, "type").unwrap_or_else(|| "journaline".into());
@@ -820,12 +892,96 @@ fn app_row(ui: &mut Ui, app: &mut dyn TableLike, id: impl std::hash::Hash + std:
             set(app, "bitrate", rate);
             changed = true;
         }
+        changed |= part_switch(ui, app, "Part A", parts);
     });
     changed
 }
 
+const PART_A_HELP: &str = "Send this stream in part A, coded at the Channel card's \"Protection, part A\" instead of \
+     \"Protection\" (unequal error protection). Part A bytes take more of the channel, so the other streams get less.";
+
+/// The part A switch of one stream (an audio service or a data application).
+fn part_switch(ui: &mut Ui, t: &mut dyn TableLike, text: &str, parts: &mut Parts) -> bool {
+    if get_bool(t, "hierarchical").unwrap_or(false) {
+        ui.label(RichText::new("hierarchical layer").weak())
+            .on_hover_text("This stream is in the hierarchical layer (TOML view), which has its own protection level");
+        return false;
+    }
+    let mut on = is_part_a(t);
+    // At part B's most robust level nothing is stronger; switching off always works.
+    let possible = on || parts.protection_b > 0;
+    let r = ui
+        .add_enabled(possible, egui::Checkbox::new(&mut on, text))
+        .on_hover_text(PART_A_HELP)
+        .on_disabled_hover_text("Protection is already at its most robust level (0): choose a higher Protection in the Channel card first");
+    if !r.changed() {
+        return false;
+    }
+    set_part(t, on);
+    if let Some(name) = get_str(t, "stream") {
+        parts.shared.push((name, on));
+    }
+    parts.turned_on |= on;
+    true
+}
+
+/// Whether a stream table sets `part = "A"` (spelled as the station accepts it).
+fn is_part_a(t: &dyn TableLike) -> bool {
+    get_str(t, "part").is_some_and(|p| matches!(canon(&p).as_str(), "a" | "higher" | "high"))
+}
+
+/// Put a stream into part A, or back into part B (the default, so the key goes).
+fn set_part(t: &mut dyn TableLike, a: bool) {
+    if a {
+        set(t, "part", "A");
+    } else {
+        remove(t, "part");
+    }
+}
+
+/// Whether any stream is in part A: an audio service or data application with
+/// `part = "A"` that is not in the hierarchical layer (which has no part).
+fn uses_part_a(doc: &DocumentMut) -> bool {
+    let in_a = |t: &dyn TableLike| is_part_a(t) && !get_bool(t, "hierarchical").unwrap_or(false);
+    doc.get("service").and_then(Item::as_array_of_tables).is_some_and(|list| {
+        list.iter().any(|svc| {
+            ["audio", "data"].into_iter().any(|k| svc.get(k).and_then(Item::as_table_like).is_some_and(in_a))
+                || svc.get("app").and_then(Item::as_array_of_tables).is_some_and(|apps| apps.iter().any(|app| in_a(app)))
+        })
+    })
+}
+
+/// Give every application of the shared stream `name` the same part, as the station
+/// requires.
+fn sync_shared_parts(doc: &mut DocumentMut, name: &str, a: bool) {
+    let Some(list) = doc.get_mut("service").and_then(Item::as_array_of_tables_mut) else { return };
+    for svc in list.iter_mut() {
+        if let Some(data) = svc.get_mut("data").and_then(Item::as_table_like_mut)
+            && get_str(data, "stream").as_deref() == Some(name)
+        {
+            set_part(data, a);
+        }
+        if let Some(apps) = svc.get_mut("app").and_then(Item::as_array_of_tables_mut) {
+            for app in apps.iter_mut() {
+                if get_str(app, "stream").as_deref() == Some(name) {
+                    set_part(app, a);
+                }
+            }
+        }
+    }
+}
+
+/// With a stream in part A, keep part A's level below part B's (part A is the higher
+/// protected part), as far as part B leaves room.
+fn keep_part_a_stronger(ch: &mut dyn TableLike) {
+    let pb = get_int(ch, "protection_b").unwrap_or(1);
+    if get_int(ch, "protection_a").unwrap_or(0) >= pb && pb > 0 {
+        set(ch, "protection_a", pb - 1);
+    }
+}
+
 /// The service's extra data applications (`[[service.app]]`).
-fn extra_apps(ui: &mut Ui, svc: &mut Table, i: usize, ctx: &mut FormCtx) -> bool {
+fn extra_apps(ui: &mut Ui, svc: &mut Table, i: usize, ctx: &mut FormCtx, parts: &mut Parts) -> bool {
     let mut changed = false;
     let has = svc.get("app").is_some_and(Item::is_array_of_tables);
     if has {
@@ -835,7 +991,7 @@ fn extra_apps(ui: &mut Ui, svc: &mut Table, i: usize, ctx: &mut FormCtx) -> bool
         let mut remove_at = None;
         for (k, app) in apps.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                changed |= app_row(ui, app, ("tx_app", i, k), ctx);
+                changed |= app_row(ui, app, ("tx_app", i, k), ctx, parts);
                 if ui.small_button("Remove").on_hover_text("Remove this application").clicked() {
                     remove_at = Some(k);
                 }
@@ -1105,7 +1261,10 @@ pub fn capacity_bar(ui: &mut Ui, bar: &PlanBar) {
         let w = rect.width() * s.bytes as f32 / bar.capacity.max(1) as f32;
         let seg = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(w.max(1.0), rect.height()));
         painter.rect_filled(seg.shrink2(egui::vec2(0.5, 0.0)), egui::CornerRadius::same(3), if s.audio { audio_fill } else { data_fill });
-        let text = format!("{} · {:.1} kbit/s", s.label, kbps(s.bytes));
+        if s.part_a {
+            painter.rect_stroke(seg.shrink(1.0), egui::CornerRadius::same(3), egui::Stroke::new(2.0, PART_A_COLOR), egui::StrokeKind::Inside);
+        }
+        let text = format!("{}{} · {:.1} kbit/s", s.label, part_a_note(s), kbps(s.bytes));
         let galley = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), Color32::WHITE);
         if galley.size().x + 8.0 < w {
             painter.galley(egui::pos2(seg.left() + 4.0, seg.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
@@ -1114,9 +1273,16 @@ pub fn capacity_bar(ui: &mut Ui, bar: &PlanBar) {
     }
     let mut legend = String::new();
     for s in &bar.segments {
-        legend.push_str(&format!("{}: {:.2} kbit/s   ", s.label, kbps(s.bytes)));
+        legend.push_str(&format!("{}{}: {:.2} kbit/s   ", s.label, part_a_note(s), kbps(s.bytes)));
     }
     ui.label(RichText::new(legend.trim_end()).weak().small());
+}
+
+/// Outline of the part A streams in the bar.
+const PART_A_COLOR: Color32 = Color32::from_rgb(0xEF, 0x9F, 0x27);
+
+fn part_a_note(s: &Segment) -> &'static str {
+    if s.part_a { " (part A)" } else { "" }
 }
 
 /// Ask for a file; the path relative to `base` when it lies below it.
@@ -1171,6 +1337,62 @@ mod tests {
         // The edited document is still a valid station configuration.
         let cfg: decdrm_station::StationConfig = toml::from_str(&text).unwrap();
         assert_eq!(cfg.services[0].id, 0xABCDEF);
+    }
+
+    #[test]
+    fn part_a_switches() {
+        let mut doc: DocumentMut = r#"
+[channel]
+msc_mode = "16-QAM"
+protection_b = 1   # part B
+protection_a = 1
+[[service]]
+label = "R"
+id = 0xD0D001
+[service.audio]
+codec = "aac"
+input = { tone_hz = 1000.0 }
+[[service.app]]
+type = "journaline"
+stream = "data"
+[[service.app]]
+type = "epg"
+stream = "data"
+[[service.app]]
+type = "slideshow"
+part = "A"
+hierarchical = true
+"#
+        .parse()
+        .unwrap();
+        // A hierarchical stream has no part.
+        assert!(!uses_part_a(&doc));
+        let svc = doc.get_mut("service").and_then(Item::as_array_of_tables_mut).unwrap().get_mut(0).unwrap();
+        set_part(child(svc, "audio"), true);
+        assert!(uses_part_a(&doc));
+        // Part A's level drops below part B's; part B's comment stays.
+        keep_part_a_stronger(section(&mut doc, "channel"));
+        assert_eq!(get_int(section(&mut doc, "channel"), "protection_a"), Some(0));
+        assert!(doc.to_string().contains("protection_b = 1   # part B"));
+        // A shared stream switches as a whole, and back.
+        sync_shared_parts(&mut doc, "data", true);
+        assert_eq!(doc.to_string().matches("part = \"A\"").count(), 4, "{doc}");
+        sync_shared_parts(&mut doc, "data", false);
+        assert_eq!(doc.to_string().matches("part = \"A\"").count(), 2, "{doc}");
+        let cfg: decdrm_station::StationConfig = toml::from_str(&doc.to_string()).unwrap();
+        assert_eq!(cfg.services[0].audio.as_ref().unwrap().part, decdrm_station::Part::A);
+        assert_eq!(cfg.services[0].apps[0].part, decdrm_station::Part::B);
+        // Nothing is stronger than part B's level 0: part A's level stays (the check
+        // then explains); a level that is already stronger stays too.
+        let ch = section(&mut doc, "channel");
+        set(ch, "protection_b", 0i64);
+        keep_part_a_stronger(ch);
+        assert_eq!(get_int(ch, "protection_a"), Some(0));
+        set(ch, "msc_mode", "64-QAM");
+        set(ch, "protection_b", 3i64);
+        set(ch, "protection_a", 1i64);
+        keep_part_a_stronger(ch);
+        assert_eq!(get_int(ch, "protection_a"), Some(1));
     }
 
     #[test]

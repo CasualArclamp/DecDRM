@@ -332,10 +332,13 @@ pub struct MultiplexDescription {
 }
 
 impl MultiplexDescription {
-    /// Description of a non-hierarchical multiplex.
+    /// Description of a non-hierarchical multiplex. With equal error protection (no
+    /// stream has a part A) the part A protection level is sent as 0, whatever
+    /// `protection_a` says (§6.4.3.1).
     pub fn new(protection_a: u8, protection_b: u8, streams: &[StreamLengths]) -> Self {
+        let uep = streams.iter().any(|s| s.part_a > 0);
         Self {
-            protection_a,
+            protection_a: if uep { protection_a } else { 0 },
             protection_b,
             streams: streams
                 .iter()
@@ -1513,6 +1516,21 @@ mod tests {
         let field = encode_sdc_data(&[e.clone(), other.clone()], 200).unwrap();
         assert_eq!(field.data.len(), 200);
         assert_eq!(parse_sdc(&field.data), vec![e, other]);
+    }
+
+    #[test]
+    fn eep_sends_part_a_level_zero() {
+        let eep = MultiplexDescription::new(2, 3, &[StreamLengths { part_a: 0, part_b: 700 }]);
+        assert_eq!((eep.protection_a, eep.protection_b), (0, 3));
+        let uep = MultiplexDescription::new(
+            2,
+            3,
+            &[StreamLengths { part_a: 50, part_b: 0 }, StreamLengths { part_a: 0, part_b: 600 }],
+        );
+        assert_eq!((uep.protection_a, uep.protection_b), (2, 3));
+        // The hierarchical stream's first field is not a part A length.
+        let hier = MultiplexDescription::new_hierarchical(1, 2, 3, 300, &[StreamLengths { part_a: 0, part_b: 500 }]);
+        assert_eq!(hier.protection_a, 0);
     }
 
     #[test]

@@ -269,6 +269,28 @@ fn audio_in_hierarchical_stream_or_part_a() {
     assert!(8 * (total + 1) > p.bits_hpp + p.bits_lpp || p.n1 == 0);
 }
 
+/// Part A must be the more strongly protected part. Without a stream in part A its
+/// level is neither used nor checked, and the SDC sends 0 (§6.4.3.1).
+#[test]
+fn part_a_protection_level() {
+    let with_part_a = |channel: &str| {
+        base()
+            .replace("[output]", &format!("[channel]\n{channel}\n[output]"))
+            .replace("codec = \"he-aac\"", "codec = \"he-aac\"\npart = \"A\"")
+    };
+    let p = problems(&with_part_a("protection_a = 1\nprotection_b = 1"));
+    assert!(has(&p, "protection_a (1) must be below protection_b (1)"), "{p:?}");
+    // 16-QAM with part B at the most robust level leaves nothing stronger for part A.
+    let p = problems(&with_part_a("msc_mode = \"16-QAM\"\nprotection_a = 0\nprotection_b = 0"));
+    assert!(has(&p, "raise protection_b"), "{p:?}");
+    // Equal error protection: a stale part A level out of 16-QAM's range is ignored.
+    let text = base().replace("[output]", "[channel]\nmsc_mode = \"16-QAM\"\nprotection_a = 3\nprotection_b = 1\n[output]");
+    let plan = parse(&text).validate().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(plan.tx.part_a_bytes, 0);
+    assert_eq!((plan.multiplex.protection_a, plan.multiplex.protection_b), (0, 1));
+    assert_eq!(plan.tx.protection.part_a, 0);
+}
+
 #[test]
 fn settings_that_would_be_ignored_are_rejected() {
     let p = problems(&base().replace("id = 0x123456", "id = 0x123456\nfac_app_id = 3"));

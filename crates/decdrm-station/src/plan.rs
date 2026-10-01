@@ -524,14 +524,25 @@ fn build(cfg: &StationConfig) -> Result<MultiplexPlan> {
     };
     let msc_mode = ch.msc_mode.0;
     let max_level = if msc_mode == MscMode::Qam16Sm { 1 } else { 3 };
-    for (what, level, max) in [
-        ("protection_a", ch.protection_a, max_level),
-        ("protection_b", ch.protection_b, max_level),
-        ("protection_hierarchical", ch.protection_hierarchical, 3),
+    // Part A's level is only used (and checked) when a stream is in part A.
+    let uep = uses_part_a(cfg);
+    for (what, level, max, used) in [
+        ("protection_a", ch.protection_a, max_level, uep),
+        ("protection_b", ch.protection_b, max_level, true),
+        ("protection_hierarchical", ch.protection_hierarchical, 3, true),
     ] {
-        if level > max {
+        if used && level > max {
             p.push(format!("channel: {what} {level} is out of range 0-{max} for {}", ch.msc_mode));
         }
+    }
+    // Part A is the higher protected part (§6.4.3.1): a lower level, a lower code rate.
+    if uep && ch.protection_a >= ch.protection_b {
+        p.push(format!(
+            "channel: part A must be protected more strongly than part B, so protection_a ({}) must be below protection_b ({}){}",
+            ch.protection_a,
+            ch.protection_b,
+            if ch.protection_b == 0 { "; raise protection_b or move the part A streams back to part B" } else { "" }
+        ));
     }
 
     // --- Output.
@@ -714,8 +725,9 @@ fn build(cfg: &StationConfig) -> Result<MultiplexPlan> {
 
     let map = CellMap::new(layout.mode, layout.occupancy).expect("valid layout");
     let mapping = msc_mode.mapping();
+    // Without a part A (equal error protection) part A's level is 0, as signalled.
     let protection = MscProtection {
-        part_a: usize::from(ch.protection_a),
+        part_a: if uep { usize::from(ch.protection_a) } else { 0 },
         part_b: usize::from(ch.protection_b),
         hierarchical: usize::from(ch.protection_hierarchical),
     };
@@ -980,6 +992,15 @@ fn check_audio(cfg: &StationConfig, name: &str, a: &crate::config::AudioSettings
     if !(-60.0..=40.0).contains(&i.gain_db) {
         p.push(format!("{name}: gain_db {} is outside -60..40 dB", i.gain_db));
     }
+}
+
+/// Whether any stream is in part A (unequal error protection). A hierarchical stream
+/// has no part, whatever its `part` says.
+fn uses_part_a(cfg: &StationConfig) -> bool {
+    cfg.services.iter().any(|s| {
+        s.audio.as_ref().is_some_and(|a| a.part == Part::A && !a.hierarchical)
+            || s.applications().any(|app| app.part == Part::A && !app.hierarchical)
+    })
 }
 
 /// Collect the streams in configuration order: per service its audio, then its
