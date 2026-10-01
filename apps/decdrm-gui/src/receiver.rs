@@ -3,13 +3,14 @@
 //! # Why the GUI polls a snapshot
 //!
 //! The engine runs all DSP on its own worker thread and owns every piece of receiver
-//! state; the GUI never touches that state. About ten times per second the worker
-//! publishes a complete [`Snapshot`] into an `Arc<Mutex<Snapshot>>`, and
-//! [`Engine::snapshot`] hands the GUI a *clone* of it. A clone rather than a shared
+//! state; the GUI never touches that state. Up to 60 times a second
+//! ([`PUBLISH_INTERVAL`]) the worker publishes a complete [`Snapshot`] into an
+//! `Arc<Mutex<Snapshot>>`, and [`Engine::snapshot_if_newer`] hands the GUI a *clone* of
+//! each new one. A clone rather than a shared
 //! reference because in Rust a reference obtained through a `Mutex` lives only as
 //! long as the lock guard: drawing a frame while holding the lock would stall the DSP
 //! thread, and the borrow checker will not let the reference outlive the guard anyway.
-//! Copying a few hundred kilobytes ten times a second is cheap, and afterwards the GUI
+//! Copying a few hundred kilobytes 60 times a second is cheap, and afterwards the GUI
 //! owns its copy outright — no locks, no lifetimes — so the immediate-mode UI (egui
 //! redraws the whole window every frame) simply draws from it.
 //!
@@ -30,8 +31,9 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// How often a new snapshot is fetched (the engine publishes at ~10 Hz).
-pub const FETCH_INTERVAL: Duration = Duration::from_millis(100);
+/// How often the engine publishes a snapshot for the GUI: 60 times a second, so the
+/// plots follow the channel symbol by symbol (37.5–60 symbols a second, by mode).
+pub const PUBLISH_INTERVAL: Duration = Duration::from_micros(16_667);
 /// Log lines kept by the GUI (the snapshot itself keeps only the last 200).
 pub const LOG_CAPACITY: usize = 5000;
 /// Text messages kept for the history list.
@@ -143,7 +145,6 @@ pub struct RxSession {
     /// Live sound-card input (slideshow trigger times use the wall clock).
     live: bool,
     epoch: Instant,
-    last_fetch: Option<Instant>,
 }
 
 impl Default for RxSession {
@@ -168,7 +169,6 @@ impl Default for RxSession {
             kiwi: None,
             live: false,
             epoch: Instant::now(),
-            last_fetch: None,
         }
     }
 }
@@ -199,7 +199,6 @@ impl RxSession {
         self.log.push(format!("── start: {label}"));
         self.source_label = label;
         self.engine = Some(Engine::start(cfg));
-        self.last_fetch = None;
     }
 
     /// Forget everything shown of the previous source or station.
@@ -288,8 +287,9 @@ impl RxSession {
         self.stopping = false;
     }
 
-    /// Drain engine events and, at most every [`FETCH_INTERVAL`], fetch a new snapshot.
-    /// Returns `true` if anything changed (the caller then repaints).
+    /// Drain engine events and take the engine's latest snapshot if it is new (the GUI
+    /// polls every frame; the engine publishes up to [`PUBLISH_INTERVAL`]). Returns
+    /// `true` if anything changed (the caller then repaints).
     pub fn poll(&mut self, now: Instant) -> bool {
         let Some(engine) = &self.engine else {
             return false;
@@ -338,38 +338,29 @@ impl RxSession {
         if let Some(t) = now_unix {
             self.data.tick(t);
         }
-        // Due a little early: repaints come every ~100 ms with some jitter, and a
-        // strict limit would skip every other one (halving the waterfall's row rate).
-        let due = self
-            .last_fetch
-            .is_none_or(|t| now.duration_since(t) >= FETCH_INTERVAL * 4 / 5);
-        if due || finished {
-            let snap = engine.snapshot();
-            // `seq` counts the engine's publications: the same number means the same
-            // content, so the plot data need not be prepared again.
-            if snap.seq != self.snap.seq {
-                for s in &snap.services {
-                    note_text(&mut self.text_seen, &s.label);
-                }
-                for line in snap.text.iter().chain(&snap.afs) {
-                    note_text(&mut self.text_seen, line);
-                }
-                self.plots = PlotData::from_snapshot(&snap);
-                self.waterfall
-                    .push(&snap.visuals.spectrum_db, snap.visuals.real_input);
-                let chain = &snap.visuals.chain;
-                self.fading.push(&chain.chan, chain.kmin, chain.spacing_hz);
-                self.history.push(&snap);
+        // `seq` counts the engine's publications: copy the snapshot only when it is new,
+        // and then prepare the plot data, waterfall and fading rows from it.
+        if let Some(snap) = engine.snapshot_if_newer(self.snap.seq) {
+            for s in &snap.services {
+                note_text(&mut self.text_seen, &s.label);
             }
+            for line in snap.text.iter().chain(&snap.afs) {
+                note_text(&mut self.text_seen, line);
+            }
+            self.plots = PlotData::from_snapshot(&snap);
+            let v = &snap.visuals;
+            self.waterfall.push_rows(&v.waterfall_rows, v.spectrum_seq, v.real_input, v.spectrum_row_s);
+            let chain = &v.chain;
+            self.fading.push_rows(&chain.chan_rows, chain.chan_seq, chain.kmin, chain.spacing_hz, chain.symbol_s);
+            self.history.push(&snap);
             self.snap = snap;
-            self.last_fetch = Some(now);
             changed = true;
-            // The CRC indicators work on time windows, so they are updated on every
-            // fetch, new content or not.
-            let t = now.duration_since(self.epoch).as_secs_f64();
-            let running = !finished && !self.snap.stopped;
-            self.indicators.update(t, &self.snap, running);
         }
+        // The CRC indicators work on time windows, so they are updated on every poll,
+        // new snapshot or not.
+        let t = now.duration_since(self.epoch).as_secs_f64();
+        let running = !finished && !self.snap.stopped;
+        self.indicators.update(t, &self.snap, running);
         // Website files are written once the snapshot names their service.
         self.sites.flush(&self.data, &self.snap.services);
         if finished {

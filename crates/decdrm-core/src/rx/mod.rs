@@ -23,7 +23,7 @@ pub mod scatter;
 pub mod timesync;
 mod chain;
 
-pub use chain::{ChainVisuals, MscConfig, MscFrame, SdcBlock};
+pub use chain::{CHAN_ROWS, ChainVisuals, MscConfig, MscFrame, SdcBlock};
 pub use chanest::PdsAxis;
 pub use scatter::DelayDoppler;
 pub use input::{InputFormat, RealChannel};
@@ -36,6 +36,7 @@ use crate::{Cplx, Real};
 use chain::SymbolChain;
 use freqacq::FreqAcquisition;
 use input::InputConverter;
+use std::collections::VecDeque;
 use std::f64::consts::PI;
 use timesync::{TimeSync, TimeSyncEvent};
 
@@ -186,6 +187,15 @@ pub struct Visuals {
     /// Averaged input power spectrum in dB, bins from −fs/2 to +fs/2 (for real input
     /// only the upper half carries information).
     pub spectrum_db: Vec<Real>,
+    /// Waterfall rows: the same bins averaged over a few FFTs only (~0.1 s), so fades and
+    /// bursts show that the smoother `spectrum_db` evens out; a row per FFT, the latest
+    /// few (oldest first, at most [`WATERFALL_ROWS_KEPT`]).
+    pub waterfall_rows: Vec<Vec<f32>>,
+    /// FFTs taken so far: the last of `waterfall_rows` is FFT `spectrum_seq − 1`, so a
+    /// display appends the rows it has not seen yet.
+    pub spectrum_seq: u64,
+    /// The time an FFT (a waterfall row) covers, seconds.
+    pub spectrum_row_s: Real,
     pub spectrum_centre_hz: Real,
     pub spectrum_span_hz: Real,
     pub real_input: bool,
@@ -196,6 +206,10 @@ pub struct Visuals {
     pub signal_band_hz: Option<(Real, Real)>,
 }
 
+/// Waterfall rows kept for the displays ([`Visuals::waterfall_rows`]): more than the FFTs
+/// between two snapshots (they come in bursts).
+pub const WATERFALL_ROWS_KEPT: usize = 8;
+
 /// Averaged power spectrum of the (analytic / I/Q) input for display.
 #[derive(Debug)]
 struct InputSpectrum {
@@ -203,11 +217,16 @@ struct InputSpectrum {
     window: Vec<Real>,
     buf: Vec<Cplx>,
     avg: Vec<Real>,
+    /// The lightly averaged spectrum for the waterfall, and its latest rows in dB.
+    fast: Vec<Real>,
+    rows: VecDeque<Vec<f32>>,
     count: u64,
 }
 
 impl InputSpectrum {
     const LEN: usize = 2048;
+    /// IIR weight of the waterfall's average: about three FFTs (0.1 s).
+    const FAST_LAMBDA: Real = 0.5;
 
     fn new() -> Self {
         Self {
@@ -215,6 +234,8 @@ impl InputSpectrum {
             window: crate::dsp::hamming(Self::LEN),
             buf: Vec::with_capacity(Self::LEN),
             avg: vec![0.0; Self::LEN],
+            fast: vec![0.0; Self::LEN],
+            rows: VecDeque::new(),
             count: 0,
         }
     }
@@ -227,10 +248,20 @@ impl InputSpectrum {
                 self.fft.forward(&mut work);
                 let lambda = if self.count < 8 { 0.5 } else { 0.9 };
                 let half = Self::LEN / 2;
-                for (j, a) in self.avg.iter_mut().enumerate() {
+                let fast = if self.count == 0 { 0.0 } else { Self::FAST_LAMBDA };
+                for (j, (a, f)) in self.avg.iter_mut().zip(&mut self.fast).enumerate() {
                     let p = work[(j + half) % Self::LEN].norm_sqr() / (Self::LEN * Self::LEN) as Real;
                     *a = lambda * *a + (1.0 - lambda) * p;
+                    *f = fast * *f + (1.0 - fast) * p;
                 }
+                let mut row = if self.rows.len() >= WATERFALL_ROWS_KEPT {
+                    self.rows.pop_front().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                row.clear();
+                row.extend(self.fast.iter().map(|p| (10.0 * p.max(1e-20).log10()) as f32));
+                self.rows.push_back(row);
                 self.count += 1;
                 self.buf.clear();
             }
@@ -338,9 +369,10 @@ impl Receiver {
         }
     }
 
-    /// Plot data: constellations, channel, impulse response, per-carrier SNR and
-    /// the input spectrum. Cheap enough to call ~10 times per second.
-    pub fn visuals(&self) -> Visuals {
+    /// Plot data: constellations, channel, impulse response, per-carrier SNR,
+    /// delay–Doppler map and the input spectrum, for each snapshot (the GUI takes up to
+    /// 60 a second). `&mut`: the delay–Doppler map is made here when new symbols came.
+    pub fn visuals(&mut self) -> Visuals {
         let dc_hz = self.status.dc_frequency_hz;
         let signal_band_hz = match (dc_hz, self.status.mode, self.status.occupancy) {
             (Some(dc), Some(mode), Some(so)) => crate::params::carrier_range(mode, so).map(|(kmin, kmax)| {
@@ -351,8 +383,11 @@ impl Receiver {
             _ => None,
         };
         Visuals {
-            chain: self.chain.as_ref().map(|c| c.visuals()).unwrap_or_default(),
+            chain: self.chain.as_mut().map(|c| c.visuals()).unwrap_or_default(),
             spectrum_db: self.spectrum.db(),
+            waterfall_rows: self.spectrum.rows.iter().cloned().collect(),
+            spectrum_seq: self.spectrum.count,
+            spectrum_row_s: InputSpectrum::LEN as Real / Real::from(SAMPLE_RATE),
             spectrum_centre_hz: 0.0,
             spectrum_span_hz: Real::from(SAMPLE_RATE),
             real_input: self.input.is_real(),

@@ -236,12 +236,34 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       *Done:* `rx::scatter`: the last 6 s of channel estimates (one row per symbol,
       brought to the newest timing with each row's cumulative shift) → Hann-windowed
       inverse FFT over the carriers (delay, 2× zero padding) → Hann-windowed FFT over
-      time per delay (Doppler, ≥ 4× zero padding), once a second; dB below the strongest
-      point, floor −40 dB, delays −Tg/4 … 1.25 Tg, Doppler ±5/8/10 Hz by mode. GUI tabs
-      *Fading* (gain per carrier per snapshot, a minute, colours from the median gain)
-      and *Delay–Doppler*. Checked against channel model 3 (four paths, spreads
+      time per delay (Doppler, ≥ 4× zero padding), once a second (with every new symbol
+      since the 60 Hz plots); dB below the strongest point, floor −40 dB, delays
+      −Tg/4 … 1.25 Tg, Doppler ±5/8/10 Hz by mode. GUI tabs *Fading* (gain per carrier
+      per snapshot, a minute, colours from the median gain; a row per symbol since) and
+      *Delay–Doppler*. Checked against channel model 3 (four paths, spreads
       0.1–2 Hz, in place) and on KCBS (separate ionospheric paths). The waterfall also
       fits the DRM signal now, at the spectrum's full 2048-bin resolution.
+- [x] **Plots at 60 Hz** (2026-10-01) — the plots follow the signal as fast as it
+      changes, at the user's request (they updated at 10 Hz).
+      *Done:* `EngineConfig::publish_interval` (100 ms by default, so the CLI is
+      unchanged; the GUI asks for 1/60 s and reads live input in pieces that short);
+      `Engine::snapshot_if_newer` (the GUI polls every frame and copies new snapshots
+      only; any change to the shared snapshot bumps `seq`). The chain keeps the last
+      frame's FAC/MSC cells and super frame's SDC cells as sliding windows, and the
+      channel power per symbol (`chan_rows` with a running `chan_seq`); the input
+      spectrum keeps a lightly averaged row per FFT (`waterfall_rows`, `spectrum_seq`).
+      Snapshots carry the latest few rows and the GUI appends those it has not seen, so
+      none is lost although publishes come in bursts (taking the latest row per
+      snapshot got only half of the FFTs). The delay–Doppler map is made when visuals
+      are taken and new symbols came (`ChannelHistory::map`), not per symbol (it costs
+      ~4 ms). Waterfall and fading map show a fixed 600 rows, so they scroll as fast as
+      they update (2.3× and 3.75× the old speed), from ring textures: a new row is one
+      partial upload, the image is drawn with its texture coordinates shifted (vertical
+      repeat), and rows keep the colours they arrived with. Repaints run at 60 Hz:
+      egui starts a requested repaint a predicted frame time early, so that time is
+      added back; requesting 1/60 s plainly ran at the display's 165 Hz (90–100 % of a
+      core). Measured: 7–9 % of a core for the whole process at 60 Hz, against 3 % at
+      10 Hz.
 - [x] **KiwiSDR client** (2026-10-01) — DecDRM tunes a KiwiSDR itself and decodes its
       I/Q, instead of a browser tab and a virtual audio cable.
       *Done:* `decdrm-kiwi`. The protocol follows the reference client kiwiclient

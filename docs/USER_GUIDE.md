@@ -226,18 +226,20 @@ Yellow means partly OK, and red means failing.
   ppm).
 - **DC:** frequency of the DRM signal's centre (DC carrier) in the input.
 
-GUI plot tabs:
+GUI plot tabs (while receiving they update up to 60 times a second: the channel plots
+with every OFDM symbol, 37.5–60 a second by mode, the spectrum with every FFT, ~23 a
+second):
 
 | Tab | Shows |
 |---|---|
 | Overview | input spectrum with the DRM band and DC carrier; FAC/SDC/MSC constellations |
-| Spectrum, Waterfall | the input spectrum, and its history over the last minutes (the waterfall fits the DRM signal once one is found; *Fit to the DRM signal* below it switches back to the whole band) |
-| Constellations | FAC, SDC and MSC cells against the ideal points |
+| Spectrum, Waterfall | the input spectrum, and its history: a row per FFT, the last 600 (~26 s), so it scrolls as fast as the spectrum updates (the waterfall fits the DRM signal once one is found; *Fit to the DRM signal* below it switches back to the whole band) |
+| Constellations | FAC, SDC and MSC cells against the ideal points: the latest frame's worth (a super frame's for the SDC), moving symbol by symbol |
 | Audio | spectrum of the decoded audio |
 | Channel | the channel's magnitude and group delay per carrier |
-| Fading | the channel's gain per carrier over the last minute: frequency-selective fades as dark notches, 1/delay apart for two paths of different delay, moving when their Doppler shifts differ |
+| Fading | the channel's gain per carrier, a row per OFDM symbol, the last 600 (16 s in mode B): frequency-selective fades as dark notches, 1/delay apart for two paths of different delay, moving when their Doppler shifts differ |
 | Impulse response | power-delay profile, with the guard interval and delay spread |
-| Delay–Doppler | the propagation paths of the last 6 s: each spot is a path at its delay (from the receiver's timing) and Doppler shift (from the frequency the receiver tracks); spread along the Doppler axis is how fast that path fades. Separate ionospheric modes show as separate spots; the lines mark the guard interval |
+| Delay–Doppler | the propagation paths of the last 6 s, made anew with every new symbol: each spot is a path at its delay (from the receiver's timing) and Doppler shift (from the frequency the receiver tracks); spread along the Doppler axis is how fast that path fades. Separate ionospheric modes show as separate spots; the lines mark the guard interval |
 | SNR per carrier | where in the band the noise or interference sits |
 | History | SNR/MER/WMER, Doppler, delay, SRO over the last five minutes of signal, and FAC/SDC/MSC/audio error rates per 10 s |
 | Schedule | the DRM broadcasts on the air now, from EiBi's or Dream's schedule (see [Station schedule](#station-schedule-what-is-on-the-air)) |

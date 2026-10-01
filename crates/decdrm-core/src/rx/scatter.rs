@@ -26,8 +26,6 @@ use std::f64::consts::PI;
 /// Seconds of channel estimates behind each map (Doppler resolution ~2/WINDOW_S with
 /// the Hann window).
 pub const WINDOW_S: Real = 6.0;
-/// A new map every this many seconds.
-pub const UPDATE_S: Real = 1.0;
 /// The map's floor below its strongest point, dB.
 pub const FLOOR_DB: f32 = -40.0;
 
@@ -68,15 +66,17 @@ impl DelayDoppler {
     }
 }
 
-/// The channel estimates of the last [`WINDOW_S`] seconds and the latest map.
+/// The channel estimates of the last [`WINDOW_S`] seconds and the latest map, made when
+/// asked for ([`Self::map`], once per snapshot) rather than per symbol: a map costs
+/// about a millisecond, which would slow decoding a recording faster than real time.
 #[derive(Debug)]
 pub(crate) struct ChannelHistory {
     /// Transfer function per carrier (from `kmin`) and the cumulative timing shift of
     /// its symbol.
     rows: VecDeque<(Vec<Cplx>, i64)>,
     max_rows: usize,
-    update_rows: usize,
-    since_update: usize,
+    /// Rows arrived since the map was made.
+    stale: bool,
     kmin: i32,
     fft_size: usize,
     symbol_s: Real,
@@ -98,8 +98,7 @@ impl ChannelHistory {
         Self {
             rows: VecDeque::new(),
             max_rows: (WINDOW_S / symbol_s).round() as usize,
-            update_rows: ((UPDATE_S / symbol_s).round() as usize).max(1),
-            since_update: 0,
+            stale: false,
             kmin: map.kmin,
             fft_size: mode.fft_size(),
             symbol_s,
@@ -109,8 +108,7 @@ impl ChannelHistory {
         }
     }
 
-    /// Add one symbol's channel estimate; a new map is made every [`UPDATE_S`] seconds
-    /// once half the window is filled.
+    /// Add one symbol's channel estimate.
     pub fn push(&mut self, chan: &[Cplx], cum_shift: i64) {
         if self.rows.front().is_some_and(|(r, _)| r.len() != chan.len()) {
             self.clear();
@@ -123,9 +121,20 @@ impl ChannelHistory {
         row.clear();
         row.extend_from_slice(chan);
         self.rows.push_back((row, cum_shift));
-        self.since_update += 1;
-        if self.since_update >= self.update_rows && self.rows.len() >= self.max_rows / 2 {
-            self.since_update = 0;
+        self.stale = true;
+    }
+
+    pub fn clear(&mut self) {
+        self.rows.clear();
+        self.stale = false;
+        self.map = None;
+    }
+
+    /// The map of the rows so far, made anew if rows arrived since the last one; none
+    /// before half the window is filled.
+    pub fn map(&mut self) -> Option<&DelayDoppler> {
+        if self.stale && self.rows.len() >= self.max_rows / 2 {
+            self.stale = false;
             let range = (-0.25 * self.guard_ms, 1.25 * self.guard_ms);
             self.map = delay_doppler(
                 self.rows.make_contiguous(),
@@ -137,15 +146,6 @@ impl ChannelHistory {
             )
             .map(|m| DelayDoppler { guard_ms: self.guard_ms, ..m });
         }
-    }
-
-    pub fn clear(&mut self) {
-        self.rows.clear();
-        self.since_update = 0;
-        self.map = None;
-    }
-
-    pub fn map(&self) -> Option<&DelayDoppler> {
         self.map.as_ref()
     }
 }
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn history_makes_a_map_every_second() {
+    fn history_makes_a_map_when_asked() {
         let map = CellMap::new(RobustnessMode::B, SpectrumOccupancy::SO_3).unwrap();
         let mut hist = ChannelHistory::new(&map);
         let n = map.kmax - map.kmin + 1;
@@ -345,6 +345,11 @@ mod tests {
         // A flat channel: one path at delay 0, Doppler 0.
         let (tau, nu) = peak(m);
         assert!(tau.abs() < 0.05 && nu.abs() < 0.05, "{tau} {nu}");
+        // Made once per new data: asked again, the same map; a new row, a new one.
+        assert!(!hist.stale && hist.map().is_some());
+        hist.push(&row, 0);
+        assert!(hist.stale);
+        assert!(hist.map().is_some() && !hist.stale);
         // A new layout (other row length) starts afresh.
         hist.push(&row[..100], 0);
         assert!(hist.map().is_none());

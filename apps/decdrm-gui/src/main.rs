@@ -26,6 +26,7 @@ mod kiwi_list;
 mod panels;
 mod plots;
 mod receiver;
+mod ring_image;
 mod schedule;
 mod settings;
 mod spectrum;

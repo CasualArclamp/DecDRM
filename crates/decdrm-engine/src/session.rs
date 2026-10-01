@@ -143,7 +143,7 @@ impl Session {
         self.rx.status()
     }
 
-    pub fn visuals(&self) -> Visuals {
+    pub fn visuals(&mut self) -> Visuals {
         self.rx.visuals()
     }
 

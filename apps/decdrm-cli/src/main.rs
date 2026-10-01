@@ -206,6 +206,7 @@ fn rx(a: RxArgs) -> Result<()> {
         record_audio: a.out.clone(),
         data_dir: a.data_dir.clone(),
         log: a.log.clone().map(|p| LogConfig { interval_s: a.log_interval, ..LogConfig::new(p) }),
+        ..EngineConfig::default()
     });
     if let Some(id) = a.service {
         engine.command(Command::SelectService(id));

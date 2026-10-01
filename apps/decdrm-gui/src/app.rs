@@ -19,7 +19,7 @@ use crate::panels::source::{DeviceLists, SourceAction};
 use crate::panels::tx_page::TxPage;
 use crate::panels::website::WebsiteView;
 use crate::panels::{self, heading};
-use crate::receiver::{FETCH_INTERVAL, RxSession};
+use crate::receiver::RxSession;
 use crate::schedule::ScheduleView;
 use crate::settings::{DataTab, Page, PlotTab, Settings, SettingsStore, SignalFormat, SourceKind, ThemeChoice};
 use crate::transmitter::TxSession;
@@ -463,16 +463,17 @@ impl eframe::App for DecDrmApp {
         }
         self.automation.tick(ctx, now, &mut self.rx.log);
 
-        // Repaint policy: ~10 Hz while the engine runs, a schedule job works (to collect
-        // its result) or an unattended run waits, otherwise only on user input (the
+        // Repaint policy: 60 Hz while the receiver runs, so the plots take each snapshot
+        // (egui starts a requested repaint a predicted frame time early, so that is added
+        // back; a repaint for "now" would run at the display's rate, 165 Hz on some
+        // monitors); ~10 Hz while the transmitter runs, a schedule job works (to collect
+        // its result) or an unattended run waits; otherwise only on user input (the
         // Schedule tab adds a repaint on each minute, for its clock).
-        if self.rx.is_running()
-            || self.tx.is_running()
-            || self.schedule.busy()
-            || self.kiwi_list.busy()
-            || self.automation.active()
-        {
-            ctx.request_repaint_after(FETCH_INTERVAL);
+        if self.rx.is_running() {
+            let frame = Duration::try_from_secs_f32(ctx.input(|i| i.predicted_dt)).unwrap_or_default();
+            ctx.request_repaint_after(crate::receiver::PUBLISH_INTERVAL + frame);
+        } else if self.tx.is_running() || self.schedule.busy() || self.kiwi_list.busy() || self.automation.active() {
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
 

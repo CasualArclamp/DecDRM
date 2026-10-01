@@ -9,8 +9,9 @@ use super::{Palette, placeholder};
 use crate::history::History;
 use crate::plots::{AUDIO_FLOOR_DB, AudioPlot, DB_FLOOR, PlotData, Points, SpectrumPlot};
 use crate::settings::PlotTab;
-use crate::fading::{FADING_ROWS, FadingMap};
-use crate::waterfall::{ROW_SECONDS, WATERFALL_ROWS, Waterfall};
+use crate::fading::FadingMap;
+use crate::ring_image::RingImage;
+use crate::waterfall::Waterfall;
 use decdrm_core::rx::DelayDoppler;
 use decdrm_core::rx::scatter::FLOOR_DB;
 use eframe::egui::{Color32, RichText, TextureHandle, TextureOptions, Ui};
@@ -19,19 +20,11 @@ use egui_plot::{
     PlotPoints, Points as Scatter, Span, VLine,
 };
 
-/// The waterfall's image on the GPU, rebuilt only when the history has changed and the
-/// tab is shown (at most at the ~10 Hz snapshot rate).
-#[derive(Default)]
-pub struct WaterfallTexture {
-    handle: Option<TextureHandle>,
-    generation: u64,
-}
-
-/// The images of the map tabs on the GPU.
+/// The images of the map tabs on the GPU, updated while their tab is shown.
 #[derive(Default)]
 pub struct PlotTextures {
-    pub waterfall: WaterfallTexture,
-    fading: WaterfallTexture,
+    waterfall: RingImage,
+    fading: RingImage,
     delay_doppler: Option<(TextureHandle, DelayDoppler)>,
 }
 
@@ -224,33 +217,16 @@ fn waterfall_plot(
     ui: &mut Ui,
     data: &PlotData,
     waterfall: &Waterfall,
-    texture: &mut WaterfallTexture,
+    texture: &mut RingImage,
     fit: &mut bool,
     pal: &Palette,
     height: f32,
 ) {
-    if waterfall.is_empty() {
+    let Some((texture_id, uv)) = texture.update(ui.ctx(), "waterfall", waterfall) else {
         placeholder(
             ui,
             "No spectrum yet: the waterfall fills while the receiver runs.",
         );
-        return;
-    }
-    if texture.handle.is_none() || texture.generation != waterfall.generation() {
-        let image = waterfall.image();
-        match &mut texture.handle {
-            Some(h) => h.set(image, TextureOptions::LINEAR),
-            None => {
-                texture.handle = Some(ui.ctx().load_texture(
-                    "waterfall",
-                    image,
-                    TextureOptions::LINEAR,
-                ));
-            }
-        }
-        texture.generation = waterfall.generation();
-    }
-    let Some(handle) = &texture.handle else {
         return;
     };
     // The same span as `SpectrumPlot`: 0 … 24 kHz for a real signal, ±24 kHz for I/Q.
@@ -259,7 +235,7 @@ fn waterfall_plot(
     } else {
         (-24.0, 24.0)
     };
-    let seconds = WATERFALL_ROWS as f64 * ROW_SECONDS;
+    let seconds = waterfall.span_s();
     // Shown: the whole band, or the DRM signal with a margin once one is found.
     let (v0, v1) = match data.spectrum.band_khz.filter(|_| *fit) {
         Some(band) => fit_span(band, (x0, x1)),
@@ -272,12 +248,15 @@ fn waterfall_plot(
         .label_formatter(hover_label("kHz", 2, "s", 1))
         .show(ui, |p| {
             p.set_plot_bounds(PlotBounds::from_min_max([v0, -seconds], [v1, 0.0]));
-            p.image(PlotImage::new(
-                "waterfall",
-                handle.id(),
-                PlotPoint::new((x0 + x1) / 2.0, -seconds / 2.0),
-                [(x1 - x0) as f32, seconds as f32],
-            ));
+            p.image(
+                PlotImage::new(
+                    "waterfall",
+                    texture_id,
+                    PlotPoint::new((x0 + x1) / 2.0, -seconds / 2.0),
+                    [(x1 - x0) as f32, seconds as f32],
+                )
+                .uv(uv),
+            );
             if let Some((lo, hi)) = data.spectrum.band_khz {
                 for x in [lo, hi] {
                     p.vline(VLine::new("DRM signal", x).color(pal.band_edge).width(1.0));
@@ -299,7 +278,7 @@ fn waterfall_plot(
             RichText::new(format!(
                 "{} rows (~{:.0} s), newest at the top; colours {lo:.0} … {hi:.0} dB, following the noise floor and the strongest signals",
                 waterfall.rows(),
-                waterfall.rows() as f64 * ROW_SECONDS
+                waterfall.filled_s()
             ))
             .weak()
             .small(),
@@ -308,22 +287,13 @@ fn waterfall_plot(
 }
 
 /// The channel gain per carrier over the last minute (see `fading`).
-fn fading_plot(ui: &mut Ui, fading: &FadingMap, texture: &mut WaterfallTexture, pal: &Palette, height: f32) {
-    if fading.is_empty() {
+fn fading_plot(ui: &mut Ui, fading: &FadingMap, texture: &mut RingImage, pal: &Palette, height: f32) {
+    let Some((texture_id, uv)) = texture.update(ui.ctx(), "fading", fading) else {
         placeholder(ui, "No channel estimate yet: the fading map fills once the receiver tracks a signal.");
         return;
-    }
-    if texture.handle.is_none() || texture.generation != fading.generation() {
-        let image = fading.image();
-        match &mut texture.handle {
-            Some(h) => h.set(image, TextureOptions::LINEAR),
-            None => texture.handle = Some(ui.ctx().load_texture("fading", image, TextureOptions::LINEAR)),
-        }
-        texture.generation = fading.generation();
-    }
-    let Some(handle) = &texture.handle else { return };
+    };
     let (x0, x1) = fading.span_khz();
-    let seconds = FADING_ROWS as f64 * ROW_SECONDS;
+    let seconds = fading.span_s();
     base_plot("fading")
         .height(height.max(120.0))
         .x_axis_label("frequency (kHz, from the DC carrier)")
@@ -331,22 +301,25 @@ fn fading_plot(ui: &mut Ui, fading: &FadingMap, texture: &mut WaterfallTexture, 
         .label_formatter(hover_label("kHz", 2, "s", 1))
         .show(ui, |p| {
             p.set_plot_bounds(PlotBounds::from_min_max([x0, -seconds], [x1, 0.0]));
-            p.image(PlotImage::new(
-                "fading",
-                handle.id(),
-                PlotPoint::new((x0 + x1) / 2.0, -seconds / 2.0),
-                [(x1 - x0) as f32, seconds as f32],
-            ));
+            p.image(
+                PlotImage::new(
+                    "fading",
+                    texture_id,
+                    PlotPoint::new((x0 + x1) / 2.0, -seconds / 2.0),
+                    [(x1 - x0) as f32, seconds as f32],
+                )
+                .uv(uv),
+            );
             p.vline(VLine::new("DC carrier", 0.0).color(pal.marker).style(LineStyle::dashed_dense()));
         });
     let (lo, hi) = fading.levels();
     let m = fading.median_db();
     ui.label(
         RichText::new(format!(
-            "Channel gain per carrier, {} rows (~{:.0} s), newest at the top; colours {:.0} … {:+.0} dB around the median gain. \
+            "Channel gain per carrier, a row per OFDM symbol, {} rows (~{:.0} s), newest at the top; colours {:.0} … {:+.0} dB around the median gain. \
              Dark bands are fades: two paths cancel at frequencies 1/delay apart, and a Doppler difference makes the notches move.",
             fading.rows(),
-            fading.rows() as f64 * ROW_SECONDS,
+            fading.filled_s(),
             lo - m,
             hi - m
         ))

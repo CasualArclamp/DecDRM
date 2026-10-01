@@ -13,7 +13,7 @@ use crate::fec::crc::Crc;
 use crate::fec::mlc::{MlcDecoder, MlcParams, MscProtection};
 use crate::fec::qam::EqCell;
 use crate::interleave::CellDeinterleaver;
-use crate::params::{FRAMES_PER_SUPERFRAME, RobustnessMode, SpectrumOccupancy};
+use crate::params::{FRAMES_PER_SUPERFRAME, RobustnessMode, SAMPLE_RATE, SpectrumOccupancy};
 use crate::tables::NUM_FAC_CELLS;
 use crate::{Cplx, Real};
 use std::collections::VecDeque;
@@ -49,8 +49,8 @@ pub struct MscFrame {
 /// Plot data captured from the symbol chain (cheap to clone on demand).
 #[derive(Debug, Clone, Default)]
 pub struct ChainVisuals {
-    /// Equalised FAC / SDC / MSC cells of the most recent complete frame / super
-    /// frame / multiplex frame (never a partial set).
+    /// The latest equalised FAC / SDC / MSC cells: a frame's worth of FAC and MSC
+    /// cells and a super frame's worth of SDC cells, updated symbol by symbol.
     pub fac: Vec<Cplx>,
     pub sdc: Vec<Cplx>,
     pub msc: Vec<Cplx>,
@@ -58,6 +58,14 @@ pub struct ChainVisuals {
     pub kmin: i32,
     /// Latest channel estimate per carrier.
     pub chan: Vec<Cplx>,
+    /// Channel power per carrier of the latest symbols, dB (oldest first, at most
+    /// [`CHAN_ROWS`]), for displays that follow the channel symbol by symbol.
+    pub chan_rows: Vec<Vec<f32>>,
+    /// Symbols estimated so far: the last of `chan_rows` is symbol `chan_seq − 1`, so a
+    /// display appends the rows it has not seen yet.
+    pub chan_seq: u64,
+    /// Duration of an OFDM symbol, seconds: the time step of `chan_rows`.
+    pub symbol_s: Real,
     /// Averaged power delay profile (linear power), ordered by delay: value `i` is
     /// at `pds_axis.start_ms + i · pds_axis.step_ms`.
     pub pds: Vec<Real>,
@@ -69,6 +77,11 @@ pub struct ChainVisuals {
     /// Delay–Doppler map of the last seconds of channel estimates (see `rx::scatter`).
     pub delay_doppler: Option<super::scatter::DelayDoppler>,
 }
+
+/// Channel rows kept for the displays ([`ChainVisuals::chan_rows`]): more than the
+/// symbols between two snapshots, also when a recording is decoded faster than real
+/// time.
+pub const CHAN_ROWS: usize = 64;
 
 pub(super) enum ChainEvent {
     Fac(Fac),
@@ -134,9 +147,13 @@ pub(super) struct SymbolChain {
     timing_tracking: bool,
     vis: ChainVisuals,
     // Cells being collected for the next complete set.
-    vis_fac: Vec<Cplx>,
-    vis_sdc: Vec<Cplx>,
-    vis_msc: Vec<Cplx>,
+    /// The latest FAC, SDC and MSC cells (see [`ChainVisuals::fac`]).
+    vis_fac: VecDeque<Cplx>,
+    vis_sdc: VecDeque<Cplx>,
+    vis_msc: VecDeque<Cplx>,
+    /// Channel power rows and their count (see [`ChainVisuals::chan_rows`]).
+    chan_rows: VecDeque<Vec<f32>>,
+    chan_seq: u64,
 }
 
 impl SymbolChain {
@@ -173,9 +190,11 @@ impl SymbolChain {
             tracking: false,
             timing_tracking: false,
             vis: ChainVisuals::default(),
-            vis_fac: Vec::new(),
-            vis_sdc: Vec::new(),
-            vis_msc: Vec::new(),
+            vis_fac: VecDeque::new(),
+            vis_sdc: VecDeque::new(),
+            vis_msc: VecDeque::new(),
+            chan_rows: VecDeque::new(),
+            chan_seq: 0,
             map,
         })
     }
@@ -356,23 +375,15 @@ impl SymbolChain {
         self.recent.push_back((buf, win.shift, symbol));
     }
 
-    /// Keep the latest cells of each channel for constellation plots. Called before
-    /// `demap`, so at symbol 0 the frame index has not advanced yet.
+    /// Keep the latest cells of each channel for the constellation plots (a frame's
+    /// worth of FAC and MSC cells, a super frame's worth of SDC cells, so the plots move
+    /// symbol by symbol) and the channel power per carrier. Called before `demap`, so at
+    /// symbol 0 the frame index has not advanced yet.
     fn capture(&mut self, cells: &[EqCell], s: usize, chan: &[Cplx]) {
         let map = &self.map;
         let ns = map.symbols_per_frame;
-        if s == 0 {
-            self.vis_fac.clear();
-            if self.vis_msc.len() >= map.msc_cells_per_frame {
-                self.vis.msc = std::mem::take(&mut self.vis_msc);
-            }
-            self.vis_msc.clear();
-        }
         for &c in map.fac_carriers(s) {
-            self.vis_fac.push(cells[c as usize].sig);
-        }
-        if s == self.last_fac_symbol && self.vis_fac.len() == NUM_FAC_CELLS {
-            self.vis.fac = std::mem::take(&mut self.vis_fac);
+            self.vis_fac.push_back(cells[c as usize].sig);
         }
         // Frame within the super frame (unknown before the first FAC: assume a frame
         // without SDC so MSC cells are still plotted).
@@ -382,30 +393,42 @@ impl SymbolChain {
             None => 1,
         };
         let sf_sym = frame * ns + s;
-        let sdc_symbols = map.mode().sdc_symbols();
-        if sf_sym < sdc_symbols {
-            if sf_sym == 0 {
-                self.vis_sdc.clear();
-            }
+        if sf_sym < map.mode().sdc_symbols() {
             for &c in map.sdc_carriers(sf_sym) {
-                self.vis_sdc.push(cells[c as usize].sig);
-            }
-            if sf_sym == sdc_symbols - 1 && self.vis_sdc.len() == map.sdc_cells_per_superframe {
-                self.vis.sdc = std::mem::take(&mut self.vis_sdc);
+                self.vis_sdc.push_back(cells[c as usize].sig);
             }
         }
         for &c in map.msc_carriers(sf_sym) {
-            self.vis_msc.push(cells[c as usize].sig);
+            self.vis_msc.push_back(cells[c as usize].sig);
         }
+        keep_last(&mut self.vis_fac, NUM_FAC_CELLS);
+        keep_last(&mut self.vis_sdc, map.sdc_cells_per_superframe);
+        keep_last(&mut self.vis_msc, map.msc_cells_per_frame);
+        let mut row = if self.chan_rows.len() >= CHAN_ROWS {
+            self.chan_rows.pop_front().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        row.clear();
+        row.extend(chan.iter().map(|h| (10.0 * h.norm_sqr().max(1e-12).log10()) as f32));
+        self.chan_rows.push_back(row);
+        self.chan_seq += 1;
         self.vis.kmin = map.kmin;
         self.vis.spacing_hz = map.mode().carrier_spacing();
         self.vis.chan.clear();
         self.vis.chan.extend_from_slice(chan);
     }
 
-    /// Snapshot of the plot data.
-    pub fn visuals(&self) -> ChainVisuals {
+    /// Snapshot of the plot data (it makes the delay–Doppler map when new symbols came,
+    /// hence `&mut`).
+    pub fn visuals(&mut self) -> ChainVisuals {
         let mut v = self.vis.clone();
+        v.fac = self.vis_fac.iter().copied().collect();
+        v.sdc = self.vis_sdc.iter().copied().collect();
+        v.msc = self.vis_msc.iter().copied().collect();
+        v.chan_rows = self.chan_rows.iter().cloned().collect();
+        v.chan_seq = self.chan_seq;
+        v.symbol_s = self.map.mode().symbol_len() as Real / Real::from(SAMPLE_RATE);
         let (pds, axis) = self.chanest.power_delay_profile();
         v.pds = pds;
         v.pds_axis = Some(axis);
@@ -564,4 +587,10 @@ fn track_reset(chanest: &mut ChannelEstimator) {
     // Tracking outputs are one-shot increments.
     chanest.last_track.timing_adjust = 0;
     chanest.last_track.sro_delta_hz = 0.0;
+}
+
+/// Drop the oldest entries of `w` beyond the last `n`.
+fn keep_last<T>(w: &mut VecDeque<T>, n: usize) {
+    let excess = w.len().saturating_sub(n);
+    w.drain(..excess);
 }

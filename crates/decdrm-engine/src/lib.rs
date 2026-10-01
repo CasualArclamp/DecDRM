@@ -61,6 +61,10 @@ pub struct EngineConfig {
     pub data_dir: Option<std::path::PathBuf>,
     /// Reception log (metrics rows as CSV or JSON Lines, events in JSON Lines).
     pub log: Option<LogConfig>,
+    /// Shortest time between two published snapshots: 100 ms by default (enough for a
+    /// status line), 1/60 s for the GUI's plots, which then follow the channel symbol
+    /// by symbol. Live input is read in pieces no longer than this.
+    pub publish_interval: Duration,
 }
 
 impl Default for EngineConfig {
@@ -75,6 +79,7 @@ impl Default for EngineConfig {
             record_audio: None,
             data_dir: None,
             log: None,
+            publish_interval: Duration::from_millis(100),
         }
     }
 }
@@ -137,6 +142,8 @@ impl Engine {
                     Err(e) => Some(format!("{e:#}")),
                 };
                 if let Ok(mut s) = worker_shared.lock() {
+                    // A new state, so a new number (`snapshot_if_newer` goes by it).
+                    s.seq += 1;
                     s.stopped = true;
                     s.error = err.clone();
                 }
@@ -149,6 +156,12 @@ impl Engine {
     /// Latest snapshot (a clone).
     pub fn snapshot(&self) -> Snapshot {
         self.shared.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// The latest snapshot if it is not the one numbered `seq` (see [`Snapshot::seq`]):
+    /// a caller polling every frame copies only new ones.
+    pub fn snapshot_if_newer(&self, seq: u64) -> Option<Snapshot> {
+        self.shared.lock().ok().filter(|s| s.seq != seq).map(|s| s.clone())
     }
 
     /// Non-blocking: all events queued since the last call.
@@ -220,7 +233,10 @@ fn worker(
     let mut last_publish = Instant::now() - Duration::from_secs(1);
     // Input position of the latest decoded audio (for blanking a stale audio spectrum).
     let mut last_audio_s: Option<f64> = None;
-    let chunk_frames = (info.sample_rate as usize / 20).max(256); // 50 ms
+    // 50 ms pieces, shorter when snapshots are published more often (live input then
+    // reaches the plots at that rate).
+    let chunk_s = cfg.publish_interval.as_secs_f64().clamp(0.005, 0.05);
+    let chunk_frames = ((f64::from(info.sample_rate) * chunk_s) as usize).max(64);
     loop {
         for c in cmd_rx.try_iter() {
             match c {
@@ -230,7 +246,7 @@ fn worker(
                         l.finish(source.position_s(), &session, &snap)?;
                     }
                     snap.audio_spectrum = fresh_audio_spectrum(&audio, last_audio_s, source.position_s());
-                    publish(shared, &mut snap, &session, &source, &audio, true);
+                    publish(shared, &mut snap, &mut session, &source, &audio, true);
                     return Ok(());
                 }
                 Command::Restart => {
@@ -269,7 +285,7 @@ fn worker(
             }
             log(format!("end of input after {:.1} s", source.position_s()), &mut snap);
             snap.audio_spectrum = fresh_audio_spectrum(&audio, last_audio_s, source.position_s());
-            publish(shared, &mut snap, &session, &source, &audio, true);
+            publish(shared, &mut snap, &mut session, &source, &audio, true);
             return Ok(());
         };
         if !frames.is_empty() {
@@ -315,9 +331,9 @@ fn worker(
         if let Some(l) = logger.as_mut() {
             l.tick(t, &session, &snap)?;
         }
-        if last_publish.elapsed() >= Duration::from_millis(100) {
+        if last_publish.elapsed() >= cfg.publish_interval {
             snap.audio_spectrum = fresh_audio_spectrum(&audio, last_audio_s, t);
-            publish(shared, &mut snap, &session, &source, &audio, false);
+            publish(shared, &mut snap, &mut session, &source, &audio, false);
             last_publish = Instant::now();
         }
         if realtime && !audio.is_playing() {
@@ -364,7 +380,7 @@ fn log_event(l: &mut logger::Logger, t: f64, ev: &SessionEvent) -> Result<()> {
 fn publish(
     shared: &Arc<Mutex<Snapshot>>,
     snap: &mut Snapshot,
-    session: &Session,
+    session: &mut Session,
     source: &Source,
     audio: &audio_out::AudioOut,
     finished: bool,

@@ -436,6 +436,7 @@ impl Settings {
             output_device: self.output_device.clone(),
             volume: volume_gain(self.volume),
             data_dir: self.data_dir.clone(),
+            publish_interval: crate::receiver::PUBLISH_INTERVAL,
             ..EngineConfig::default()
         })
     }
