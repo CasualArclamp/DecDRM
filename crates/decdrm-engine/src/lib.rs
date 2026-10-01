@@ -21,8 +21,8 @@ pub use decdrm_kiwi;
 pub use logger::{LogConfig, LogFormat};
 pub use session::{MscStats, Session, SessionEvent};
 pub use snapshot::{
-    AppView, AudioCodingView, AudioSpectrum, AudioStatus, BroadcastTime, InputStatus, METRICS_INTERVAL_S, MetricsSample,
-    RECENT_METRICS, ServiceView, Snapshot,
+    AppView, AudioCodingView, AudioSpectrum, AudioStatus, BroadcastTime, DiversityView, InputStatus, METRICS_INTERVAL_S,
+    MetricsSample, RECENT_METRICS, ServiceView, Snapshot,
 };
 pub use source::{InputSpec, Source, SourceInfo};
 
@@ -203,13 +203,23 @@ fn worker(
 ) -> Result<()> {
     let mut source = Source::open(&cfg.input)?;
     let info = source.info().clone();
-    let realtime = matches!(cfg.input, InputSpec::File { realtime: true, .. });
-    let mut rcfg = cfg.receiver.clone();
-    rcfg.channels = info.channels;
-    if cfg.input.is_iq() {
-        rcfg.input = InputFormat::Iq { swap: false };
-    }
-    let mut session = Session::new(rcfg);
+    let realtime = cfg.input.is_realtime();
+    // The receiver configuration of an input (the channels it has; a KiwiSDR is I/Q).
+    let receiver_for = |spec: &InputSpec, info: &SourceInfo| {
+        let mut rcfg = cfg.receiver.clone();
+        rcfg.channels = info.channels;
+        if spec.is_iq() {
+            rcfg.input = InputFormat::Iq { swap: false };
+        }
+        rcfg
+    };
+    let mut session = match &cfg.input {
+        InputSpec::Diversity(specs) => Session::new_diversity([
+            receiver_for(&specs[0], source.branch_info(0)),
+            receiver_for(&specs[1], source.branch_info(1)),
+        ]),
+        spec => Session::new(receiver_for(spec, &info)),
+    };
     // File playback paces the decoder to the sound card; live input relies on the
     // player's drift compensation.
     let mut audio = audio_out::AudioOut::new(cfg.play_audio, cfg.output_device.clone(), info.is_file, cfg.record_audio.clone())?;
@@ -274,7 +284,7 @@ fn worker(
             }
         }
 
-        let read = source.read(chunk_frames);
+        let read = source.read_branches(chunk_frames);
         for line in source.take_log() {
             log(line, &mut snap);
         }
@@ -293,22 +303,24 @@ fn worker(
                 return Err(e);
             }
         };
-        let Some(frames) = read else {
-            audio.finish()?;
-            if let Some(l) = logger.as_mut() {
-                l.finish(source.position_s(), &session, &snap)?;
+        // The frames of every branch (one, or two for diversity reception); at the end
+        // of the input, what diversity reception still holds back.
+        let (events, ended) = match read {
+            Some(branches) => {
+                if let Some(frames) = branches.iter().find(|f| !f.is_empty()) {
+                    let rms = (frames.iter().map(|v| v * v).sum::<f32>() / frames.len() as f32).sqrt();
+                    snap.input.level_dbfs = Some(20.0 * rms.max(1e-9).log10());
+                }
+                let mut events = Vec::new();
+                for (b, frames) in branches.iter().enumerate().filter(|(_, f)| !f.is_empty()) {
+                    events.extend(session.push_branch(b, frames));
+                }
+                (events, false)
             }
-            log(format!("end of input after {:.1} s", source.position_s()), &mut snap);
-            snap.audio_spectrum = fresh_audio_spectrum(&audio, last_audio_s, source.position_s());
-            publish(shared, &mut snap, &mut session, &source, &audio, true);
-            return Ok(());
+            None => (session.flush(), true),
         };
-        if !frames.is_empty() {
-            let rms = (frames.iter().map(|v| v * v).sum::<f32>() / frames.len() as f32).sqrt();
-            snap.input.level_dbfs = Some(20.0 * rms.max(1e-9).log10());
-        }
         let t = source.position_s();
-        for ev in session.push(&frames) {
+        for ev in events {
             if let Some(l) = logger.as_mut() {
                 log_event(l, t, &ev)?;
             }
@@ -339,6 +351,16 @@ fn worker(
                     snap.selected_service = session.selected_service();
                 }
             }
+        }
+        if ended {
+            audio.finish()?;
+            if let Some(l) = logger.as_mut() {
+                l.finish(source.position_s(), &session, &snap)?;
+            }
+            log(format!("end of input after {:.1} s", source.position_s()), &mut snap);
+            snap.audio_spectrum = fresh_audio_spectrum(&audio, last_audio_s, source.position_s());
+            publish(shared, &mut snap, &mut session, &source, &audio, true);
+            return Ok(());
         }
 
         let st = &session.audio_stats;
@@ -409,6 +431,8 @@ fn publish(
     snap.input.position_s = source.position_s();
     snap.input.finished = finished;
     snap.input.kiwi = source.kiwi_status();
+    snap.input.kiwi2 = source.kiwi_status_of(1);
+    snap.diversity = session.diversity().map(|(stats, branches)| DiversityView { stats, branches });
     let st = &session.audio_stats;
     snap.audio.codec = st.codec.clone();
     snap.audio.frames_ok = st.frames_ok;

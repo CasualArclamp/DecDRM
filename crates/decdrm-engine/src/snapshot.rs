@@ -44,8 +44,18 @@ pub struct InputStatus {
     /// RMS input level in dBFS (`None` before the first samples arrive).
     pub level_dbfs: Option<f32>,
     pub finished: bool,
-    /// A KiwiSDR input's connection (state, S-meter, receiver name, ...).
+    /// A KiwiSDR input's connection (state, S-meter, receiver name, ...); for
+    /// diversity reception the first branch's.
     pub kiwi: Option<decdrm_kiwi::KiwiStatus>,
+    /// Diversity reception: the second KiwiSDR's connection.
+    pub kiwi2: Option<decdrm_kiwi::KiwiStatus>,
+}
+
+/// Diversity reception: the combiner's counts and each branch's receiver status.
+#[derive(Debug, Clone, Default)]
+pub struct DiversityView {
+    pub stats: decdrm_core::rx::DiversityStats,
+    pub branches: [RxStatus; 2],
 }
 
 /// One service of the multiplex as the UI lists it.
@@ -199,6 +209,8 @@ pub struct Snapshot {
     pub time: Option<BroadcastTime>,
     /// Alternative frequencies, schedules and regions from the SDC, one line each.
     pub afs: Vec<String>,
+    /// Diversity reception: the combiner's counts and both branches' status.
+    pub diversity: Option<DiversityView>,
     /// The figures every [`METRICS_INTERVAL_S`] of input, the last [`RECENT_METRICS`]
     /// of them, oldest first. A UI keeping a longer history appends the samples newer
     /// than the last one it has, so it gets every sample whatever the decoding speed.

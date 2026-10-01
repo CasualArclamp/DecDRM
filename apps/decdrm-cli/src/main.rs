@@ -20,9 +20,11 @@ struct Cli {
     cmd: Cmd,
 }
 
+// Parsed once at start-up, so the size of the receive arguments does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Cmd {
-    /// Receive from a recording or a sound card.
+    /// Receive from a recording, a sound card or KiwiSDRs.
     Rx(RxArgs),
     /// Transmit: run the station described by a TOML file.
     Tx(tx::TxArgs),
@@ -50,6 +52,10 @@ struct RxArgs {
     /// Kiwi's I/Q; --format does not apply.
     #[arg(long, value_name = "ADDRESS", conflicts_with_all = ["file", "device", "default_device"])]
     kiwi: Option<String>,
+    /// Diversity reception: a second KiwiSDR on the same frequency (far from the first,
+    /// so their signals fade independently); the two are combined before decoding.
+    #[arg(long, value_name = "ADDRESS", requires = "kiwi")]
+    kiwi2: Option<String>,
     /// Frequency to tune the KiwiSDR to, kHz: the DRM frequency.
     #[arg(long, value_name = "KHZ", requires = "kiwi")]
     freq: Option<f64>,
@@ -171,15 +177,20 @@ fn rx(a: RxArgs) -> Result<()> {
     let input = match (&a.file, &a.device, a.default_device, &a.kiwi) {
         (_, _, _, Some(k)) => {
             use decdrm_engine::decdrm_kiwi::{KiwiAddress, KiwiConfig, frequency_from_url};
-            let address = KiwiAddress::parse(k)?;
             let freq = a
                 .freq
                 .or_else(|| frequency_from_url(k))
                 .ok_or_else(|| anyhow::anyhow!("give the frequency to tune the KiwiSDR to with --freq KHZ"))?;
-            let mut cfg = KiwiConfig::new(address, freq);
-            cfg.password = a.kiwi_password.clone().unwrap_or_default();
-            cfg.ident = a.kiwi_name.clone();
-            InputSpec::Kiwi(cfg)
+            let kiwi = |address: &str| -> Result<InputSpec> {
+                let mut cfg = KiwiConfig::new(KiwiAddress::parse(address)?, freq);
+                cfg.password = a.kiwi_password.clone().unwrap_or_default();
+                cfg.ident = a.kiwi_name.clone();
+                Ok(InputSpec::Kiwi(cfg))
+            };
+            match &a.kiwi2 {
+                Some(k2) => InputSpec::Diversity(Box::new([kiwi(k)?, kiwi(k2)?])),
+                None => kiwi(k)?,
+            }
         }
         (Some(p), _, _, None) => InputSpec::File { path: p.clone(), realtime: a.realtime || a.play },
         (None, Some(d), _, None) => InputSpec::Device { name: Some(d.clone()), channels: None },
@@ -272,8 +283,33 @@ fn rx(a: RxArgs) -> Result<()> {
         s.audio.frames_ok,
         s.audio.frames_bad
     );
+    if let Some(d) = &s.diversity {
+        println!("{}", diversity_line(d));
+    }
     engine.command(Command::Stop);
     Ok(())
+}
+
+/// The combiner's counts and both branches' SNR, for the status line and the summary.
+fn diversity_line(d: &decdrm_engine::DiversityView) -> String {
+    let st = &d.stats;
+    let snr = |b: usize| d.branches[b].snr_db.map_or_else(|| "-".into(), |x| format!("{x:.1} dB"));
+    let share = st.share.map_or_else(String::new, |w| format!(", weights {:.0}/{:.0} %", 100.0 * w, 100.0 * (1.0 - w)));
+    let lead = match st.lead_frames {
+        Some(l) if l > 0 => format!(", KiwiSDR 1 {:.1} s ahead", l as f64 * 0.4),
+        Some(l) if l < 0 => format!(", KiwiSDR 2 {:.1} s ahead", -l as f64 * 0.4),
+        Some(_) => ", in step".to_string(),
+        None => ", not paired yet".to_string(),
+    };
+    format!(
+        "diversity: {} frames combined, {} / {} from one KiwiSDR alone, {} lost; SNR {} / {}{share}{lead}",
+        st.combined,
+        st.single[0],
+        st.single[1],
+        st.lost,
+        snr(0),
+        snr(1)
+    )
 }
 
 fn print_status(s: &decdrm_engine::Snapshot) {
@@ -293,12 +329,15 @@ fn print_status(s: &decdrm_engine::Snapshot) {
         r.delay_ms,
         r.sro_hz
     );
-    if let Some(k) = &s.input.kiwi {
+    for k in s.input.kiwi.iter().chain(&s.input.kiwi2) {
         let rssi = k.rssi_dbm.map_or_else(|| "-".into(), |r| format!("{r:.1}"));
         let name = k.name.as_deref().map(|n| format!(" \"{n}\"")).unwrap_or_default();
         let overflow = if k.adc_overflows > 0 { format!(", ADC overloads {}", k.adc_overflows) } else { String::new() };
         let reconnects = if k.reconnects > 0 { format!(", reconnected {}x", k.reconnects) } else { String::new() };
         println!("          KiwiSDR {}{name} {} at {:.3} kHz, S-meter {rssi} dBm{overflow}{reconnects}", k.address, k.state, k.freq_khz);
+    }
+    if let Some(d) = &s.diversity {
+        println!("          {}", diversity_line(d));
     }
     if let Some(t) = &s.time_utc {
         println!("          broadcast time {t}");

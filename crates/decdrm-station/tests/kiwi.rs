@@ -104,6 +104,63 @@ fn retuning_keeps_the_connection_and_starts_afresh() {
     assert_eq!(kiwi.connections(), 1, "retuned on the same connection");
 }
 
+/// Diversity reception through two stand-in KiwiSDRs serving the same station with
+/// independent noise: both connect, the frames are combined, and audio decodes.
+#[test]
+fn diversity_through_two_kiwisdrs() {
+    let clean = kiwi_signal();
+    let blocks = clean.len() / 512;
+    // Each Kiwi's own noise, ~20 dB below the signal.
+    let noisy = |seed: u64| -> Vec<(i16, i16)> {
+        let mut rng = decdrm_core::channel::Rng::new(seed);
+        let rms = (clean.iter().map(|&(i, q)| f64::from(i).powi(2) + f64::from(q).powi(2)).sum::<f64>() / clean.len() as f64).sqrt();
+        let sigma = rms * 0.1 / std::f64::consts::SQRT_2;
+        let q = |v: f64| v.round().clamp(-32768.0, 32767.0) as i16;
+        clean.iter().map(|&(i, qd)| (q(f64::from(i) + sigma * rng.gaussian()), q(f64::from(qd) + sigma * rng.gaussian()))).collect()
+    };
+    let start = |iq: Vec<(i16, i16)>, name: &str| {
+        MockKiwi::start(MockConfig {
+            iq: Arc::new(iq),
+            name: Some(name.into()),
+            sessions: vec![MockSession::Stream { blocks: Some(blocks), end: MockEnd::Close }],
+            ..MockConfig::default()
+        })
+        .unwrap()
+    };
+    let (a, b) = (start(noisy(1), "Kiwi A"), start(noisy(2), "Kiwi B"));
+    let spec = |k: &MockKiwi| InputSpec::Kiwi(KiwiConfig::new(KiwiAddress::parse(&k.address()).unwrap(), 6140.0));
+    let input = InputSpec::Diversity(Box::new([spec(&a), spec(&b)]));
+    let engine = Engine::start(EngineConfig { input, ..EngineConfig::default() });
+    let started = Instant::now();
+    let (mut log, mut error) = (Vec::new(), None);
+    while started.elapsed() < Duration::from_secs(90) {
+        match engine.recv_event(Duration::from_millis(100)) {
+            Some(EngineEvent::Log(l)) => log.push(l),
+            Some(EngineEvent::Stopped { error: e }) => {
+                error = e;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let snap = engine.snapshot();
+    for l in &log {
+        println!("{l}");
+    }
+    let d = snap.diversity.clone().expect("diversity view");
+    println!("audio {} ok / {} concealed; {:?}; ended: {error:?}", snap.audio.frames_ok, snap.audio.frames_bad, d.stats);
+    // Both stand-ins close after the signal: both branches end, with their reasons.
+    assert!(error.as_deref().is_some_and(|e| e.contains("closed the connection")), "{error:?}");
+    assert!(log.iter().any(|l| l.starts_with("KiwiSDR 1:")) && log.iter().any(|l| l.starts_with("KiwiSDR 2:")), "{log:?}");
+    assert!(log.iter().any(|l| l.contains("branch 2: signal found")), "{log:?}");
+    let (k1, k2) = (snap.input.kiwi.expect("first Kiwi"), snap.input.kiwi2.expect("second Kiwi"));
+    assert_eq!((k1.name.as_deref(), k2.name.as_deref()), (Some("Kiwi A"), Some("Kiwi B")));
+    assert!(d.stats.combined >= 30, "{:?}", d.stats);
+    assert!(d.branches.iter().all(|s| s.snr_db.is_some_and(|x| x > 10.0)), "{:?}", d.branches.map(|s| s.snr_db));
+    assert!(snap.audio.frames_ok >= 150 && snap.audio.frames_bad <= 2, "{} ok, {} concealed", snap.audio.frames_ok, snap.audio.frames_bad);
+    assert_eq!(snap.services.first().map(|s| s.label.as_str()), Some("Kiwi Test"));
+}
+
 #[test]
 fn decodes_a_station_through_a_kiwisdr() {
     let iq = kiwi_signal();
