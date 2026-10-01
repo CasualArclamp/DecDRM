@@ -206,8 +206,10 @@ impl Entry {
             || (self.runs_on(today.add_days(-1)) && (start..end).contains(&(minute + DAY_MIN)))
     }
 
-    /// Dream's station state at `t`, with a preview of `preview_min` minutes for
-    /// broadcasts about to start (0 = none). Evaluated minute by minute, as Dream does.
+    /// Dream's station state at `t` (`CStationsItem::stateAt`), with a preview of
+    /// `preview_min` minutes for broadcasts about to start (0 = none). Dream steps
+    /// through the preview minute by minute; looking at the next start is the same and
+    /// cheaper for EiBi's thousands of entries.
     pub fn state_at(&self, t: UtcTime, preview_min: u32) -> AirState {
         if self.is_on_air(t) {
             if self.is_on_air(t.plus_minutes(ENDING_SOON_MIN.into())) {
@@ -215,11 +217,22 @@ impl Entry {
             } else {
                 AirState::EndingSoon
             }
-        } else if (1..=preview_min).any(|m| self.is_on_air(t.plus_minutes(m.into()))) {
+        } else if self.starts_within(t, preview_min) {
             AirState::StartingSoon
         } else {
             AirState::Off
         }
+    }
+
+    /// Whether a broadcast starts after `t` and at most `minutes` later (today's or
+    /// tomorrow's start, on a day it runs).
+    pub fn starts_within(&self, t: UtcTime, minutes: u32) -> bool {
+        let (today, minute) = (t.date(), t.minute_of_day());
+        let start = u32::from(self.start);
+        // Start minutes counted from today's 00:00.
+        [(today, start), (today.add_days(1), start + DAY_MIN)]
+            .into_iter()
+            .any(|(day, s)| s > minute && s <= minute + minutes && self.runs_on(day))
     }
 
     /// Whether the frequency is within `tolerance_khz` of `khz`.
@@ -500,6 +513,14 @@ mod tests {
             all_day.state_at(at("2026-10-01T23:55Z"), 15),
             AirState::OnAir
         );
+        // Starting soon after midnight, only when the next day is one of its days
+        // (2026-10-04 is a Sunday, 10-02 a Friday).
+        let weekdays = entry("0000-0100", MO_FR);
+        let soon = |t| weekdays.state_at(at(t), 15);
+        assert_eq!(soon("2026-10-04T23:50Z"), AirState::StartingSoon);
+        assert_eq!(soon("2026-10-02T23:50Z"), AirState::Off);
+        assert!(weekdays.starts_within(at("2026-10-04T23:45Z"), 15));
+        assert!(!weekdays.starts_within(at("2026-10-04T23:44Z"), 15));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! broadcast season with every known shortwave transmission, read the way Dream's
 //! Stations dialog reads it for its AM mode (`CSchedule::ReadCSVFile`,
 //! `src/GUI-QT/Schedule.cpp`, codes expanded with the tables of
-//! `src/tables/TableStations.cpp`, see [`crate::eibi_tables`]).
+//! `src/tables/TableStations.cpp`, generated into this crate's `eibi_tables.rs`).
 //!
 //! ```text
 //! kHz:75;Time(UTC):93;Days:59;ITU:49;Station:201;Lng:49;Target:62;Remarks:135;P:35;Start:60;Stop:60;

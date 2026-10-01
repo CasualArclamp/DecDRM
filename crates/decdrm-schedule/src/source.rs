@@ -11,7 +11,8 @@
 //! (`http://www.eibispace.de/dx/sked-{season}.csv`, stored as `sked-a26.csv` …) — and
 //! `dream` — the DRMDX schedule Dream downloads ([`dream::SCHEDULE_URL`], stored as
 //! `DRMSchedule.ini`, so Dream's own file can be copied in). `sources.toml` in the
-//! directory adds sources or replaces defaults of the same name:
+//! directory adds sources, or changes the defaults of the same name (title and file
+//! name are kept unless given):
 //!
 //! ```toml
 //! [[source]]
@@ -19,7 +20,8 @@
 //! title = "My DRM list"                # shown in the GUI (optional)
 //! format = "eibi"                      # "eibi" (EiBi CSV) or "dream" (DRMSchedule.ini)
 //! url = "https://example.org/drm.csv"  # {season} = the current season, e.g. a26
-//! file = "drm.csv"                     # local file name (optional; {season} allowed)
+//! file = "drm.csv"                     # local file name (optional, {season} allowed;
+//!                                      # default: mylist.csv, mylist-a26.csv)
 //! ```
 //!
 //! Downloads ([`update`]) happen only on request, into a temporary file that replaces
@@ -50,9 +52,9 @@ pub struct Source {
     pub format: Format,
     /// Download URL; `{season}` is replaced by the current season (`a26`).
     pub url: String,
-    /// Local file name (`{season}` allowed); default: the URL's file name if it has a
-    /// `.csv`, `.ini` or `.txt` extension, else the source name with the format's
-    /// extension.
+    /// Local file name (`{season}` allowed); default: the source name with the format's
+    /// extension, plus `-{season}` when the URL depends on the season (`mylist.csv`,
+    /// `mylist-a26.csv`) — so no two sources share a file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
 }
@@ -69,7 +71,7 @@ pub fn default_sources() -> Vec<Source> {
         },
         Source {
             name: "dream".into(),
-            title: Some("Dream / DRMDX (DRMSchedule.ini)".into()),
+            title: Some("Dream (DRMDX)".into()),
             format: Format::Dream,
             url: dream::SCHEDULE_URL.into(),
             file: Some(dream::FILE_NAME.into()),
@@ -88,20 +90,16 @@ impl Source {
         if let Some(f) = self.file.as_deref().filter(|f| !f.trim().is_empty()) {
             return f.trim().to_string();
         }
-        let path = self.url.split(['?', '#']).next().unwrap_or("");
-        let last = path.rsplit('/').next().unwrap_or("");
-        let has_ext = [".csv", ".ini", ".txt"]
-            .iter()
-            .any(|e| last.to_ascii_lowercase().ends_with(e));
-        if has_ext && last.len() > 4 {
-            sanitize(last)
+        let ext = match self.format {
+            Format::Eibi => "csv",
+            Format::Dream => "ini",
+        };
+        let season = if self.url.contains(SEASON_PLACEHOLDER) {
+            "-{season}"
         } else {
-            let ext = match self.format {
-                Format::Eibi => "csv",
-                Format::Dream => "ini",
-            };
-            format!("{}.{ext}", sanitize(&self.name))
-        }
+            ""
+        };
+        format!("{}{season}.{ext}", sanitize(&self.name))
     }
 
     /// Whether URL or file name depend on the season.
@@ -154,11 +152,12 @@ impl Source {
     }
 }
 
-/// Keep letters, digits, `.`, `-`, `_` and `{season}`'s braces; anything else becomes `_`.
+/// A source name made safe as a file name: letters, digits, `.`, `-`, `_`; anything
+/// else becomes `_`.
 fn sanitize(name: &str) -> String {
     name.chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || "._-{}".contains(c) {
+            if c.is_ascii_alphanumeric() || "._-".contains(c) {
                 c
             } else {
                 '_'
@@ -191,7 +190,7 @@ struct SourcesFile {
     sources: Vec<Source>,
 }
 
-/// The sources: the defaults, with those of `dir/sources.toml` (if present) replacing
+/// The sources: the defaults, with those of `dir/sources.toml` (if present) changing
 /// defaults of the same name or added after them. A file that cannot be read leaves the
 /// defaults, with a warning to show.
 pub fn load_sources(dir: &Path) -> (Vec<Source>, Option<String>) {
@@ -227,7 +226,15 @@ fn merge_sources(text: &str) -> Result<Vec<Source>, String> {
             .iter_mut()
             .find(|d| d.name.eq_ignore_ascii_case(&s.name))
         {
-            Some(existing) => *existing = s,
+            // A changed default keeps its title and file name unless they are given.
+            Some(existing) => {
+                let (title, file) = (existing.title.take(), existing.file.take());
+                *existing = Source {
+                    title: s.title.or(title),
+                    file: s.file.or(file),
+                    ..s
+                };
+            }
             None => sources.push(s),
         }
     }
@@ -391,29 +398,30 @@ mod tests {
     }
 
     #[test]
-    fn file_names_from_urls() {
-        let src = |url: &str, format| Source {
+    fn local_file_names() {
+        let src = |url: &str, format, file: Option<&str>| Source {
             name: "my list".into(),
             title: None,
             format,
             url: url.into(),
-            file: None,
+            file: file.map(String::from),
         };
+        let file = |s: Source| s.file_at(d(2026, 6, 1));
+        // From the source name, never from the URL (two sources must not share a file).
         assert_eq!(
-            src("https://x.org/a/drm.csv?x=1", Format::Eibi).file_at(d(2026, 1, 1)),
-            "drm.csv"
+            file(src("https://x.org/a/drm.csv?x=1", Format::Eibi, None)),
+            "my_list.csv"
         );
         assert_eq!(
-            src("https://x.org/cgi?get=list", Format::Dream).file_at(d(2026, 1, 1)),
+            file(src("https://x.org/cgi?get=list", Format::Dream, None)),
             "my_list.ini"
         );
+        let seasonal = src("https://x.org/sked-{season}.csv", Format::Eibi, None);
+        assert!(seasonal.is_seasonal());
+        assert_eq!(file(seasonal), "my_list-a26.csv");
         assert_eq!(
-            src("https://x.org/sked-{season}.csv", Format::Eibi).file_at(d(2026, 6, 1)),
-            "sked-a26.csv"
-        );
-        assert_eq!(
-            src("https://x.org/", Format::Eibi).file_at(d(2026, 6, 1)),
-            "my_list.csv"
+            file(src("https://x.org/", Format::Eibi, Some("x-{season}.csv"))),
+            "x-a26.csv"
         );
     }
 
@@ -435,10 +443,11 @@ url = "https://example.org/DRM.ini"
         assert_eq!(s.len(), 3);
         assert_eq!(s[0].url, "https://mirror.example/sked-{season}.csv");
         assert_eq!(
-            s[0].file_at(d(2026, 10, 1)),
-            "sked-a26.csv",
-            "file name from the URL"
+            (s[0].file_at(d(2026, 10, 1)).as_str(), s[0].label()),
+            ("sked-a26.csv", "EiBi (eibispace.de)"),
+            "a changed default keeps its file name and title"
         );
+        assert_eq!(s[2].file_at(d(2026, 10, 1)), "mine.ini");
         assert_eq!(s[1].name, "dream");
         assert_eq!((s[2].label(), s[2].format), ("My list", Format::Dream));
         assert!(
