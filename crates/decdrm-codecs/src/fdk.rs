@@ -67,7 +67,7 @@ fn fdk_error_name(code: i32) -> &'static str {
     }
 }
 
-fn dec_err(code: i32, context: &'static str) -> CodecError {
+pub(crate) fn dec_err(code: i32, context: &'static str) -> CodecError {
     CodecError::Fdk {
         code,
         name: fdk_error_name(code),
@@ -75,7 +75,7 @@ fn dec_err(code: i32, context: &'static str) -> CodecError {
     }
 }
 
-fn enc_err(code: i32, context: &'static str) -> CodecError {
+pub(crate) fn enc_err(code: i32, context: &'static str) -> CodecError {
     let name = match code {
         ffi::AACENC_INVALID_HANDLE => "invalid handle",
         ffi::AACENC_MEMORY_ERROR => "memory error",
@@ -185,6 +185,23 @@ pub struct AacStreamInfo {
     pub output_delay: u32,
 }
 
+/// The parts of FDK's `CStreamInfo` that DecDRM uses (shared with [`crate::adts`]).
+pub(crate) fn stream_info_from(si: &ffi::CStreamInfo) -> AacStreamInfo {
+    AacStreamInfo {
+        sample_rate: si.sampleRate.max(0) as u32,
+        frame_size: si.frameSize.max(0) as usize,
+        channels: si.numChannels.clamp(0, 8) as u16,
+        core_sample_rate: si.aacSampleRate.max(0) as u32,
+        core_channels: si.aacNumChannels.clamp(0, 8) as u16,
+        sbr: si.flags & ffi::AC_SBR_PRESENT != 0 || si.extAot == ffi::AOT_SBR,
+        ps: si.flags & ffi::AC_PS_PRESENT != 0 || si.aot == ffi::AOT_DRM_MPEG_PS,
+        usac: si.aot == ffi::AOT_USAC
+            || si.aot == ffi::AOT_DRM_USAC
+            || si.flags & ffi::AC_USAC != 0,
+        output_delay: si.outputDelay,
+    }
+}
+
 /// DRM AAC / xHE-AAC decoder (FDK-AAC with transport `TT_DRM`), configured from the SDC
 /// type-9 audio information exactly as Dream's `FdkAacCodec::DecOpen()` does.
 pub struct FdkDrmDecoder {
@@ -280,23 +297,7 @@ impl FdkDrmDecoder {
 
     /// Stream information as currently known to FDK (after configuration or decoding).
     pub fn stream_info(&self) -> Option<AacStreamInfo> {
-        let si = self.raw_stream_info()?;
-        let core = si.aacSampleRate.max(0) as u32;
-        let sbr = si.flags & ffi::AC_SBR_PRESENT != 0 || si.extAot == ffi::AOT_SBR;
-        let ps = si.flags & ffi::AC_PS_PRESENT != 0 || si.aot == ffi::AOT_DRM_MPEG_PS;
-        Some(AacStreamInfo {
-            sample_rate: si.sampleRate.max(0) as u32,
-            frame_size: si.frameSize.max(0) as usize,
-            channels: si.numChannels.clamp(0, 8) as u16,
-            core_sample_rate: core,
-            core_channels: si.aacNumChannels.clamp(0, 8) as u16,
-            sbr,
-            ps,
-            usac: si.aot == ffi::AOT_USAC
-                || si.aot == ffi::AOT_DRM_USAC
-                || si.flags & ffi::AC_USAC != 0,
-            output_delay: si.outputDelay,
-        })
+        self.raw_stream_info().map(|si| stream_info_from(&si))
     }
 
     /// Output geometry expected from the configuration alone, used for silence when FDK

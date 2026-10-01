@@ -43,6 +43,12 @@
 //! the [`AudioInfo`] to put into SDC entity 9, so a loopback test can open the decoder
 //! exactly as a receiver would.
 //!
+//! # Internet radio
+//!
+//! [`FdkAdtsDecoder`] decodes AAC streams in ADTS frames (AAC-LC, HE-AAC, HE-AAC v2) for
+//! the transmitter's web stream input; [`FdkAdtsEncoder`] makes such streams for tests.
+//! Opus streams decode with [`OpusDrmDecoder`] (without the CRC byte).
+//!
 //! # Notes on the Rust idioms used
 //!
 //! * The codec handles are C pointers owned by small wrapper structs. Their `Drop`
@@ -57,6 +63,7 @@
 //! * `Result<T, CodecError>` is returned instead of throwing; `?` propagates errors.
 
 mod aac;
+pub mod adts;
 mod bits;
 pub mod crc;
 pub mod fdk;
@@ -64,6 +71,7 @@ pub mod opus;
 pub mod sdc;
 pub mod xhe_enc;
 
+pub use adts::{FdkAdtsDecoder, FdkAdtsEncoder};
 pub use fdk::{
     AacProfile, AacStreamInfo, DrmAacFrame, FdkDrmDecoder, FdkDrmEncoder, FdkEncoderConfig,
     FdkLibInfo, fdk_lib_info,
