@@ -154,7 +154,8 @@ messages, data objects and log lines as events.
 
 ## Licence
 
-GPL-2.0-or-later (it derives from Dream, which is GPL). The vendored libxaac (xHE-AAC
+GPL-2.0-or-later (it derives from Dream, which is GPL); the licence text is in
+[`LICENSE`](LICENSE). The vendored libxaac (xHE-AAC
 encoder) is Apache-2.0, which is compatible with GPLv3 but not GPLv2, so binaries that
 include it are distributed under GPL-3.0; its LICENSE and NOTICE must ship with them.
 The vendored FDK-AAC library has its own licence (see `third_party/fdk-aac/NOTICE`),
