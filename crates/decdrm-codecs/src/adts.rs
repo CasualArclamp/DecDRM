@@ -145,16 +145,25 @@ impl FdkAdtsDecoder {
     }
 
     /// The coding: `"AAC-LC"`, `"HE-AAC"` or `"HE-AAC v2"` (after the first decoded frame).
+    ///
+    /// FDK decodes a mono HE-AAC stream to two identical channels (ready for parametric
+    /// stereo, which ADTS cannot announce), so PS is recognised by FDK's flag, which it
+    /// sets once it has decoded PS data, not by the output's channel count.
     pub fn coding(&self) -> Option<&'static str> {
         let si = self.stream_info()?;
-        // Parametric stereo: a mono core decoded to stereo.
-        let ps = si.ps || (si.channels == 2 && si.core_channels == 1);
         let sbr = si.sbr || si.sample_rate > si.core_sample_rate;
-        Some(match (sbr, ps) {
+        Some(match (sbr, si.ps) {
             (true, true) => "HE-AAC v2",
             (true, false) => "HE-AAC",
             _ => "AAC-LC",
         })
+    }
+
+    /// Channels of the stream (rather than of the output): 2 with parametric stereo,
+    /// else those of the AAC core (a mono HE-AAC stream is 1 although FDK delivers 2).
+    pub fn stream_channels(&self) -> Option<u16> {
+        let si = self.stream_info()?;
+        Some(if si.ps { 2 } else { si.core_channels.max(1) })
     }
 }
 
@@ -308,10 +317,12 @@ mod tests {
     /// right rate and channel count, with the tone's frequency and level.
     #[test]
     fn adts_round_trip() {
-        for (profile, rate, channels, bitrate, want) in [
-            (AacProfile::Lc, 48_000, 1, 64_000, "AAC-LC"),
-            (AacProfile::HeAac, 44_100, 2, 48_000, "HE-AAC"),
-            (AacProfile::HeAacV2, 48_000, 2, 32_000, "HE-AAC v2"),
+        // FDK delivers mono HE-AAC as two identical channels (ready for PS).
+        for (profile, rate, channels, bitrate, want, out_channels) in [
+            (AacProfile::Lc, 48_000, 1, 64_000, "AAC-LC", 1),
+            (AacProfile::HeAac, 44_100, 2, 48_000, "HE-AAC", 2),
+            (AacProfile::HeAac, 48_000, 1, 32_000, "HE-AAC", 2),
+            (AacProfile::HeAacV2, 48_000, 2, 32_000, "HE-AAC v2", 2),
         ] {
             let mut enc = FdkAdtsEncoder::new(profile, rate, channels, bitrate).unwrap();
             let mut dec = FdkAdtsDecoder::new().unwrap();
@@ -340,7 +351,8 @@ mod tests {
                 }
             }
             assert_eq!(dec.coding(), Some(want), "{profile:?}");
-            assert_eq!((out_rate, out_ch), (rate, channels), "{profile:?}");
+            assert_eq!(dec.stream_channels(), Some(channels as u16), "{profile:?}");
+            assert_eq!((out_rate, out_ch), (rate, out_channels), "{profile:?}");
             // The last 0.5 s: RMS of a sine of amplitude 0.3 is 0.212.
             let tail = &decoded[decoded.len() - rate as usize / 2..];
             let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
