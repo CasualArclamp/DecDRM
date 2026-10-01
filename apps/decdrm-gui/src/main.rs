@@ -6,8 +6,8 @@
 //! * [`receiver`] — engine handle, snapshot polling and event dispatch;
 //! * [`transmitter`] — the station on a worker thread, and its snapshots;
 //! * [`indicators`], [`plots`], [`waterfall`], [`history`], [`data`], [`epg`],
-//!   [`website`], [`tx_config`], [`spectrum`] — view models and helpers (pure logic,
-//!   unit-tested);
+//!   [`website`], [`tx_config`], [`spectrum`], [`schedule`] — view models and helpers
+//!   (pure logic, unit-tested);
 //! * [`panels`] — drawing code, one module per screen area;
 //! * [`settings`] — the settings remembered between runs.
 
@@ -24,6 +24,7 @@ mod indicators;
 mod panels;
 mod plots;
 mod receiver;
+mod schedule;
 mod settings;
 mod spectrum;
 mod transmitter;

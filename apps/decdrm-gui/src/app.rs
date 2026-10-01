@@ -18,7 +18,8 @@ use crate::panels::tx_page::TxPage;
 use crate::panels::website::WebsiteView;
 use crate::panels::{self, heading};
 use crate::receiver::{FETCH_INTERVAL, RxSession};
-use crate::settings::{DataTab, Page, Settings, SettingsStore, SignalFormat, ThemeChoice};
+use crate::schedule::ScheduleView;
+use crate::settings::{DataTab, Page, PlotTab, Settings, SettingsStore, SignalFormat, ThemeChoice};
 use crate::transmitter::TxSession;
 use crate::tx_config;
 use eframe::egui::{self, RichText, Ui};
@@ -94,6 +95,8 @@ pub struct DecDrmApp {
     website: WebsiteView,
     epg: EpgView,
     waterfall: WaterfallTexture,
+    /// The Schedule tab (its files are read and downloaded on a background thread).
+    schedule: ScheduleView,
     automation: Automation,
     /// No sound-card output in this run (`--no-audio`): no audio playback and no
     /// transmitting to a sound card, whatever the saved settings say.
@@ -141,6 +144,11 @@ impl DecDrmApp {
         if (args.station.is_some() || args.transmit) && !args.start {
             settings.page = Page::Transmitter;
         }
+        // Starts reading the local schedule in the background (never downloads).
+        let schedule = ScheduleView::new(
+            crate::schedule::default_dir(store.path()),
+            &settings.schedule.source,
+        );
         cc.egui_ctx.set_theme(settings.theme.preference());
         let applied_theme = Some(settings.theme);
         let now = Instant::now();
@@ -157,6 +165,7 @@ impl DecDrmApp {
             website: WebsiteView::default(),
             epg: EpgView::default(),
             waterfall: WaterfallTexture::default(),
+            schedule,
             automation: Automation {
                 quit_at: exit_after.map(|s| now + Duration::from_secs_f64(s.clamp(0.0, 3600.0))),
                 screenshot: args.screenshot.clone(),
@@ -187,6 +196,12 @@ impl DecDrmApp {
                 self.slideshow.clear();
                 self.notice = None;
                 self.rx.start(cfg, self.settings.source_label());
+                // Log what the schedule has on the frequency being received (typed in
+                // the Schedule tab, or in the recording's file name).
+                if let Some(r) = crate::schedule::reception(&self.settings) {
+                    let all = self.settings.schedule.all_broadcasts;
+                    self.schedule.note_reception(r, all);
+                }
             }
             Err(e) => {
                 self.rx.log.push(format!("cannot start: {e}"));
@@ -267,6 +282,16 @@ impl DecDrmApp {
                 &mut self.waterfall,
                 &self.rx.history,
             );
+            // The Schedule tab shares the plot area's tab bar.
+            if self.settings.plot_tab == PlotTab::Schedule {
+                let reception = crate::schedule::reception(&self.settings);
+                panels::schedule::show(
+                    ui,
+                    &mut self.schedule,
+                    &mut self.settings.schedule,
+                    reception,
+                );
+            }
         });
     }
 
@@ -330,6 +355,12 @@ impl eframe::App for DecDrmApp {
         let now = Instant::now();
         self.rx.poll(now);
         self.tx.poll(now);
+        if self.schedule.poll() {
+            ctx.request_repaint();
+        }
+        for line in self.schedule.take_log() {
+            self.rx.log.push(line);
+        }
 
         // Fonts for non-Latin scripts in what was received or is being edited.
         self.fonts.note(&std::mem::take(&mut self.rx.text_seen));
@@ -359,9 +390,14 @@ impl eframe::App for DecDrmApp {
         }
         self.automation.tick(ctx, now, &mut self.rx.log);
 
-        // Repaint policy: ~10 Hz while the engine runs (or an unattended run waits),
-        // otherwise only on user input.
-        if self.rx.is_running() || self.tx.is_running() || self.automation.active() {
+        // Repaint policy: ~10 Hz while the engine runs, a schedule job works (to collect
+        // its result) or an unattended run waits, otherwise only on user input (the
+        // Schedule tab adds a repaint on each minute, for its clock).
+        if self.rx.is_running()
+            || self.tx.is_running()
+            || self.schedule.busy()
+            || self.automation.active()
+        {
             ctx.request_repaint_after(FETCH_INTERVAL);
         }
     }

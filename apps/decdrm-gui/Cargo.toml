@@ -30,6 +30,7 @@ decdrm-engine = { path = "../../crates/decdrm-engine" }
 decdrm-core = { path = "../../crates/decdrm-core" }
 decdrm-data = { path = "../../crates/decdrm-data" }
 decdrm-io = { path = "../../crates/decdrm-io" }
+decdrm-schedule = { path = "../../crates/decdrm-schedule" }
 decdrm-station = { path = "../../crates/decdrm-station" }
 # Only to switch on its `embed-weights` feature.
 decdrm-encodec = { path = "../../crates/decdrm-encodec", optional = true }

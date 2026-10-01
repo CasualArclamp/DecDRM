@@ -137,10 +137,13 @@ pub enum PlotTab {
     Snr,
     /// Reception figures and error rates of the last minutes.
     History,
+    /// Broadcast schedule: the DRM stations on the air (not a plot; see
+    /// `panels::schedule`).
+    Schedule,
 }
 
 impl PlotTab {
-    pub const ALL: [PlotTab; 9] = [
+    pub const ALL: [PlotTab; 10] = [
         Self::Overview,
         Self::Spectrum,
         Self::Waterfall,
@@ -150,6 +153,7 @@ impl PlotTab {
         Self::Impulse,
         Self::Snr,
         Self::History,
+        Self::Schedule,
     ];
 
     pub fn label(self) -> &'static str {
@@ -163,6 +167,7 @@ impl PlotTab {
             Self::Impulse => "Impulse response",
             Self::Snr => "SNR per carrier",
             Self::History => "History",
+            Self::Schedule => "Schedule",
         }
     }
 }
@@ -276,6 +281,8 @@ pub struct Settings {
     /// Stop transmitting after [`Settings::tx_duration_s`] seconds of signal.
     pub tx_duration_enabled: bool,
     pub tx_duration_s: f64,
+    /// The Schedule tab's options (a `[schedule]` table in the file).
+    pub schedule: crate::schedule::ScheduleSettings,
 }
 
 pub use decdrm_engine::volume_gain;
@@ -306,6 +313,7 @@ impl Default for Settings {
             tx_output_device: None,
             tx_duration_enabled: true,
             tx_duration_s: 60.0,
+            schedule: crate::schedule::ScheduleSettings::default(),
         }
     }
 }
@@ -543,13 +551,26 @@ mod tests {
             tx_output_device: Some("CABLE-A Input".into()),
             tx_duration_enabled: false,
             tx_duration_s: 12.5,
+            schedule: crate::schedule::ScheduleSettings {
+                source: "dream".into(),
+                show_all: true,
+                all_broadcasts: true,
+                filter: "korean".into(),
+                freq: "6140".into(),
+            },
         };
         let text = to_toml(&s).unwrap();
         assert!(text.contains("format = \"iq-swapped\""), "{text}");
         assert!(text.contains("tx_output = \"device\""), "{text}");
         assert!(text.contains("plot_tab = \"history\""), "{text}");
         assert!(text.contains("volume = 35.0"), "{text}");
+        assert!(text.contains("[schedule]"), "{text}");
         assert_eq!(parse(&text).unwrap(), s);
+        let partial = parse("[schedule]\nfreq = \"6140\"\n").unwrap();
+        assert_eq!(
+            partial.schedule.source, "eibi",
+            "missing schedule options take their defaults"
+        );
     }
 
     #[test]

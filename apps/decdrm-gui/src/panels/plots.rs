@@ -60,6 +60,8 @@ pub fn show(
         PlotTab::Impulse => impulse(ui, data, &pal, avail.y),
         PlotTab::Snr => snr(ui, data, &pal, avail.y),
         PlotTab::History => super::history::show(ui, history, &pal),
+        // Not a plot: the application draws it below the tab bar (`panels::schedule`).
+        PlotTab::Schedule => {}
     }
 }
 

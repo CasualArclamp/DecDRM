@@ -9,6 +9,7 @@ pub mod history;
 pub mod journaline;
 pub mod log;
 pub mod plots;
+pub mod schedule;
 pub mod services;
 pub mod slideshow;
 pub mod source;
