@@ -823,7 +823,7 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "decdrm-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-codecs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "decdrm-core",
  "decdrm-fdk-sys",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "claxon",
  "num-complex",
@@ -859,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-data"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "flate2",
  "thiserror 2.0.21",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-encodec"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-evs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cc",
  "flate2",
@@ -906,14 +906,14 @@ dependencies = [
 
 [[package]]
 name = "decdrm-fdk-sys"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "decdrm-gui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-io"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cpal",
  "flacenc",
@@ -953,14 +953,14 @@ dependencies = [
 
 [[package]]
 name = "decdrm-opus-sys"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cmake",
 ]
 
 [[package]]
 name = "decdrm-schedule"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-station"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "decdrm-codecs",
  "decdrm-core",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-xaac-sys"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cc",
 ]
