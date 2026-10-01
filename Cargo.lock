@@ -945,6 +945,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "decdrm-schedule"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.21",
+ "toml",
+]
+
+[[package]]
 name = "decdrm-station"
 version = "0.2.0"
 dependencies = [

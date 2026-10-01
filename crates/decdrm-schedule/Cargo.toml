@@ -1,0 +1,15 @@
+[package]
+name = "decdrm-schedule"
+description = "DRM broadcast schedules (Dream's DRMSchedule.ini, EiBi CSV): what is on the air now"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# `sources.toml` (the configurable schedule sources); the same versions as the GUI and
+# the station crate, so no extra copies are compiled.
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1"
