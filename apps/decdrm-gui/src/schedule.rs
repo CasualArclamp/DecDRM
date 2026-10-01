@@ -74,12 +74,19 @@ pub struct Reception {
     pub origin: Origin,
 }
 
-/// The frequency typed into the Schedule tab, else the one in the recording's file name
-/// (when the source is a recording).
+/// The frequency typed into the Schedule tab, else the KiwiSDR's (when that is the
+/// source), else the one in the recording's file name (when the source is a recording).
 pub fn reception(settings: &Settings) -> Option<Reception> {
     if let Some(khz) = decdrm_schedule::parse_frequency_input(&settings.schedule.freq) {
         return Some(Reception {
             khz,
+            time: None,
+            origin: Origin::Typed,
+        });
+    }
+    if settings.source == SourceKind::Kiwi && settings.kiwi.freq_khz > 0.0 {
+        return Some(Reception {
+            khz: settings.kiwi.freq_khz,
             time: None,
             origin: Origin::Typed,
         });

@@ -10,7 +10,9 @@
 
 use crate::Args;
 use crate::panels::epg::EpgView;
+use crate::kiwi_list::KiwiList;
 use crate::panels::journaline::JournalineView;
+use crate::panels::kiwi_list::KiwiPick;
 use crate::panels::plots::WaterfallTexture;
 use crate::panels::slideshow::SlideshowView;
 use crate::panels::source::{DeviceLists, SourceAction};
@@ -19,7 +21,7 @@ use crate::panels::website::WebsiteView;
 use crate::panels::{self, heading};
 use crate::receiver::{FETCH_INTERVAL, RxSession};
 use crate::schedule::ScheduleView;
-use crate::settings::{DataTab, Page, PlotTab, Settings, SettingsStore, SignalFormat, ThemeChoice};
+use crate::settings::{DataTab, Page, PlotTab, Settings, SettingsStore, SignalFormat, SourceKind, ThemeChoice};
 use crate::transmitter::TxSession;
 use crate::tx_config;
 use eframe::egui::{self, RichText, Ui};
@@ -97,6 +99,8 @@ pub struct DecDrmApp {
     waterfall: WaterfallTexture,
     /// The Schedule tab (its files are read and downloaded on a background thread).
     schedule: ScheduleView,
+    /// The "Find a KiwiSDR" window and its list.
+    kiwi_list: KiwiList,
     automation: Automation,
     /// No sound-card output in this run (`--no-audio`): no audio playback and no
     /// transmitting to a sound card, whatever the saved settings say.
@@ -144,6 +148,7 @@ impl DecDrmApp {
         if (args.station.is_some() || args.transmit) && !args.start {
             settings.page = Page::Transmitter;
         }
+        let kiwi_list = KiwiList::new(crate::kiwi_list::default_dir(store.path()));
         // Starts reading the local schedule in the background (never downloads).
         let schedule = ScheduleView::new(
             crate::schedule::default_dir(store.path()),
@@ -166,6 +171,7 @@ impl DecDrmApp {
             epg: EpgView::default(),
             waterfall: WaterfallTexture::default(),
             schedule,
+            kiwi_list,
             automation: Automation {
                 quit_at: exit_after.map(|s| now + Duration::from_secs_f64(s.clamp(0.0, 3600.0))),
                 screenshot: args.screenshot.clone(),
@@ -178,6 +184,9 @@ impl DecDrmApp {
             last_save: now,
             notice: None,
         };
+        if args.find_kiwi {
+            app.kiwi_list.open_window();
+        }
         if args.start {
             app.start();
         }
@@ -192,6 +201,9 @@ impl DecDrmApp {
             Ok(mut cfg) => {
                 if self.mute {
                     cfg.play_audio = false;
+                }
+                if self.settings.source == SourceKind::Kiwi {
+                    self.settings.kiwi.remember();
                 }
                 self.slideshow.clear();
                 self.notice = None;
@@ -215,6 +227,20 @@ impl DecDrmApp {
             SourceAction::Start => self.start(),
             SourceAction::Stop => self.rx.stop(),
             SourceAction::Restart => self.rx.restart(),
+            SourceAction::FindKiwi => self.kiwi_list.open_window(),
+        }
+    }
+
+    /// Receive `khz` on the KiwiSDR (from the Schedule tab): start at once if a KiwiSDR
+    /// is set, otherwise open the list to choose one first.
+    fn listen_on_kiwi(&mut self, khz: f64) {
+        self.settings.source = SourceKind::Kiwi;
+        self.settings.kiwi.freq_khz = khz;
+        if self.settings.kiwi.address.trim().is_empty() {
+            self.kiwi_list.open_window();
+            self.notice = Some("Choose a KiwiSDR (double-click one to start receiving).".into());
+        } else {
+            self.start();
         }
     }
 
@@ -260,6 +286,21 @@ impl DecDrmApp {
                 self.handle(a);
             }
         });
+        if self.kiwi_list.open {
+            let pick = panels::kiwi_list::show(ui.ctx(), &mut self.kiwi_list, self.settings.kiwi.freq_khz, &self.settings.kiwi.address);
+            match pick {
+                Some(KiwiPick::Select(address)) => {
+                    self.settings.kiwi.address = address;
+                    self.settings.source = SourceKind::Kiwi;
+                }
+                Some(KiwiPick::Listen(address)) => {
+                    self.settings.kiwi.address = address;
+                    self.settings.source = SourceKind::Kiwi;
+                    self.start();
+                }
+                None => {}
+            }
+        }
         egui::Panel::top("status_strip").show(ui, |ui| panels::status_strip::show(ui, &self.rx));
         if self.settings.show_log {
             egui::Panel::bottom("log")
@@ -285,12 +326,16 @@ impl DecDrmApp {
             // The Schedule tab shares the plot area's tab bar.
             if self.settings.plot_tab == PlotTab::Schedule {
                 let reception = crate::schedule::reception(&self.settings);
-                panels::schedule::show(
+                let listen = panels::schedule::show(
                     ui,
                     &mut self.schedule,
                     &mut self.settings.schedule,
                     reception,
+                    self.settings.kiwi.address.trim(),
                 );
+                if let Some(khz) = listen {
+                    self.listen_on_kiwi(khz);
+                }
             }
         });
     }
@@ -358,6 +403,9 @@ impl eframe::App for DecDrmApp {
         if self.schedule.poll() {
             ctx.request_repaint();
         }
+        if self.kiwi_list.poll() {
+            ctx.request_repaint();
+        }
         for line in self.schedule.take_log() {
             self.rx.log.push(line);
         }
@@ -396,6 +444,7 @@ impl eframe::App for DecDrmApp {
         if self.rx.is_running()
             || self.tx.is_running()
             || self.schedule.busy()
+            || self.kiwi_list.busy()
             || self.automation.active()
         {
             ctx.request_repaint_after(FETCH_INTERVAL);

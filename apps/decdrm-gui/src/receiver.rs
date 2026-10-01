@@ -24,7 +24,7 @@ use crate::plots::PlotData;
 use crate::waterfall::Waterfall;
 use crate::website::{SiteFiles, SiteStore, default_sites_dir};
 use decdrm_data::DataEvent;
-use decdrm_engine::{Command, Engine, EngineConfig, EngineEvent, InputSpec, ServiceView, Snapshot};
+use decdrm_engine::{Command, Engine, EngineConfig, EngineEvent, ServiceView, Snapshot};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -179,7 +179,7 @@ impl RxSession {
     /// Start a new engine, replacing a running one.
     pub fn start(&mut self, cfg: EngineConfig, label: String) {
         self.shutdown();
-        self.live = matches!(cfg.input, InputSpec::Device { .. });
+        self.live = cfg.input.is_live();
         self.snap = Snapshot::default();
         self.plots = PlotData::default();
         self.waterfall.clear();

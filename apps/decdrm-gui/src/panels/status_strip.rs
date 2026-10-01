@@ -6,8 +6,10 @@ use crate::indicators::{
     LEVEL_CLIP_DBFS, LEVEL_SILENT_DBFS, fmt_db, fmt_interleaving, fmt_msc_mode, fmt_sdc_mode,
     fmt_time, msc_help,
 };
+use crate::indicators::Led;
 use crate::receiver::RxSession;
 use decdrm_core::rx::RxState;
+use decdrm_engine::decdrm_kiwi::{KiwiState, KiwiStatus};
 use eframe::egui::{self, RichText, Ui};
 
 pub fn show(ui: &mut Ui, rx: &RxSession) {
@@ -120,6 +122,38 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
     }
 }
 
+/// A KiwiSDR input: connection state, S-meter and the receiver's name (details on hover).
+fn kiwi_status(ui: &mut Ui, k: &KiwiStatus) {
+    let light = match k.state {
+        KiwiState::Streaming => Led::Green,
+        KiwiState::Connecting | KiwiState::Reconnecting => Led::Yellow,
+        KiwiState::Failed => Led::Red,
+        KiwiState::Stopped => Led::Off,
+    };
+    led(ui, light, &format!("KiwiSDR {}", k.state), "State of the connection to the KiwiSDR");
+    value(ui, "S-meter", k.rssi_dbm.map_or_else(|| "–".to_string(), |r| format!("{r:.0} dBm")))
+        .on_hover_text("Signal level in the KiwiSDR's passband");
+    let mut details = vec![format!("{} at {:.3} kHz", k.address, k.freq_khz)];
+    details.extend(k.location.clone());
+    if let Some(v) = &k.version {
+        details.push(format!("firmware {v}"));
+    }
+    if let Some(r) = k.sample_rate {
+        details.push(format!("{r:.3} Hz I/Q"));
+    }
+    if k.adc_overflows > 0 {
+        details.push(format!("ADC overloads in {} blocks", k.adc_overflows));
+    }
+    if k.reconnects > 0 {
+        details.push(format!("reconnected {} times", k.reconnects));
+    }
+    if let Some(e) = &k.error {
+        details.push(e.clone());
+    }
+    let name = k.name.clone().unwrap_or_else(|| k.address.clone());
+    ui.add(egui::Label::new(RichText::new(name).weak()).truncate()).on_hover_text(details.join("\n"));
+}
+
 /// Input level bar (−90 … 0 dBFS); `None` before the first samples or when stopped.
 fn level_meter(ui: &mut Ui, level_dbfs: Option<f32>) {
     ui.label(RichText::new("Level").weak());
@@ -150,6 +184,11 @@ fn position(ui: &mut Ui, snap: &decdrm_engine::Snapshot) {
         return;
     }
     let pos = snap.input.position_s;
+    if let Some(k) = &snap.input.kiwi {
+        value(ui, "Elapsed", fmt_time(pos));
+        kiwi_status(ui, k);
+        return;
+    }
     match info.duration_s.filter(|d| *d > 0.0) {
         Some(total) => {
             ui.label(RichText::new("File").weak());

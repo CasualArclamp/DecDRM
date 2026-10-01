@@ -20,13 +20,16 @@ use eframe::egui::{
 use std::time::Duration;
 
 /// Draw the tab. `reception` is the frequency being received (typed, or from the
-/// recording's file name), whose rows are highlighted.
+/// recording's file name), whose rows are highlighted; `kiwi` the KiwiSDR set as the
+/// source (empty: none). Returns a frequency (kHz) to receive on the KiwiSDR, when a row
+/// was double-clicked or its menu asked for it.
 pub fn show(
     ui: &mut Ui,
     view: &mut ScheduleView,
     settings: &mut ScheduleSettings,
     reception: Option<Reception>,
-) {
+    kiwi: &str,
+) -> Option<f64> {
     let now = UtcTime::now();
     // The clock and the on-air states change on the minute: repaint then.
     let to_next_minute = 60 - u64::from(now.second_of_day() % 60);
@@ -44,14 +47,31 @@ pub fn show(
         reception_line(ui, view, r, settings.all_broadcasts);
     }
     ui.separator();
-    if let Some(index) = table(ui, view, reception.as_ref()) {
-        // A click copies the frequency (to paste into the web SDR) and highlights it.
-        if let Some(e) = view.data.as_ref().and_then(|d| d.entries().get(index)) {
-            let khz = e.khz_label();
-            ui.ctx().copy_text(khz.clone());
-            settings.freq = khz;
+    match table(ui, view, reception.as_ref(), kiwi) {
+        Some(RowAction::Click(index)) => {
+            // A click copies the frequency (to paste into the web SDR) and highlights it.
+            if let Some(e) = view.data.as_ref().and_then(|d| d.entries().get(index)) {
+                let khz = e.khz_label();
+                ui.ctx().copy_text(khz.clone());
+                settings.freq = khz;
+            }
+            None
         }
+        Some(RowAction::Listen(index)) => {
+            let khz = view.data.as_ref().and_then(|d| d.entries().get(index)).map(|e| e.khz)?;
+            // The KiwiSDR's frequency now decides what is highlighted.
+            settings.freq.clear();
+            Some(khz)
+        }
+        None => None,
     }
+}
+
+/// What a row was asked to do.
+enum RowAction {
+    Click(usize),
+    /// Receive its frequency on the KiwiSDR.
+    Listen(usize),
 }
 
 /// Clock, source, view options, filter, frequency.
@@ -371,8 +391,9 @@ fn state_color(state: AirState, dark: bool) -> Color32 {
     }
 }
 
-/// The table (header and rows). Returns the entry index of a clicked row.
-fn table(ui: &mut Ui, view: &ScheduleView, reception: Option<&Reception>) -> Option<usize> {
+/// The table (header and rows). Returns what a row was asked to do, with its entry
+/// index. `kiwi`: the KiwiSDR to name in the row menu (empty: none chosen yet).
+fn table(ui: &mut Ui, view: &ScheduleView, reception: Option<&Reception>, kiwi: &str) -> Option<RowAction> {
     let data = view.data.as_ref()?;
     let entries = data.entries();
     let rows: &[Row] = view.rows();
@@ -398,11 +419,11 @@ fn table(ui: &mut Ui, view: &ScheduleView, reception: Option<&Reception>) -> Opt
     response.on_hover_text(format!(
         "Dot: green on the air, orange ends within {ENDING_SOON_MIN} min, yellow starts within \
          {PREVIEW_MIN} min, grey off. Highlighted: the frequency you receive (±{} kHz). Click a \
-         row to copy its frequency.",
+         row to copy its frequency; double-click (or right-click) to receive it on a KiwiSDR.",
         format_khz(MATCH_TOLERANCE_KHZ)
     ));
 
-    let mut clicked = None;
+    let mut action = None;
     ui.scope(|ui| {
         // `show_rows` places row i at i × (height + item spacing): no gaps between rows.
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -414,16 +435,20 @@ fn table(ui: &mut Ui, view: &ScheduleView, reception: Option<&Reception>) -> Opt
                     let e = &entries[row.index];
                     let matched =
                         reception.is_some_and(|r| e.matches_frequency(r.khz, MATCH_TOLERANCE_KHZ));
-                    if draw_row(ui, &cols, row_h, e, row.state, matched, dark) {
-                        clicked = Some(row.index);
+                    match draw_row(ui, &cols, row_h, e, row.state, matched, dark, kiwi) {
+                        Some(true) => action = Some(RowAction::Listen(row.index)),
+                        Some(false) => action = Some(RowAction::Click(row.index)),
+                        None => {}
                     }
                 }
             });
     });
-    clicked
+    action
 }
 
-/// One row; returns whether it was clicked.
+/// One row; returns `Some(false)` when it was clicked, `Some(true)` when it is to be
+/// received on the KiwiSDR (double-click, or its menu).
+#[allow(clippy::too_many_arguments)]
 fn draw_row(
     ui: &mut Ui,
     cols: &Columns,
@@ -432,7 +457,8 @@ fn draw_row(
     state: AirState,
     matched: bool,
     dark: bool,
-) -> bool {
+    kiwi: &str,
+) -> Option<bool> {
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
     let v = ui.visuals();
@@ -473,12 +499,29 @@ fn draw_row(
         let right = cols.cols[*col].3;
         cell(ui, painter, cols.rect(rect, *col), text, color, right);
     }
-    let clicked = response.clicked();
+    let mut result = if response.double_clicked() {
+        Some(true)
+    } else if response.clicked() {
+        Some(false)
+    } else {
+        None
+    };
     // The details only when the tooltip shows (the closure runs then).
-    response.on_hover_ui(|ui| {
+    let response = response.on_hover_ui(|ui| {
         ui.label(details(e));
     });
-    clicked
+    response.context_menu(|ui| {
+        let target = if kiwi.is_empty() { "a KiwiSDR…".to_string() } else { format!("the KiwiSDR {kiwi}") };
+        if ui.button(format!("Receive {} on {target}", e.khz_label())).clicked() {
+            result = Some(true);
+            ui.close();
+        }
+        if ui.button("Copy the frequency").clicked() {
+            result = Some(false);
+            ui.close();
+        }
+    });
+    result
 }
 
 /// Everything about an entry, for the row's tooltip.

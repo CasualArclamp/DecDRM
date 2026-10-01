@@ -1,5 +1,5 @@
-//! Source bar: recording or sound card, input format, spectrum options, audio output
-//! and the Start / Stop / Restart buttons.
+//! Source bar: recording, sound card or KiwiSDR, input format, spectrum options, audio
+//! output and the Start / Stop / Restart buttons.
 
 use crate::settings::{ChannelChoice, Settings, SignalFormat, SourceKind};
 use eframe::egui::{self, ComboBox, RichText, Ui};
@@ -11,6 +11,8 @@ pub enum SourceAction {
     Start,
     Stop,
     Restart,
+    /// Open the list of public KiwiSDRs.
+    FindKiwi,
 }
 
 /// Sound-card names, enumerated on first use (WASAPI/ALSA enumeration takes a moment,
@@ -69,13 +71,24 @@ pub fn show(
         ui.add_enabled_ui(!running, |ui| {
             ui.selectable_value(&mut settings.source, SourceKind::File, "Recording");
             ui.selectable_value(&mut settings.source, SourceKind::Device, "Sound card");
+            ui.selectable_value(&mut settings.source, SourceKind::Kiwi, "KiwiSDR")
+                .on_hover_text("Receive from a KiwiSDR on the internet: DecDRM tunes it and takes its I/Q.");
             ui.separator();
             match settings.source {
                 SourceKind::File => file_picker(ui, settings),
                 SourceKind::Device => device_picker(ui, settings, devices),
+                SourceKind::Kiwi => {
+                    if kiwi_picker(ui, settings) {
+                        action = Some(SourceAction::FindKiwi);
+                    }
+                }
             }
             ui.separator();
-            format_picker(ui, settings);
+            if settings.source == SourceKind::Kiwi {
+                ui.label(RichText::new("I/Q").weak()).on_hover_text("A KiwiSDR delivers I/Q; the format setting does not apply.");
+            } else {
+                format_picker(ui, settings);
+            }
             ui.checkbox(&mut settings.flip, "Flip").on_hover_text("Mirror the spectrum (e.g. LSB reception).");
             ui.checkbox(&mut settings.auto_flip, "Auto-flip")
                 .on_hover_text("Also accept spectrally inverted signals during acquisition.");
@@ -140,6 +153,57 @@ fn file_picker(ui: &mut Ui, settings: &mut Settings) {
             settings.open_file(path);
         }
     }
+}
+
+/// Address (and those used before), frequency, name and password. Returns whether
+/// "Find…" was clicked.
+fn kiwi_picker(ui: &mut Ui, settings: &mut Settings) -> bool {
+    use decdrm_engine::decdrm_kiwi::frequency_from_url;
+    let k = &mut settings.kiwi;
+    let edit = ui
+        .add(egui::TextEdit::singleline(&mut k.address).desired_width(200.0).hint_text("KiwiSDR address"))
+        .on_hover_text("host, host:port (port 8073 if left out), or a URL copied from the browser, whose f= also sets the frequency");
+    if edit.changed()
+        && let Some(f) = frequency_from_url(&k.address)
+    {
+        k.freq_khz = f;
+    }
+    if !k.recent.is_empty() {
+        // An empty combo box: just its arrow, opening the list.
+        ComboBox::from_id_salt("kiwi_recent")
+            .width(16.0)
+            .selected_text("")
+            .show_ui(ui, |ui| {
+                for r in k.recent.clone() {
+                    if ui.selectable_label(r.eq_ignore_ascii_case(k.address.trim()), &r).clicked() {
+                        k.address = r;
+                    }
+                }
+            })
+            .response
+            .on_hover_text("KiwiSDRs used before");
+    }
+    ui.add(egui::DragValue::new(&mut k.freq_khz).range(0.0..=32_000.0).speed(1.0).max_decimals(1).suffix(" kHz"))
+        .on_hover_text("Frequency to tune the KiwiSDR to: the DRM frequency");
+    ui.menu_button("⚙", |ui| {
+        egui::Grid::new("kiwi_options").num_columns(2).show(ui, |ui| {
+            ui.label("Your name");
+            ui.add(egui::TextEdit::singleline(&mut k.name).desired_width(160.0).char_limit(32));
+            ui.end_row();
+            ui.label("");
+            ui.label(RichText::new("shown in the KiwiSDR's list of users").weak().small());
+            ui.end_row();
+            ui.label("Password");
+            ui.add(egui::TextEdit::singleline(&mut k.password).password(true).desired_width(160.0));
+            ui.end_row();
+            ui.label("");
+            ui.label(RichText::new("only for KiwiSDRs that need one; not saved").weak().small());
+            ui.end_row();
+        });
+    })
+    .response
+    .on_hover_text("Your name on the KiwiSDR, and a password");
+    ui.button("Find…").on_hover_text("Choose from the public KiwiSDRs whose owners allow apps").clicked()
 }
 
 fn device_picker(ui: &mut Ui, settings: &mut Settings, devices: &mut DeviceLists) {

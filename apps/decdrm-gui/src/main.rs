@@ -21,6 +21,7 @@ mod epg;
 mod fonts;
 mod history;
 mod indicators;
+mod kiwi_list;
 mod panels;
 mod plots;
 mod receiver;
@@ -81,6 +82,9 @@ pub struct Args {
     /// seconds, default 10).
     #[arg(long, value_name = "PNG")]
     pub screenshot: Option<PathBuf>,
+    /// Open the "Find a KiwiSDR" window at start (for documentation screenshots).
+    #[arg(long)]
+    pub find_kiwi: bool,
     /// Initial window size in points, e.g. `1280x1400` (for documentation screenshots).
     #[arg(long, value_name = "WxH", value_parser = parse_size)]
     pub window_size: Option<(f32, f32)>,

@@ -7,6 +7,7 @@ pub mod data_info;
 pub mod epg;
 pub mod history;
 pub mod journaline;
+pub mod kiwi_list;
 pub mod log;
 pub mod meter;
 pub mod plots;

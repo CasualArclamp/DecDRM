@@ -23,6 +23,64 @@ pub enum SourceKind {
     File,
     /// A sound-card input (e.g. a virtual audio cable fed by a web SDR).
     Device,
+    /// A KiwiSDR on the internet, tuned by DecDRM (its I/Q).
+    Kiwi,
+}
+
+/// The KiwiSDR source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KiwiSettings {
+    /// Address as typed: host, host:port or a URL copied from the browser.
+    pub address: String,
+    /// Frequency to tune, kHz (0: not set yet).
+    pub freq_khz: f64,
+    /// Addresses used before, newest first.
+    pub recent: Vec<String>,
+    /// Name shown in the KiwiSDR's user list.
+    pub name: String,
+    /// Password of a KiwiSDR whose channels need one; kept for this run only.
+    #[serde(skip)]
+    pub password: String,
+}
+
+impl Default for KiwiSettings {
+    fn default() -> Self {
+        Self { address: String::new(), freq_khz: 0.0, recent: Vec::new(), name: "DecDRM".into(), password: String::new() }
+    }
+}
+
+impl KiwiSettings {
+    /// How many addresses [`Self::recent`] keeps.
+    pub const MAX_RECENT: usize = 8;
+
+    /// Put the current address at the top of [`Self::recent`].
+    pub fn remember(&mut self) {
+        let a = self.address.trim().to_string();
+        if a.is_empty() {
+            return;
+        }
+        self.recent.retain(|r| !r.eq_ignore_ascii_case(&a));
+        self.recent.insert(0, a);
+        self.recent.truncate(Self::MAX_RECENT);
+    }
+
+    /// The connection to make, or what is missing.
+    pub fn config(&self) -> Result<decdrm_engine::decdrm_kiwi::KiwiConfig, String> {
+        use decdrm_engine::decdrm_kiwi::{AddressError, KiwiAddress, KiwiConfig};
+        let address = KiwiAddress::parse(&self.address).map_err(|e| match e {
+            AddressError::Empty => "enter a KiwiSDR address (host, host:port or its URL), or use \"Find…\"".to_string(),
+            e => format!("KiwiSDR address: {e}"),
+        })?;
+        if !self.freq_khz.is_finite() || self.freq_khz <= 0.0 {
+            return Err("enter the frequency to tune the KiwiSDR to (kHz)".into());
+        }
+        let mut cfg = KiwiConfig::new(address, self.freq_khz);
+        cfg.password = self.password.clone();
+        let name = self.name.trim();
+        cfg.ident = if name.is_empty() { "DecDRM".into() } else { name.to_string() };
+        Ok(cfg)
+    }
 }
 
 /// How the input samples represent the signal (maps to [`InputFormat`]).
@@ -283,6 +341,8 @@ pub struct Settings {
     pub tx_duration_s: f64,
     /// The Schedule tab's options (a `[schedule]` table in the file).
     pub schedule: crate::schedule::ScheduleSettings,
+    /// The KiwiSDR source (a `[kiwi]` table in the file).
+    pub kiwi: KiwiSettings,
 }
 
 pub use decdrm_engine::volume_gain;
@@ -314,6 +374,7 @@ impl Default for Settings {
             tx_duration_enabled: true,
             tx_duration_s: 60.0,
             schedule: crate::schedule::ScheduleSettings::default(),
+            kiwi: KiwiSettings::default(),
         }
     }
 }
@@ -346,6 +407,8 @@ impl Settings {
                 // I/Q needs both channels; a real signal uses the device default.
                 channels: self.format.is_iq().then_some(2),
             },
+            // Always I/Q: the engine sets the receiver's format itself.
+            SourceKind::Kiwi => InputSpec::Kiwi(self.kiwi.config()?),
         };
         // `..EngineConfig::default()` ("struct update syntax") takes every field not
         // named here from the engine's defaults, so this keeps compiling when the
@@ -391,6 +454,7 @@ impl Settings {
                     self.input_device.as_deref().unwrap_or("default input")
                 )
             }
+            SourceKind::Kiwi => format!("KiwiSDR {} at {:.1} kHz (I/Q)", self.kiwi.address.trim(), self.kiwi.freq_khz),
         }
     }
 
@@ -558,6 +622,14 @@ mod tests {
                 filter: "korean".into(),
                 freq: "6140".into(),
             },
+            kiwi: KiwiSettings {
+                address: "kiwi.example:8074".into(),
+                freq_khz: 6140.0,
+                recent: vec!["kiwi.example:8074".into(), "other.example".into()],
+                name: "Listener".into(),
+                // Not saved.
+                password: String::new(),
+            },
         };
         let text = to_toml(&s).unwrap();
         assert!(text.contains("format = \"iq-swapped\""), "{text}");
@@ -622,6 +694,35 @@ mod tests {
 
         let no_file = Settings::default();
         assert!(no_file.engine_config().is_err());
+    }
+
+    #[test]
+    fn kiwi_source() {
+        let mut s = Settings { source: SourceKind::Kiwi, ..Settings::default() };
+        assert!(s.engine_config().unwrap_err().contains("KiwiSDR address"));
+        s.kiwi.address = "http://kiwi.example:8074/?f=6140iqz10".into();
+        assert!(s.engine_config().unwrap_err().contains("frequency"));
+        s.kiwi.freq_khz = 6140.0;
+        s.kiwi.password = "secret".into();
+        s.kiwi.name = "  ".into();
+        let cfg = s.engine_config().unwrap();
+        let InputSpec::Kiwi(k) = cfg.input else { panic!("not a Kiwi input") };
+        assert_eq!((k.address.host.as_str(), k.address.port, k.freq_khz), ("kiwi.example", 8074, 6140.0));
+        assert_eq!((k.password.as_str(), k.ident.as_str()), ("secret", "DecDRM"));
+        assert!(s.source_label().starts_with("KiwiSDR http://kiwi.example:8074"));
+        // Recent addresses: newest first, no duplicates, at most MAX_RECENT.
+        for i in 0..10 {
+            s.kiwi.address = format!("k{i}.example");
+            s.kiwi.remember();
+        }
+        s.kiwi.address = "K5.example".into();
+        s.kiwi.remember();
+        assert_eq!(s.kiwi.recent.len(), KiwiSettings::MAX_RECENT);
+        assert_eq!(s.kiwi.recent[0], "K5.example");
+        assert_eq!(s.kiwi.recent.iter().filter(|r| r.eq_ignore_ascii_case("k5.example")).count(), 1);
+        // The password is never written to the settings file.
+        let text = toml::to_string(&s).unwrap();
+        assert!(!text.contains("secret"), "{text}");
     }
 
     #[test]
