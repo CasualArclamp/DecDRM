@@ -63,7 +63,8 @@ milestone checklist (keep it current).
   values are rotated by e^{+j2πkΔ/N} to the newer timing. Dream's `iCurTimeCorr` is −shift.
 - Cite ES 201 980 clauses and the Dream file an algorithm came from in doc comments.
 - User is strong in DSP, newer to Rust: explain non-obvious Rust idioms briefly.
-- Git: commit per milestone, repo-local identity already set; push to the private
-  `origin` (github.com/CasualArclamp/DecDRM).
+- Git: commit per milestone, repo-local identity already set (GitHub no-reply address);
+  push to `origin` (github.com/CasualArclamp/DecDRM). The repo is public since
+  2026-10-01: never commit recordings, reference material, weights, secrets or 3GPP code.
 - Sub-agents share one target dir and a 31 GB machine: one cargo command at a time, no
   load generators, sound-card tests `#[ignore]`d, never play audio audibly.

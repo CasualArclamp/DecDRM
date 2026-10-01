@@ -19,7 +19,7 @@ and the milestone plan. Keep the milestone checklist current.
 | Transmitter | Full transmitter: AAC/HE-AAC (FDK encoder), xHE-AAC (libxaac encoder), Opus, plus **EnCodec** (Meta's neural codec, via candle) as an experimental DecDRM-only extension. Carries every data service the receiver decodes. Programme audio from a file, a sound card, a test tone or an internet radio stream (Icecast/SHOUTCAST over HTTP/HTTPS, its titles as text messages). Output to WAV/FLAC file and sound card. Includes a channel simulator (spec channel models) for loopback testing. |
 | UI | Library crates + CLI + desktop GUI (**egui**). The GUI has RX/TX modes like Dream; the transmitter is also scriptable from the CLI with a TOML config. |
 | Platforms | Windows x86_64 (primary), Linux x86_64. |
-| Workflow | Max autonomy; commit per milestone; local git + private GitHub repo `CasualArclamp/DecDRM`. |
+| Workflow | Max autonomy; commit per milestone; local git + GitHub repo `CasualArclamp/DecDRM`, private until 2026-10-01 and public since (so: no recordings, reference material, model weights, secrets or 3GPP code in it). |
 | First milestone | Audio from a real recording, end to end, via the CLI. |
 
 ## Architecture
