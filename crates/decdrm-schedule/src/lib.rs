@@ -51,7 +51,7 @@ pub mod source;
 pub mod text;
 pub mod time;
 
-pub use download::DownloadError;
+pub use download::{DownloadError, fetch};
 pub use entry::{AirState, DateBound, Days, ENDING_SOON_MIN, Entry, format_khz};
 pub use recording::{RecordingInfo, parse_frequency_input, recording_info};
 pub use season::Season;

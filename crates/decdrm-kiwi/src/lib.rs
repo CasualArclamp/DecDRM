@@ -6,6 +6,7 @@
 //! * [`protocol`] — the Kiwi's WebSocket messages, after the reference client
 //!   `kiwiclient` (github.com/jks-prv/kiwiclient).
 //! * [`client`] — [`KiwiStream`]: the connection thread, its I/Q FIFO and status.
+//! * [`directory`] — the public list of KiwiSDRs (which allow apps, how busy, where).
 //! * [`mock`] — a stand-in KiwiSDR on 127.0.0.1 for tests.
 //!
 //! Courtesy: a public Kiwi has few channels. DecDRM connects only when asked to, shows
@@ -14,9 +15,11 @@
 
 pub mod address;
 pub mod client;
+pub mod directory;
 pub mod mock;
 pub mod protocol;
 
 pub use address::{AddressError, DEFAULT_PORT, KiwiAddress, frequency_from_url};
 pub use client::{KiwiConfig, KiwiError, KiwiState, KiwiStatus, KiwiStream};
+pub use directory::{DIRECTORY_URL, KiwiEntry, parse_directory};
 pub use protocol::Agc;

@@ -10,6 +10,7 @@ const BLOCK: usize = 512;
 fn config_for(address: &str) -> KiwiConfig {
     let mut c = KiwiConfig::new(KiwiAddress::parse(address).unwrap(), 6140.0);
     c.reconnect_delay = Duration::from_millis(100);
+    c.first_message_timeout = Duration::from_millis(500);
     c
 }
 
@@ -86,9 +87,31 @@ fn streams_iq_and_sets_up_the_receiver() {
     ] {
         assert!(cmds.iter().any(|c| c == expected), "missing {expected:?} in {cmds:?}");
     }
+    // The Kiwi web client's sound-only connection type.
     let path = &kiwi.paths()[0];
-    let ts = path.strip_prefix('/').and_then(|p| p.strip_suffix("/SND")).unwrap_or_else(|| panic!("path {path}"));
+    let ts = path.strip_prefix("/no_wf/").and_then(|p| p.strip_suffix("/SND")).unwrap_or_else(|| panic!("path {path}"));
     assert!(ts.parse::<u32>().is_ok(), "path {path}");
+}
+
+#[test]
+fn falls_back_to_the_other_path_when_the_kiwi_stays_silent() {
+    for ignore_typed in [true, false] {
+        let kiwi = MockKiwi::start(MockConfig { ignore_typed_paths: Some(ignore_typed), ..MockConfig::default() }).unwrap();
+        let s = KiwiStream::start(config_for(&kiwi.address()));
+        let (got, err) = read_frames(&s, 2 * BLOCK, Duration::from_secs(10));
+        if ignore_typed {
+            // Like firmware that ignores the path: the second path works.
+            assert_eq!((got.len(), err), (4 * BLOCK, None));
+            let paths = kiwi.paths();
+            assert!(paths[0].starts_with("/no_wf/") && !paths[1].starts_with("/no_wf/"), "{paths:?}");
+            assert!(s.take_log().iter().any(|l| l.contains("no answer on /no_wf/")));
+        } else {
+            // The first path works: the second is never tried.
+            assert_eq!((got.len(), err), (4 * BLOCK, None));
+            assert_eq!(kiwi.connections(), 1);
+        }
+        s.stop_and_join();
+    }
 }
 
 #[test]

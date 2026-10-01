@@ -28,6 +28,11 @@ pub const MAX_BUFFER_S: f64 = 30.0;
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 /// A session that streamed this long resets the count of reconnections in a row.
 const STABLE_SESSION: Duration = Duration::from_secs(60);
+/// WebSocket paths tried in turn (`{ts}`: the time stamp). First the Kiwi web client's
+/// sound-only connection type, `no_wf`, which takes a channel without a waterfall when
+/// one is free (leaving those to browser users); then kiwiclient's `<ts>/SND`, which
+/// firmware 1.9xx upgrades but then ignores (checked on two Kiwis, 2026-10-01).
+pub const PATHS: [&str; 2] = ["/no_wf/{ts}/SND", "/{ts}/SND"];
 
 /// What to connect to and how to tune it.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +54,9 @@ pub struct KiwiConfig {
     pub reconnect_delay: Duration,
     /// Give up after this many reconnections in a row.
     pub max_reconnects: u32,
+    /// A Kiwi silent this long after the login does not understand the WebSocket path:
+    /// the next of [`PATHS`] is tried.
+    pub first_message_timeout: Duration,
 }
 
 impl KiwiConfig {
@@ -66,6 +74,7 @@ impl KiwiConfig {
             ident: "DecDRM".into(),
             reconnect_delay: Duration::from_secs(2),
             max_reconnects: 10,
+            first_message_timeout: Duration::from_secs(5),
         }
     }
 
@@ -299,6 +308,8 @@ enum Outcome {
     Closed(String),
     /// Lost (network error, timeout); `streamed` if samples had arrived.
     Lost { error: String, streamed: bool },
+    /// Accepted, but nothing came back after the login (the path not understood).
+    Silent,
 }
 
 fn run(cfg: &KiwiConfig, shared: &Shared) {
@@ -306,6 +317,7 @@ fn run(cfg: &KiwiConfig, shared: &Shared) {
     let mut redirects = 0;
     let mut losses = 0u32;
     let mut ever_streamed = false;
+    let mut path = 0;
     loop {
         if shared.stopped() {
             shared.end(KiwiState::Stopped, None);
@@ -314,7 +326,14 @@ fn run(cfg: &KiwiConfig, shared: &Shared) {
         shared.set_state(if ever_streamed { KiwiState::Reconnecting } else { KiwiState::Connecting });
         shared.log(format!("KiwiSDR: connecting to {address}"));
         let started = Instant::now();
-        match session(&address, cfg, shared) {
+        match session(&address, PATHS[path], cfg, shared) {
+            Outcome::Silent if path + 1 < PATHS.len() => {
+                shared.log(format!("KiwiSDR: no answer on {}; trying {}", PATHS[path], PATHS[path + 1]));
+                path += 1;
+            }
+            Outcome::Silent => {
+                return shared.end(KiwiState::Failed, Some("the KiwiSDR accepted the connection but sent nothing".into()));
+            }
             Outcome::Stopped => {
                 shared.end(KiwiState::Stopped, None);
                 return;
@@ -380,13 +399,13 @@ fn connect(address: &KiwiAddress) -> Result<TcpStream, String> {
     Err(last)
 }
 
-fn session(address: &KiwiAddress, cfg: &KiwiConfig, shared: &Shared) -> Outcome {
+fn session(address: &KiwiAddress, path: &str, cfg: &KiwiConfig, shared: &Shared) -> Outcome {
     let stream = match connect(address) {
         Ok(s) => s,
         Err(error) => return if shared.stopped() { Outcome::Stopped } else { Outcome::Lost { error, streamed: false } },
     };
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+    let _ = stream.set_read_timeout(Some(cfg.first_message_timeout.min(READ_TIMEOUT)));
     let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
     if let Ok(handle) = stream.try_clone() {
         *shared.socket.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
@@ -394,7 +413,7 @@ fn session(address: &KiwiAddress, cfg: &KiwiConfig, shared: &Shared) -> Outcome 
     if shared.stopped() {
         return Outcome::Stopped;
     }
-    let url = format!("ws://{address}/{}/SND", timestamp());
+    let url = format!("ws://{address}{}", path.replace("{ts}", &timestamp().to_string()));
     let ws = match tungstenite::client(url.as_str(), stream) {
         Ok((ws, _)) => ws,
         Err(HandshakeError::Failure(tungstenite::Error::Http(response))) => {
@@ -416,6 +435,10 @@ fn session(address: &KiwiAddress, cfg: &KiwiConfig, shared: &Shared) -> Outcome 
     };
     let mut conn = Connection { ws, streamed: false };
     conn.run(cfg, shared)
+}
+
+fn is_timeout(e: &tungstenite::Error) -> bool {
+    matches!(e, tungstenite::Error::Io(io) if matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
 }
 
 /// Shorter wording for the common I/O errors.
@@ -473,11 +496,20 @@ impl Connection {
         let mut first_block = true;
         let mut version: (Option<u32>, Option<u32>) = (None, None);
         let mut last_keepalive = Instant::now();
+        let mut answered = false;
         loop {
             if shared.stopped() {
                 return Err(Outcome::Stopped);
             }
-            let message = self.ws.read().map_err(|e| self.lost(shared, &e))?;
+            let message = match self.ws.read() {
+                Ok(m) => m,
+                Err(e) if !answered && is_timeout(&e) && !shared.stopped() => return Err(Outcome::Silent),
+                Err(e) => return Err(self.lost(shared, &e)),
+            };
+            if !answered {
+                answered = true;
+                let _ = self.ws.get_mut().set_read_timeout(Some(READ_TIMEOUT));
+            }
             let data: &[u8] = match &message {
                 Message::Binary(b) => b,
                 Message::Text(t) => t.as_bytes(),
@@ -512,6 +544,21 @@ impl Connection {
                                         f64::from(cfg.high_cut_hz) / 1e3
                                     ));
                                 }
+                            }
+                            // At the start: no free channel. Later (a few seconds in, once
+                            // the Kiwi has noticed that its web page was never loaded): the
+                            // owner's limit on channels for apps other than the web page.
+                            KiwiMsg::TooBusy(0) if self.streamed => {
+                                return Err(Outcome::Fatal(
+                                    "this KiwiSDR's owner allows no apps other than its web page; choose another KiwiSDR".into(),
+                                ));
+                            }
+                            KiwiMsg::TooBusy(n) if self.streamed => {
+                                return Err(Outcome::Fatal(format!(
+                                    "this KiwiSDR lets apps other than its web page use {n} channel{} and {} in use; try again later or choose another KiwiSDR",
+                                    if n == 1 { "" } else { "s" },
+                                    if n == 1 { "it is" } else { "they are" }
+                                )));
                             }
                             KiwiMsg::TooBusy(n) => {
                                 return Err(Outcome::Fatal(format!("all {n} channels of this KiwiSDR are in use; try again later or choose another KiwiSDR")));

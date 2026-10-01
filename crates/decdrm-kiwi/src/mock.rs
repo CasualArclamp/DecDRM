@@ -57,6 +57,10 @@ pub struct MockConfig {
     /// Pace blocks in real time (otherwise as fast as the client takes them).
     pub paced: bool,
     pub sessions: Vec<MockSession>,
+    /// Behave like firmware that ignores one style of WebSocket path: accept the
+    /// connection but never answer. `Some(true)`: typed paths (`/no_wf/<ts>/SND`);
+    /// `Some(false)`: kiwiclient's `/<ts>/SND`.
+    pub ignore_typed_paths: Option<bool>,
 }
 
 impl Default for MockConfig {
@@ -71,6 +75,7 @@ impl Default for MockConfig {
             rssi_dbm: -73.0,
             paced: false,
             sessions: vec![MockSession::Stream { blocks: None, end: MockEnd::Wait }],
+            ignore_typed_paths: None,
         }
     }
 }
@@ -185,14 +190,21 @@ fn serve(mut s: TcpStream, session: &MockSession, cfg: &MockConfig, rec: &Record
         _ => {}
     }
     let path_log = &rec.paths;
+    let mut path = String::new();
     // The signature is tungstenite's handshake callback.
     #[allow(clippy::result_large_err)]
     let callback = |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
-        path_log.lock().unwrap_or_else(|p| p.into_inner()).push(req.uri().path().to_string());
+        path = req.uri().path().to_string();
+        path_log.lock().unwrap_or_else(|p| p.into_inner()).push(path.clone());
         Ok(resp)
     };
     let Ok(mut ws) = tungstenite::accept_hdr(s, callback) else { return };
     let record = |t: &str| rec.commands.lock().unwrap_or_else(|p| p.into_inner()).push(t.to_string());
+    let typed = path.trim_start_matches('/').split('/').count() > 2;
+    if cfg.ignore_typed_paths == Some(typed) {
+        // Accepted, then silence (but the client's messages are still read).
+        return drain(&mut ws, rec);
+    }
     // The client authenticates first.
     match ws.read() {
         Ok(Message::Text(t)) => record(&t),
