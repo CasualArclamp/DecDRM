@@ -6,7 +6,9 @@
 //!
 //! ```text
 //! kHz:75;Time(UTC):93;Days:59;ITU:49;Station:201;Lng:49;Target:62;Remarks:135;P:35;Start:60;Stop:60;
-//! 5995;0600-0700;Mo-Fr;D;Deutsche Welle;E;WAf;;1;;
+//! 3955;0500-0600;;G;BBC DIGITAL;E;CEu;w;6;0109;2510
+//! 3955;2000-2100;;KOR;KBS World Radio;D;Eu;/G-w;1;;
+//! 6140;1950-1400;;KRE;KCBS DIGITAL;K;KRE;p;1;;[0226]
 //! ```
 //!
 //! Columns (`;`-separated; found by their header names when there is a header, else in
@@ -19,12 +21,15 @@
 //! * `Station`, `Lng` (language code, e.g. `E`), `Target` (area code, e.g. `WAf`);
 //! * `Remarks` — the transmitter site: `x` (site *x* of the home country), `/ABC-x` (site
 //!   *x* in country ABC), empty (the home country's main site);
-//! * `P` — persistence code (ignored), `Start` / `Stop` — validity dates for entries that
-//!   do not cover the whole season ([`parse_date`]).
+//! * `P` — persistence code (ignored), `Start` / `Stop` — validity dates `ddmm` for
+//!   entries that do not cover the whole season ([`parse_date`]); `Stop` may end in
+//!   `[mmyy]`, the month the broadcast was last logged (`[0226]`, `1906[0626]`), which
+//!   becomes a note.
 //!
-//! **DRM**: the file covers all broadcasts; an entry is taken as DRM when the word `DRM`
-//! appears in its station, remarks or language field ([`is_drm`]). Dream's AM schedule
-//! does not distinguish DRM at all.
+//! **DRM**: the file covers all broadcasts. EiBi marks the DRM ones with the word
+//! `DIGITAL` after the station name (`BBC DIGITAL`, `KCBS DIGITAL`; `sked-a26.csv` has no
+//! "DRM" anywhere); the word `DRM` in the station, remarks or language field counts too
+//! ([`is_drm`]). Dream's AM schedule does not distinguish DRM at all.
 //!
 //! The file for the current season is [`file_name`] (`sked-a26.csv`), downloaded from
 //! [`url`] (`http://www.eibispace.de/dx/sked-a26.csv`).
@@ -92,10 +97,20 @@ pub fn is_drm_word(text: &str) -> bool {
         .any(|w| w.eq_ignore_ascii_case("drm"))
 }
 
-/// Whether an EiBi entry is a DRM transmission: the word `DRM` in its station, remarks
-/// or language field.
+/// Whether a station name carries EiBi's DRM mark: the word `DIGITAL` in capitals
+/// (`BBC DIGITAL`, `Radio Romania DIGITAL`). Capitals only, as EiBi writes the mark, so a
+/// station merely called "… Digital …" does not count.
+pub fn has_digital_mark(station: &str) -> bool {
+    station
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w == "DIGITAL")
+}
+
+/// Whether an EiBi entry is a DRM transmission: EiBi's mark `DIGITAL` in its station
+/// name ([`has_digital_mark`]), or the word `DRM` in its station, remarks or language
+/// field ([`is_drm_word`]).
 pub fn is_drm(station: &str, remarks: &str, language: &str) -> bool {
-    [station, remarks, language].iter().any(|f| is_drm_word(f))
+    has_digital_mark(station) || [station, remarks, language].iter().any(|f| is_drm_word(f))
 }
 
 /// The days of an EiBi `Days` field.
@@ -222,9 +237,11 @@ fn two_letter_run(word_lower: &str) -> Option<Vec<Weekday>> {
         .collect()
 }
 
-/// Parse a `Start`/`Stop` validity date. EiBi's exact notation could not be checked here,
-/// so this accepts the plausible ones: `mmdd` (a day of the season; read as `ddmm` when
-/// only that is a valid date), `yyyymmdd`, `yyyy-mm-dd`, `dd.mm.` and `dd.mm.yyyy`.
+/// Parse a `Start`/`Stop` validity date. EiBi writes `ddmm`, a day of the season: in
+/// `sked-a26.csv` the commonest are `2903` and `2510` (29 March and 25 October, the days
+/// the season starts and ends), and 1415 of its dates are valid only as `ddmm`, none
+/// only as `mmdd`. A value valid only as `mmdd` is still read that way. Also accepted,
+/// for other lists in this format: `yyyymmdd`, `yyyy-mm-dd`, `dd.mm.` and `dd.mm.yyyy`.
 /// `None` for an empty or unreadable field.
 pub fn parse_date(field: &str) -> Option<DateBound> {
     let s = field.trim();
@@ -246,7 +263,7 @@ pub fn parse_date(field: &str) -> Option<DateBound> {
         return match s.len() {
             4 => {
                 let (a, b) = (num(&s[..2])?, num(&s[2..])?);
-                annual(a, b).or_else(|| annual(b, a))
+                annual(b, a).or_else(|| annual(a, b))
             }
             8 => full(&s[..4], &s[4..6], &s[6..]),
             _ => None,
@@ -392,7 +409,9 @@ fn parse_row(fields: &[&str], cols: &Columns) -> Result<Entry, String> {
         d
     };
     let valid_from = date(get(cols.start), "from");
-    let valid_to = date(get(cols.stop), "until");
+    let (stop_date, logged) = split_last_logged(get(cols.stop));
+    let valid_to = date(stop_date, "until");
+    notes.extend(logged.map(last_logged_note));
     Ok(Entry {
         khz,
         start,
@@ -414,6 +433,30 @@ fn parse_row(fields: &[&str], cols: &Columns) -> Result<Entry, String> {
         drm: is_drm(station, remarks, language),
         line: 0,
     })
+}
+
+/// Split EiBi's `[mmyy]` off a `Stop` field: `1906[0626]` → `1906` and `0626`; `[0226]` →
+/// no date and `0226`. The brackets hold the month the broadcast was last logged —
+/// inferred from `sked-a26.csv`: every one is a past month (up to 08/2026 in a file of
+/// 10/2026), going back to 2014-2016 for rarely heard coast stations.
+fn split_last_logged(field: &str) -> (&str, Option<&str>) {
+    match field.split_once('[') {
+        Some((stop, rest)) => {
+            let mmyy = rest.trim_end_matches(']').trim();
+            (stop.trim(), (!mmyy.is_empty()).then_some(mmyy))
+        }
+        None => (field, None),
+    }
+}
+
+/// The note for a `[mmyy]` mark: `last logged 2026-02` (years 20yy); anything else in
+/// the brackets is shown as it is.
+fn last_logged_note(mmyy: &str) -> String {
+    let digits = mmyy.len() == 4 && mmyy.bytes().all(|b| b.is_ascii_digit());
+    match (digits, mmyy.get(..2).and_then(|m| m.parse::<u8>().ok())) {
+        (true, Some(month @ 1..=12)) => format!("last logged 20{}-{month:02}", &mmyy[2..]),
+        _ => format!("last logged {mmyy}"),
+    }
 }
 
 /// A language field: one code, or several separated by `,` or `/`; unknown codes stay.
@@ -491,7 +534,7 @@ kHz:75;Time(UTC):93;Days:59;ITU:49;Station:201;Lng:49;Target:62;Remarks:135;P:35
 6140;2300-0100;;KRE;KCBS Pyongyang;K;EAs;k DRM;1;;
 7325;1100-1200;Sa,Su;G;BBC World Service;E;Eu;/ROU-t DRM;1;;
 9800;1300-1400;1245;CHN;China Radio International;M;SEA;;1;;
-15700;0000-2400;irr;ROU;Radio Romania Int.;F;Eu;t;1;1201;0115
+15700;0000-2400;irr;ROU;Radio Romania Int.;F;Eu;t;1;0112;1501
 11700;1200-1300;Mo-Fr;USA;Some station;E;LAm;;1;;
 not a frequency;0600-0700;;D;Broken;E;Eu;;1;;
 6000;0600-2500;;CUB;Broken time;S;Am;;1;;
@@ -594,6 +637,107 @@ not a frequency;0600-0700;;D;Broken;E;Eu;;1;;
         );
     }
 
+    /// Lines of EiBi's `sked-a26.csv` as they are (file of 2026-10-01): DRM marked
+    /// `DIGITAL` after the station name, `ddmm` dates, `[mmyy]` after the stop date.
+    const A26: &str = "\
+kHz:75;Time(UTC):93;Days:59;ITU:49;Station:201;Lng:49;Target:62;Remarks:135;P:35;Start:60;Stop:60;
+3955;0500-0600;;G;BBC DIGITAL;E;CEu;w;6;0109;2510
+3955;2000-2100;;KOR;KBS World Radio;D;Eu;/G-w;1;;
+5950;0000-2400;;FIN;RealMix Radio;E;Eu;r;6;2903;1906[0626]
+6140;1950-1400;;KRE;KCBS DIGITAL;K;KRE;p;1;;[0226]
+6140;0500-1500;;SUI;Radio Gloria;D;Eu;/LUX-j;2;;[0826]
+7425;1759-1858;Su-Fr;NZL;RNZ Pacific DIGITAL;E;Oc;r;6;0806;2510
+11690;1859-1958;Su-Fr;NZL;RNZ Pacific DIGITAL;E;Oc;r;6;2903;0706
+13730;1800-1900;Tu,Th;D;Music 4 Joy DIGITAL;;EAf;n;0;;
+13790;0000-1000;;CHN;CNR1 DIGITAL;M;CHN;qq;1;;[0226]
+15785;0000-2400;;D;funklust DIGITAL;D;CEu;e;1;;[0624]
+17700;0100-0900;;CHN;CRI DIGITAL;M;Oc;k;6;1006;1206
+";
+
+    #[test]
+    fn eibi_a26_lines() {
+        let s = parse(A26);
+        assert!(s.skipped.is_empty(), "{:?}", s.skipped);
+        let drm: Vec<&str> = s
+            .entries
+            .iter()
+            .filter(|e| e.drm)
+            .map(|e| e.station.as_str())
+            .collect();
+        assert_eq!(
+            drm,
+            [
+                "BBC DIGITAL",
+                "KCBS DIGITAL",
+                "RNZ Pacific DIGITAL",
+                "RNZ Pacific DIGITAL",
+                "Music 4 Joy DIGITAL",
+                "CNR1 DIGITAL",
+                "funklust DIGITAL",
+                "CRI DIGITAL",
+            ]
+        );
+
+        let annual = |month, day| Some(DateBound::Annual { month, day });
+        let bbc = &s.entries[0];
+        assert_eq!(
+            (bbc.valid_from, bbc.valid_to),
+            (annual(9, 1), annual(10, 25)),
+            "ddmm: 1 September to 25 October"
+        );
+        assert!(
+            bbc.site.starts_with("Woofferton") && bbc.note.is_empty(),
+            "{bbc:?}"
+        );
+        let kcbs = &s.entries[3];
+        assert_eq!((kcbs.start, kcbs.stop), (19 * 60 + 50, 14 * 60));
+        assert!(kcbs.site.starts_with("Pyongyang"), "{}", kcbs.site);
+        assert_eq!(
+            (kcbs.valid_to, kcbs.note.as_str()),
+            (None, "last logged 2026-02"),
+            "[mmyy] is not a validity date"
+        );
+        let realmix = &s.entries[2];
+        assert_eq!(
+            (realmix.valid_from, realmix.valid_to, realmix.note.as_str()),
+            (annual(3, 29), annual(6, 19), "last logged 2026-06")
+        );
+
+        // The DRM entries on the air, in file order.
+        let drm_at = |t: &str| -> Vec<String> {
+            on_air(&s.entries, UtcTime::parse(t).unwrap())
+                .into_iter()
+                .filter(|e| e.drm)
+                .map(|e| format!("{} {}", e.khz_label(), e.station))
+                .collect()
+        };
+        let morning = [
+            "3955 BBC DIGITAL",
+            "6140 KCBS DIGITAL",
+            "13790 CNR1 DIGITAL",
+            "15785 funklust DIGITAL",
+        ];
+        assert_eq!(drm_at("2026-10-01T05:30Z"), morning);
+        // CRI's 17700 kHz runs on 10-12 June (`1006;1206`; read as mmdd, from 6 October).
+        assert_eq!(drm_at("2026-10-10T05:30Z"), morning);
+        // In June the BBC's 3955 kHz is not on yet (from 1 September; as mmdd, 9 January).
+        assert_eq!(
+            drm_at("2026-06-11T05:30Z"),
+            [
+                "6140 KCBS DIGITAL",
+                "13790 CNR1 DIGITAL",
+                "15785 funklust DIGITAL",
+                "17700 CRI DIGITAL",
+            ]
+        );
+        // RNZ Pacific's 11690 kHz ends on 7 June (`0706`; as mmdd, 6 July).
+        assert_eq!(
+            drm_at("2026-06-05T19:00Z"),
+            ["11690 RNZ Pacific DIGITAL", "15785 funklust DIGITAL"]
+        );
+        assert_eq!(drm_at("2026-06-10T19:00Z"), ["15785 funklust DIGITAL"]);
+    }
+
     #[test]
     fn headerless_and_reordered_columns() {
         // No header: EiBi's standard order.
@@ -650,13 +794,13 @@ not a frequency;0600-0700;;D;Broken;E;Eu;;1;;
         let annual = |month, day| Some(DateBound::Annual { month, day });
         let full = Some(DateBound::Date(Date::new(2026, 10, 24).unwrap()));
         assert_eq!(parse_date(""), None);
-        assert_eq!(parse_date("0329"), annual(3, 29));
+        assert_eq!(parse_date("2903"), annual(3, 29), "EiBi's ddmm");
+        assert_eq!(parse_date("0109"), annual(9, 1), "ddmm preferred");
         assert_eq!(
-            parse_date("2903"),
+            parse_date("0329"),
             annual(3, 29),
-            "ddmm when mmdd is impossible"
+            "mmdd when ddmm is impossible"
         );
-        assert_eq!(parse_date("0405"), annual(4, 5), "mmdd preferred");
         assert_eq!(parse_date("20261024"), full);
         assert_eq!(parse_date("2026-10-24"), full);
         assert_eq!(parse_date("24.10."), annual(10, 24));
@@ -664,6 +808,13 @@ not a frequency;0600-0700;;D;Broken;E;Eu;;1;;
         for bad in ["13", "3232", "2026-02-30", "Oct", "1.2.3.4", "."] {
             assert_eq!(parse_date(bad), None, "{bad}");
         }
+        // EiBi's [mmyy] after the stop date.
+        assert_eq!(split_last_logged("1906[0626]"), ("1906", Some("0626")));
+        assert_eq!(split_last_logged("[0826]"), ("", Some("0826")));
+        assert_eq!(split_last_logged("3107f"), ("3107f", None));
+        assert_eq!(split_last_logged("2510[]"), ("2510", None));
+        assert_eq!(last_logged_note("0923"), "last logged 2023-09");
+        assert_eq!(last_logged_note("1323"), "last logged 1323");
         // An unreadable date becomes a note instead of failing the line.
         let s = parse("7000;1000-1100;;D;X;E;Eu;;1;soon;\n");
         assert_eq!(s.entries[0].note, "from soon");
@@ -679,6 +830,11 @@ not a frequency;0600-0700;;D;Broken;E;Eu;;1;;
         assert!(!is_drm_word("DRMtest"));
         assert!(!is_drm_word("Radio Drama"));
         assert!(is_drm("x", "", "-DRM"));
+        assert!(has_digital_mark("BBC DIGITAL") && has_digital_mark("Trans World R. DIGITAL"));
+        assert!(!has_digital_mark("Radio Digital FM"), "capitals only");
+        assert!(!has_digital_mark("DIGITALRADIO"), "a word of its own");
+        assert!(is_drm("KCBS DIGITAL", "p", "K"));
+        assert!(!is_drm("KBS World Radio", "/G-w", "D"));
         assert_eq!(language_name("E"), Some("English"));
         assert_eq!(language_name("nope"), None);
         assert_eq!(country_name("KRE"), Some("Korea, North"));

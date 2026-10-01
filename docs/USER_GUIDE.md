@@ -139,9 +139,9 @@ To know what to tune the SDR to, DecDRM lists the DRM broadcasts scheduled right
 like Dream's *Stations* dialog. It reads two kinds of schedule:
 - **EiBi** (eibispace.de): every shortwave broadcast, one file per season —
   `sked-a26.csv` from the last Sunday of March, `sked-b26.csv` from the last Sunday of
-  October. DecDRM shows the entries with the word "DRM" in their station, remarks or
-  language field, or every broadcast on request. EiBi's codes are spelled out:
-  languages, target areas, countries and transmitter sites.
+  October. DecDRM shows the DRM ones, which EiBi marks with DIGITAL after the station
+  name (*BBC DIGITAL*, *KCBS DIGITAL*), or every broadcast on request. EiBi's codes are
+  spelled out: languages, target areas, countries and transmitter sites.
 - **Dream (DRMDX)**: the DRM-only `DRMSchedule.ini` that Dream's *Stations* dialog
   downloads.
 

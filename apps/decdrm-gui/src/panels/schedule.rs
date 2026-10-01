@@ -110,8 +110,8 @@ fn controls(ui: &mut Ui, view: &mut ScheduleView, settings: &mut ScheduleSetting
             })
             .response
             .on_hover_text(
-                "Where the schedule comes from. EiBi lists every shortwave broadcast (DRM ones \
-                 are marked by the word DRM); Dream's list (DRMDX) only DRM. More sources: \
+                "Where the schedule comes from. EiBi lists every shortwave broadcast (it marks \
+                 DRM ones DIGITAL); Dream's list (DRMDX) only DRM. More sources: \
                  sources.toml in the schedule folder (see the user guide).",
             );
         if let Some(name) = chosen

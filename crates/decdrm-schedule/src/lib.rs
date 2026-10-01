@@ -9,8 +9,9 @@
 //! * [`dream`] — Dream's own `DRMSchedule.ini` (the DRMDX schedule Dream downloads from
 //!   [`dream::SCHEDULE_URL`]): DRM transmissions only.
 //! * [`eibi`] — EiBi's seasonal CSV (`sked-a26.csv` from eibispace.de): every shortwave
-//!   broadcast, the DRM ones recognised by the word "DRM" ([`Entry::drm`]); its codes are
-//!   expanded with Dream's tables (`English` for `E`, transmitter sites by name).
+//!   broadcast, the DRM ones recognised by EiBi's mark `DIGITAL` after the station name
+//!   (or the word "DRM", [`Entry::drm`]); its codes are expanded with Dream's tables
+//!   (`English` for `E`, transmitter sites by name).
 //! * [`source`] — the configurable sources (URL + format), the per-user directory with
 //!   the local copies, loading, and downloading with `curl`/`wget` — only when the user
 //!   asks for it.
@@ -26,12 +27,12 @@
 //! use decdrm_schedule::{Format, UtcTime, match_frequency, on_air, parse};
 //!
 //! let csv = "kHz:75;Time(UTC):93;Days:59;ITU:49;Station:201;Lng:49;Target:62;Remarks:135;P:35;Start:60;Stop:60;\n\
-//!            6140;2300-0100;;KRE;KCBS Pyongyang;K;EAs;k DRM;1;;\n\
+//!            6140;1950-1400;;KRE;KCBS DIGITAL;K;KRE;p;1;;[0226]\n\
 //!            5995;0600-0700;Mo-Fr;D;Deutsche Welle;E;WAf;;1;;\n";
 //! let schedule = parse(Format::Eibi, csv.as_bytes());
 //! let now = UtcTime::parse("2026-10-01T00:30Z").unwrap();
 //! let drm: Vec<_> = on_air(&schedule.entries, now).into_iter().filter(|e| e.drm).collect();
-//! assert_eq!(drm[0].station, "KCBS Pyongyang");
+//! assert_eq!(drm[0].station, "KCBS DIGITAL");
 //! assert_eq!(drm[0].language, "Korean");
 //! assert_eq!(match_frequency(&schedule.entries, 6140.0, 5.0).len(), 1);
 //! ```

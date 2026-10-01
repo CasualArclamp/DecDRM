@@ -87,7 +87,7 @@ impl Season {
 
     /// The date of `month`/`day` within this season: for a B season, July–December fall
     /// in the start year and January–June in the next. (A day just outside the season
-    /// still lands next to it, which keeps validity bounds that EiBi writes as `mmdd`
+    /// still lands next to it, which keeps validity bounds that EiBi writes as `ddmm`
     /// right even when they lie a little before or after the season.)
     pub fn date_of(self, month: u32, day: u32) -> Option<Date> {
         let year = if self.b && month < 7 {

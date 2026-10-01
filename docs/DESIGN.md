@@ -204,9 +204,13 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       Dream's code tables (`TableStations.cpp`, generated into `eibi_tables.rs`) for
       languages, targets, countries and sites; columns found by header name, lenient
       days (`Mo-Fr`, `Sa,Su`, `SaSu`, `1245`, `Fr-Mo`, keywords) and validity dates
-      (format unverified: `mmdd`, full dates); DRM = the word "DRM" in station,
-      remarks or language. On air: the start day decides (Dream misses Friday's
-      2300-0100 on Saturday at 00:30), `start == stop` is all day, annual validity
+      (`ddmm`, as the A26 file shows: 1415 of its dates valid only so, none only as
+      `mmdd`; a `[mmyy]` after the stop date is the month last logged, shown as a
+      note); DRM = EiBi's mark `DIGITAL` after the station name (`BBC DIGITAL`; the A26
+      file has no "DRM" at all — the first version, looking for that word, found 0 of
+      its 118 DRM entries), or the word "DRM" in station, remarks or language. On
+      air: the start day decides (Dream misses Friday's 2300-0100 on Saturday at
+      00:30), `start == stop` is all day, annual validity
       dates are taken within the broadcast season, Dream's ending-soon (10 min) and
       starting-soon (15 min) states. UTC calendar from `SystemTime` (civil-from-days),
       seasons A/B from the last Sundays of March/October (`sked-a26.csv`). Sources

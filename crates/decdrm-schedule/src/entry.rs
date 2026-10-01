@@ -88,7 +88,7 @@ impl fmt::Display for Days {
 pub enum DateBound {
     /// A full date.
     Date(Date),
-    /// A day of the year without the year (EiBi's season-relative `mmdd`).
+    /// A day of the year without the year (EiBi's season-relative `ddmm`).
     Annual { month: u8, day: u8 },
 }
 
@@ -185,7 +185,7 @@ impl Entry {
     }
 
     /// Whether `d` lies in the validity period (both ends included). Annual bounds
-    /// (`mmdd`) are dates of the broadcast season `d` falls in, so a B-season window
+    /// (day and month) are dates of the broadcast season `d` falls in, so a B-season window
     /// `12-01`…`01-15` spans New Year.
     pub fn valid_on(&self, d: Date) -> bool {
         // Rust note: `Option::is_none_or(f)` is `true` for `None`, else `f(value)`: a
