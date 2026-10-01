@@ -71,9 +71,23 @@ pub fn codec_title(a: &AudioCodingView) -> String {
     }
 }
 
+/// The MPEG Surround tag: the target channel set-up the SDC signals (ES 201 980
+/// §6.4.3.10: 010 5.1, 011 7.1, 111 another mode given in the MPEG Surround data;
+/// 001 and 100–110 reserved), or `None` without MPEG Surround.
+pub fn surround_label(mode: u8) -> Option<String> {
+    match mode {
+        0 => None,
+        2 => Some("MPEG Surround 5.1".into()),
+        3 => Some("MPEG Surround 7.1".into()),
+        7 => Some("MPEG Surround (other mode)".into()),
+        m => Some(format!("MPEG Surround (reserved {m:03b})")),
+    }
+}
+
 /// The tags of a service bar, in display order: codec, SBR, PS or stereo/mono, the
-/// rates (core/output when SBR doubles it), MPEG Surround, protection, text, the data applications (with their stream
-/// bit rates when attached to an audio service), then warnings.
+/// rates (core/output when SBR doubles it), the MPEG Surround mode, protection, text,
+/// the data applications (with their stream bit rates when attached to an audio
+/// service), then warnings.
 pub fn tags(s: &ServiceView) -> Vec<Tag> {
     let mut t = Vec::new();
     if let Some(a) = &s.audio {
@@ -100,8 +114,8 @@ pub fn tags(s: &ServiceView) -> Vec<Tag> {
             format!("{} kHz", fmt_khz(a.sample_rate_hz))
         };
         t.push(tag(rates, TagKind::Feature));
-        if a.surround {
-            t.push(tag("MPEG Surround", TagKind::Feature));
+        if let Some(label) = surround_label(a.surround_mode) {
+            t.push(tag(label, TagKind::Feature));
         }
         match s.audio_part_a_percent {
             Some(p) if p > 0.0 => t.push(tag(format!("UEP {p:.0} %"), TagKind::Feature)),
@@ -178,6 +192,18 @@ fn details(s: &ServiceView) -> String {
             coding += &format!(" core, {} Hz output", a.output_rate_hz);
         }
         lines.push(coding);
+        if a.surround_mode != 0 {
+            let target = match a.surround_mode {
+                2 => "for 5.1 output channels",
+                3 => "for 7.1 output channels",
+                7 => "in a mode given in its own data",
+                _ => "in a reserved mode",
+            };
+            lines.push(format!(
+                "MPEG Surround {target} (mode {:03b}); DecDRM plays mono or stereo, not surround",
+                a.surround_mode
+            ));
+        }
         if let Some(b) = s.audio_bitrate {
             let protection = match s.audio_part_a_percent {
                 Some(p) if p > 0.0 => format!("unequal error protection, {p:.1} % in part A"),
@@ -451,6 +477,13 @@ mod tests {
         assert_eq!(texts(&t), ["AAC", "Stereo", "24 kHz", "UEP 17 %", "CA"]);
         t.audio = Some(AudioCodingView { codec: "xHE-AAC".into(), sample_rate_hz: 9_600, output_rate_hz: 9_600, ..Default::default() });
         assert_eq!(texts(&t)[..3], ["xHE-AAC", "Mono", "9.6 kHz"]);
+        // The signalled MPEG Surround mode follows the rates.
+        for (mode, label) in [(2, "MPEG Surround 5.1"), (3, "MPEG Surround 7.1"), (7, "MPEG Surround (other mode)"), (4, "MPEG Surround (reserved 100)")] {
+            t.audio.as_mut().unwrap().surround_mode = mode;
+            assert_eq!(texts(&t)[3], label);
+        }
+        t.audio.as_mut().unwrap().surround_mode = 2;
+        assert!(details(&t).contains("MPEG Surround for 5.1 output channels (mode 010); DecDRM plays mono or stereo"), "{}", details(&t));
         t.audio = Some(AudioCodingView { codec: "reserved".into(), ..Default::default() });
         t.decodable = false;
         assert!(texts(&t).contains(&"no decoder".to_string()));

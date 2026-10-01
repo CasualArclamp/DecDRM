@@ -246,6 +246,9 @@ The services appear as four bars, one per Short Id, as in Dream. Each bar shows:
 - tags for:
   - the codec (HE-AAC, HE-AAC v2, AAC, xHE-AAC, Opus, EnCodec), SBR, PS / Stereo /
     Mono, and the core/output rate;
+  - MPEG Surround with the channel set-up the station signals (5.1, 7.1, "other mode"
+    given in the surround data, or a reserved code). DecDRM plays the mono or stereo
+    core, never surround;
   - EEP, or UEP with part A's share;
   - text messages;
   - attached data applications with their stream's bit rate;

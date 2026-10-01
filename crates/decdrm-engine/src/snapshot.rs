@@ -101,8 +101,10 @@ pub struct AudioCodingView {
     pub output_rate_hz: u32,
     /// Text messages in the audio stream.
     pub text: bool,
-    /// MPEG Surround side information (AAC, xHE-AAC).
-    pub surround: bool,
+    /// MPEG Surround mode (AAC, xHE-AAC; ES 201 980 §6.4.3.10): 0 none, 2 5.1 and
+    /// 3 7.1 output channels, 7 given in the MPEG Surround data; 1, 4–6 reserved. The
+    /// mono/stereo core is decoded either way.
+    pub surround_mode: u8,
     /// Further codec detail, e.g. the EnCodec bit-rate tier or the EVS bandwidth.
     pub detail: Option<String>,
 }

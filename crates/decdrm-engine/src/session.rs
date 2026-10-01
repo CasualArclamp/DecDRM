@@ -659,7 +659,7 @@ fn evs_view(c: &EvsChannel) -> crate::snapshot::AudioCodingView {
         sample_rate_hz: c.bandwidth.sample_rate_hz(),
         output_rate_hz: 48_000,
         text: false,
-        surround: false,
+        surround_mode: 0,
         detail: Some(c.bandwidth.name().into()),
     }
 }
@@ -736,7 +736,7 @@ fn audio_view(p: &AudioParams) -> crate::snapshot::AudioCodingView {
         sample_rate_hz: p.sample_rate_hz,
         output_rate_hz: if p.codec == AudioCodec::Aac && p.sbr { 2 * p.sample_rate_hz } else { p.sample_rate_hz },
         text: p.text_flag,
-        surround: p.surround_mode != 0,
+        surround_mode: p.surround_mode,
         detail,
     }
 }
