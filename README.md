@@ -14,6 +14,10 @@ encoding) and libopus.
 
 *Receiving a Deutsche Welle recording (mode B, 10 kHz, 64-QAM): HE-AAC v2 stereo audio, text messages, the broadcast clock and Journaline news pages.*
 
+![The DecDRM transmitter on the air: the station form with the multiplex bar, channel and service settings, and the status panel with live meters, the output spectrum and the services](docs/images/transmitter.png)
+
+*Transmitting live into a virtual audio cable: an xHE-AAC stereo service with text messages, a slideshow and a programme guide in the more strongly protected part A (outlined), plus a Journaline news service; live input and output meters and the output spectrum on the right.*
+
 > **Status:** the receiver decodes audio, text messages and data services from every
 > DRM test recording available here (modes A/B/C, 9–20 kHz, real and I/Q inputs,
 > inverted spectra, clock offsets up to 1250 ppm, AAC/HE-AAC/xHE-AAC/Opus). The
