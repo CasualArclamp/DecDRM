@@ -1,0 +1,17 @@
+[package]
+name = "decdrm-kiwi"
+description = "KiwiSDR client: tunes a remote KiwiSDR and streams its I/Q to the DecDRM receiver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# WebSocket framing and the client handshake; the TCP connection is our own (timeouts,
+# redirects, shutting it down from another thread to stop).
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# The Kiwi's configuration message (`load_cfg`, receiver name and location) is JSON; the
+# same version as the station crate.
+serde_json = "1"

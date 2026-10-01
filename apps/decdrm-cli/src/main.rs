@@ -45,6 +45,20 @@ struct RxArgs {
     /// Use the default sound-card input.
     #[arg(long, conflicts_with_all = ["file", "device"])]
     default_device: bool,
+    /// Receive from a KiwiSDR on the internet: its address (host, host:port, or a URL
+    /// copied from the browser, whose `f=` also gives the frequency). The input is the
+    /// Kiwi's I/Q; --format does not apply.
+    #[arg(long, value_name = "ADDRESS", conflicts_with_all = ["file", "device", "default_device"])]
+    kiwi: Option<String>,
+    /// Frequency to tune the KiwiSDR to, kHz: the DRM frequency.
+    #[arg(long, value_name = "KHZ", requires = "kiwi")]
+    freq: Option<f64>,
+    /// Password of a KiwiSDR whose channels need one.
+    #[arg(long, value_name = "PASSWORD", requires = "kiwi")]
+    kiwi_password: Option<String>,
+    /// Name shown in the KiwiSDR's user list.
+    #[arg(long, value_name = "NAME", default_value = "DecDRM")]
+    kiwi_name: String,
     /// Signal format of the input.
     #[arg(long, value_enum, default_value_t = Format::Real)]
     format: Format,
@@ -154,11 +168,23 @@ fn devices() -> Result<()> {
 }
 
 fn rx(a: RxArgs) -> Result<()> {
-    let input = match (&a.file, &a.device, a.default_device) {
-        (Some(p), _, _) => InputSpec::File { path: p.clone(), realtime: a.realtime || a.play },
-        (None, Some(d), _) => InputSpec::Device { name: Some(d.clone()), channels: None },
-        (None, None, true) => InputSpec::Device { name: None, channels: None },
-        _ => anyhow::bail!("give a file, --device NAME or --default-device"),
+    let input = match (&a.file, &a.device, a.default_device, &a.kiwi) {
+        (_, _, _, Some(k)) => {
+            use decdrm_engine::decdrm_kiwi::{KiwiAddress, KiwiConfig, frequency_from_url};
+            let address = KiwiAddress::parse(k)?;
+            let freq = a
+                .freq
+                .or_else(|| frequency_from_url(k))
+                .ok_or_else(|| anyhow::anyhow!("give the frequency to tune the KiwiSDR to with --freq KHZ"))?;
+            let mut cfg = KiwiConfig::new(address, freq);
+            cfg.password = a.kiwi_password.clone().unwrap_or_default();
+            cfg.ident = a.kiwi_name.clone();
+            InputSpec::Kiwi(cfg)
+        }
+        (Some(p), _, _, None) => InputSpec::File { path: p.clone(), realtime: a.realtime || a.play },
+        (None, Some(d), _, None) => InputSpec::Device { name: Some(d.clone()), channels: None },
+        (None, None, true, None) => InputSpec::Device { name: None, channels: None },
+        _ => anyhow::bail!("give a file, --device NAME, --default-device or --kiwi ADDRESS"),
     };
     let format = match a.format {
         Format::Real => InputFormat::Real(match a.channel {
@@ -266,6 +292,13 @@ fn print_status(s: &decdrm_engine::Snapshot) {
         r.delay_ms,
         r.sro_hz
     );
+    if let Some(k) = &s.input.kiwi {
+        let rssi = k.rssi_dbm.map_or_else(|| "-".into(), |r| format!("{r:.1}"));
+        let name = k.name.as_deref().map(|n| format!(" \"{n}\"")).unwrap_or_default();
+        let overflow = if k.adc_overflows > 0 { format!(", ADC overloads {}", k.adc_overflows) } else { String::new() };
+        let reconnects = if k.reconnects > 0 { format!(", reconnected {}x", k.reconnects) } else { String::new() };
+        println!("          KiwiSDR {}{name} {} at {:.3} kHz, S-meter {rssi} dBm{overflow}{reconnects}", k.address, k.state, k.freq_khz);
+    }
     if let Some(t) = &s.time_utc {
         println!("          broadcast time {t}");
     }

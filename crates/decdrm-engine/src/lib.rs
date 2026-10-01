@@ -17,6 +17,7 @@ pub mod source;
 
 pub use decdrm_core::rx::{InputFormat, RealChannel, ReceiverConfig};
 pub use decdrm_data;
+pub use decdrm_kiwi;
 pub use logger::{LogConfig, LogFormat};
 pub use session::{MscStats, Session, SessionEvent};
 pub use snapshot::{
@@ -189,6 +190,9 @@ fn worker(
     let realtime = matches!(cfg.input, InputSpec::File { realtime: true, .. });
     let mut rcfg = cfg.receiver.clone();
     rcfg.channels = info.channels;
+    if cfg.input.is_iq() {
+        rcfg.input = InputFormat::Iq { swap: false };
+    }
     let mut session = Session::new(rcfg);
     // File playback paces the decoder to the sound card; live input relies on the
     // player's drift compensation.
@@ -203,7 +207,11 @@ fn worker(
 
     let mut snap = Snapshot::default();
     snap.input.info = info.clone();
-    log(format!("input: {} ({} Hz, {} ch)", info.name, info.sample_rate, info.channels), &mut snap);
+    if cfg.input.is_iq() && !info.is_file {
+        log(format!("input: {} (I/Q)", info.name), &mut snap);
+    } else {
+        log(format!("input: {} ({} Hz, {} ch)", info.name, info.sample_rate, info.channels), &mut snap);
+    }
 
     let started = Instant::now();
     let mut last_publish = Instant::now() - Duration::from_secs(1);
@@ -234,7 +242,11 @@ fn worker(
             }
         }
 
-        let Some(frames) = source.read(chunk_frames)? else {
+        let read = source.read(chunk_frames);
+        for line in source.take_log() {
+            log(line, &mut snap);
+        }
+        let Some(frames) = read? else {
             audio.finish()?;
             if let Some(l) = logger.as_mut() {
                 l.finish(source.position_s(), &session, &snap)?;
@@ -346,8 +358,10 @@ fn publish(
     snap.channel = session.ensemble().channel().copied();
     snap.msc = session.msc_stats;
     snap.visuals = session.visuals();
+    snap.input.info = source.info().clone();
     snap.input.position_s = source.position_s();
     snap.input.finished = finished;
+    snap.input.kiwi = source.kiwi_status();
     let st = &session.audio_stats;
     snap.audio.codec = st.codec.clone();
     snap.audio.frames_ok = st.frames_ok;

@@ -44,6 +44,8 @@ pub struct InputStatus {
     /// RMS input level in dBFS (`None` before the first samples arrive).
     pub level_dbfs: Option<f32>,
     pub finished: bool,
+    /// A KiwiSDR input's connection (state, S-meter, receiver name, ...).
+    pub kiwi: Option<decdrm_kiwi::KiwiStatus>,
 }
 
 /// One service of the multiplex as the UI lists it.

@@ -23,6 +23,7 @@ decdrm-data = { path = "../decdrm-data" }
 decdrm-codecs = { path = "../decdrm-codecs" }
 decdrm-encodec = { path = "../decdrm-encodec" }
 decdrm-evs = { path = "../decdrm-evs" }
+decdrm-kiwi = { path = "../decdrm-kiwi" }
 crossbeam-channel = "0.5"
 anyhow.workspace = true
 tracing.workspace = true
