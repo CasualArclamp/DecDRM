@@ -1,11 +1,11 @@
 //! EiBi code tables: languages, ITU country codes, target areas and transmitter sites.
 //!
-//! **Generated** from Dream's `src/tables/TableStations.cpp` (dream-mjf r1548, refreshed
-//! there from EiBi's lists — "21 July 26 data" in Dream's ChangeLog; GPL-2.0-or-later like
-//! DecDRM) by a script that reproduces Dream's `CStationData` maps: a later duplicate key
-//! replaces an earlier one, and each target code is also entered with the prefixes
-//! C/N/S/E/W ("Central ", "North ", …). Sorted by key (byte order) for binary search; do
-//! not edit by hand.
+//! **Generated** by `tools/gen_eibi_tables.py` from Dream's
+//! `src/tables/TableStations.cpp` (dream-mjf r1548, refreshed there from EiBi's lists —
+//! "21 July 26 data" in Dream's ChangeLog; GPL-2.0-or-later like DecDRM), reproducing
+//! Dream's `CStationData` maps: a later duplicate key replaces an earlier one, and each
+//! target code is also entered with the prefixes C/N/S/E/W ("Central ", "North ", …).
+//! Sorted by key (byte order) for binary search; do not edit by hand.
 
 // Rust note: `&[(&str, &str)]` is a slice of string pairs stored in the executable's
 // read-only data; nothing is allocated at run time.
