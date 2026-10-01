@@ -30,6 +30,7 @@ pub fn show(
     data: &PlotData,
     waterfall: &Waterfall,
     texture: &mut WaterfallTexture,
+    waterfall_fit: &mut bool,
     history: &History,
 ) {
     ui.horizontal_wrapped(|ui| {
@@ -50,7 +51,7 @@ pub fn show(
             &pal,
             avail.y,
         ),
-        PlotTab::Waterfall => waterfall_plot(ui, data, waterfall, texture, &pal, avail.y - 22.0),
+        PlotTab::Waterfall => waterfall_plot(ui, data, waterfall, texture, waterfall_fit, &pal, avail.y - 22.0),
         PlotTab::Constellations => {
             let side = (avail.x / 3.0 - 8.0).min(avail.y - 24.0).max(80.0);
             constellation_row(ui, data, &pal, side);
@@ -208,6 +209,7 @@ fn waterfall_plot(
     data: &PlotData,
     waterfall: &Waterfall,
     texture: &mut WaterfallTexture,
+    fit: &mut bool,
     pal: &Palette,
     height: f32,
 ) {
@@ -242,13 +244,18 @@ fn waterfall_plot(
         (-24.0, 24.0)
     };
     let seconds = WATERFALL_ROWS as f64 * ROW_SECONDS;
+    // Shown: the whole band, or the DRM signal with a margin once one is found.
+    let (v0, v1) = match data.spectrum.band_khz.filter(|_| *fit) {
+        Some(band) => fit_span(band, (x0, x1)),
+        None => (x0, x1),
+    };
     base_plot("waterfall")
         .height(height.max(120.0))
         .x_axis_label("frequency (kHz)")
         .y_axis_label("time (s)")
         .label_formatter(hover_label("kHz", 2, "s", 1))
         .show(ui, |p| {
-            p.set_plot_bounds(PlotBounds::from_min_max([x0, -seconds], [x1, 0.0]));
+            p.set_plot_bounds(PlotBounds::from_min_max([v0, -seconds], [v1, 0.0]));
             p.image(PlotImage::new(
                 "waterfall",
                 handle.id(),
@@ -269,15 +276,28 @@ fn waterfall_plot(
             }
         });
     let (lo, hi) = waterfall.levels();
-    ui.label(
-        RichText::new(format!(
-            "{} rows (~{:.0} s), newest at the top; colours {lo:.0} … {hi:.0} dB, following the noise floor and the strongest signals",
-            waterfall.rows(),
-            waterfall.rows() as f64 * ROW_SECONDS
-        ))
-        .weak()
-        .small(),
-    );
+    ui.horizontal(|ui| {
+        ui.checkbox(fit, RichText::new("Fit to the DRM signal").small())
+            .on_hover_text("Show the DRM signal with a margin around it (once one is found), instead of the whole input band");
+        ui.label(
+            RichText::new(format!(
+                "{} rows (~{:.0} s), newest at the top; colours {lo:.0} … {hi:.0} dB, following the noise floor and the strongest signals",
+                waterfall.rows(),
+                waterfall.rows() as f64 * ROW_SECONDS
+            ))
+            .weak()
+            .small(),
+        );
+    });
+}
+
+/// The frequency span (kHz) showing `band` with a margin of a tenth of its width on
+/// each side (at least 0.5 kHz), within the whole span `full`.
+fn fit_span(band: (f64, f64), full: (f64, f64)) -> (f64, f64) {
+    let (lo, hi) = band;
+    let margin = (0.1 * (hi - lo)).max(0.5);
+    let (v0, v1) = ((lo - margin).max(full.0), (hi + margin).min(full.1));
+    if v1 > v0 { (v0, v1) } else { full }
 }
 
 /// FAC, SDC and MSC constellations side by side, each `side` × `side`.
@@ -444,4 +464,22 @@ fn snr(ui: &mut Ui, data: &PlotData, pal: &Palette, height: f32) {
             p.set_plot_bounds(PlotBounds::from_min_max([k0, 0.0], [k1, top.max(10.0)]));
             p.line(line("MSC SNR", &data.snr, pal.snr).fill(0.0));
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waterfall_fits_the_signal() {
+        // A 10 kHz signal around 0 Hz in a ±24 kHz I/Q band: 1 kHz either side.
+        let (a, b) = fit_span((-5.2, 5.2), (-24.0, 24.0));
+        assert!((a + 6.24).abs() < 1e-9 && (b - 6.24).abs() < 1e-9, "{a} {b}");
+        // A 4.5 kHz signal: at least 0.5 kHz of margin.
+        assert_eq!(fit_span((12.0, 16.3), (0.0, 24.0)), (11.5, 16.8));
+        // Near the edge of a real band: clipped to it.
+        assert_eq!(fit_span((0.2, 9.0), (0.0, 24.0)).0, 0.0);
+        // A degenerate band shows everything.
+        assert_eq!(fit_span((30.0, 31.0), (0.0, 24.0)), (0.0, 24.0));
+    }
 }

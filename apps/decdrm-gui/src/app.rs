@@ -321,6 +321,7 @@ impl DecDrmApp {
                 &self.rx.plots,
                 &self.rx.waterfall,
                 &mut self.waterfall,
+                &mut self.settings.waterfall_fit,
                 &self.rx.history,
             );
             // The Schedule tab shares the plot area's tab bar.

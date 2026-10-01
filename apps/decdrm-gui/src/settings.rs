@@ -328,6 +328,8 @@ pub struct Settings {
     pub plot_tab: PlotTab,
     pub data_tab: DataTab,
     pub show_log: bool,
+    /// The waterfall's frequency axis fits the DRM signal (once one is found).
+    pub waterfall_fit: bool,
     pub page: Page,
     /// Last station configuration file of the Transmitter tab (`None`: the example).
     pub station_config: Option<PathBuf>,
@@ -366,6 +368,7 @@ impl Default for Settings {
             plot_tab: PlotTab::Overview,
             data_tab: DataTab::Slideshow,
             show_log: true,
+            waterfall_fit: true,
             page: Page::Receiver,
             station_config: None,
             tx_output: TxOutput::Config,
@@ -608,6 +611,7 @@ mod tests {
             plot_tab: PlotTab::History,
             data_tab: DataTab::Website,
             show_log: false,
+            waterfall_fit: false,
             page: Page::Transmitter,
             station_config: Some(PathBuf::from("stations/test.toml")),
             tx_output: TxOutput::Device,

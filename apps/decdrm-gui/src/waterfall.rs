@@ -16,7 +16,7 @@ pub const WATERFALL_ROWS: usize = 600;
 pub const ROW_SECONDS: f64 = 0.1;
 /// Widest row kept; wider spectra are reduced by taking the maximum of neighbouring
 /// bins, so narrow lines (pilots, carriers) survive.
-pub const MAX_COLUMNS: usize = 1024;
+pub const MAX_COLUMNS: usize = 2048;
 /// Smallest level range shown, dB.
 const MIN_RANGE_DB: f32 = 30.0;
 
@@ -178,13 +178,16 @@ mod tests {
         // Real signal: the upper half only.
         let row = display_row(&[1.0, 2.0, 3.0, 4.0], true);
         assert_eq!(row, vec![3.0, 4.0]);
-        // Wide I/Q spectra are reduced by the maximum of neighbours.
-        let wide: Vec<f64> = (0..2048)
-            .map(|i| if i == 1001 { 10.0 } else { -50.0 })
+        // The receiver's 2048-bin I/Q spectrum keeps its full resolution (the waterfall
+        // can zoom to the DRM signal) …
+        assert_eq!(display_row(&[-50.0; 2048], false).len(), 2048);
+        // … wider spectra are reduced by the maximum of neighbours.
+        let wide: Vec<f64> = (0..4096)
+            .map(|i| if i == 2001 { 10.0 } else { -50.0 })
             .collect();
         let row = display_row(&wide, false);
-        assert_eq!(row.len(), 1024);
-        assert_eq!(row[500], 10.0, "a one-bin line survives the reduction");
+        assert_eq!(row.len(), 2048);
+        assert_eq!(row[1000], 10.0, "a one-bin line survives the reduction");
     }
 
     #[test]
