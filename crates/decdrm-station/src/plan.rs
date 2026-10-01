@@ -938,9 +938,12 @@ fn check_audio(cfg: &StationConfig, name: &str, a: &crate::config::AudioSettings
         }
     }
     let i = &a.input;
-    let sources = usize::from(i.file.is_some()) + usize::from(i.device.is_some()) + usize::from(i.tone_hz.is_some());
+    let sources = usize::from(i.file.is_some())
+        + usize::from(i.device.is_some())
+        + usize::from(i.url.is_some())
+        + usize::from(i.tone_hz.is_some());
     if sources != 1 {
-        p.push(format!("{name}: the audio input needs exactly one of `file`, `device` and `tone_hz`"));
+        p.push(format!("{name}: the audio input needs exactly one of `file`, `device`, `url` and `tone_hz`"));
     }
     if let Some(f) = &i.file {
         let path = cfg.resolve(f);

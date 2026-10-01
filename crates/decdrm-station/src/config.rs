@@ -488,7 +488,8 @@ impl AudioSettings {
     }
 }
 
-/// Audio source of an audio service: exactly one of `file`, `device` and `tone_hz`.
+/// Audio source of an audio service: exactly one of `file`, `device`, `url` and
+/// `tone_hz`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AudioInputSettings {
@@ -502,6 +503,15 @@ pub struct AudioInputSettings {
     /// Sound-card input device (name or unique part of it).
     #[serde(default)]
     pub device: Option<String>,
+    /// Internet radio stream to transmit (HTTP or HTTPS URL of an Icecast/Shoutcast
+    /// stream or a playlist): decoded, resampled and followed in clock; reconnects when
+    /// the stream drops.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Web stream: send the stream's "now playing" titles as the service's text
+    /// messages.
+    #[serde(default = "default_true")]
+    pub stream_titles: bool,
     /// Built-in test tone of this frequency, Hz.
     #[serde(default)]
     pub tone_hz: Option<f64>,
@@ -531,11 +541,30 @@ impl AudioInputSettings {
     pub fn file(path: impl Into<PathBuf>) -> Self {
         Self { file: Some(path.into()), ..Self::default() }
     }
+
+    /// A sound-card (line in) input.
+    pub fn device(name: impl Into<String>) -> Self {
+        Self { device: Some(name.into()), ..Self::default() }
+    }
+
+    /// A web stream input.
+    pub fn url(url: impl Into<String>) -> Self {
+        Self { url: Some(url.into()), ..Self::default() }
+    }
 }
 
 impl Default for AudioInputSettings {
     fn default() -> Self {
-        Self { file: None, looped: true, device: None, tone_hz: None, level_dbfs: default_tone_level(), gain_db: 0.0 }
+        Self {
+            file: None,
+            looped: true,
+            device: None,
+            url: None,
+            stream_titles: true,
+            tone_hz: None,
+            level_dbfs: default_tone_level(),
+            gain_db: 0.0,
+        }
     }
 }
 

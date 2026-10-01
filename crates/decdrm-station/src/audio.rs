@@ -429,7 +429,10 @@ fn open_source(cfg: &StationConfig, input: &AudioInputSettings, rate: u32, ch: u
         let output_queue = crate::output::device_queue(&cfg.output);
         return Ok(Box::new(DeviceSource::open(d, rate, ch, gain, output_queue)?));
     }
-    let freq = input.tone_hz.ok_or("the audio input needs `file`, `device` or `tone_hz`")?;
+    if let Some(url) = &input.url {
+        return Err(format!("web stream input ({url}) is not available in this build yet"));
+    }
+    let freq = input.tone_hz.ok_or("the audio input needs `file`, `device`, `url` or `tone_hz`")?;
     Ok(Box::new(ToneSource {
         freq,
         phase: 0.0,
