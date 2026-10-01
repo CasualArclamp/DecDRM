@@ -377,7 +377,7 @@ fn every_problem_is_reported() {
         "ISO 639-2",
         "core_rate 48000",
         "text message 0 has 138 bytes",
-        "exactly one of `file`, `device` and `tone_hz`",
+        "exactly one of `file`, `device`, `url` and `tone_hz`",
         "missing.wav",
         "needs [service.audio]",
     ] {
@@ -386,6 +386,36 @@ fn every_problem_is_reported() {
     // 16-QAM allows protection levels 0-1 only.
     let p = problems(&base().replace("[output]", "[channel]\nmsc_mode = \"16-QAM\"\nprotection_b = 2\n[output]"));
     assert!(has(&p, "protection_b 2 is out of range 0-1"), "{p:?}");
+}
+
+/// A web stream input is checked without connecting: the URL's form, and
+/// `stream_titles` only with a URL. Its titles need the text message bytes even without
+/// configured messages.
+#[test]
+fn web_stream_input() {
+    let with_input = |input: &str| base().replace("input = { tone_hz = 1000.0 }", input);
+    for (input, problem) in [
+        ("input = { url = \"ftp://radio.example/live\" }", "not an http:// or https:// URL"),
+        ("input = { url = \"http://\" }", "has no host name"),
+        ("input = { url = \"https://radio.example:99999/\" }", "bad port"),
+        ("input = { tone_hz = 1000.0, stream_titles = false }", "stream_titles is only used with a web stream input"),
+        ("input = { url = \"http://radio.example/\", device = \"default\" }", "exactly one of"),
+    ] {
+        let p = problems(&with_input(input));
+        assert!(has(&p, problem), "{input}: {p:?}");
+    }
+    // Titles on (the default): the audio stream carries text.
+    let cfg = parse(&with_input("input = { url = \"http://radio.example:8000/live.mp3\" }"));
+    assert!(cfg.services[0].audio.as_ref().unwrap().input.sends_titles());
+    let plan = cfg.validate().unwrap_or_else(|e| panic!("{e}"));
+    assert!(plan.services[0].audio.as_ref().unwrap().text, "text bytes for the titles");
+    assert!(!cfg.inputs_finite(), "a web stream does not end");
+    // Titles off and no messages: no text bytes.
+    let cfg = parse(&with_input("input = { url = \"http://radio.example/live\", stream_titles = false }"));
+    assert!(!cfg.validate().unwrap().services[0].audio.as_ref().unwrap().text);
+    // `stream_titles` is written back only when set.
+    assert!(!parse(&base()).to_toml_string().unwrap().contains("stream_titles"));
+    assert!(cfg.to_toml_string().unwrap().contains("stream_titles = false"));
 }
 
 #[test]

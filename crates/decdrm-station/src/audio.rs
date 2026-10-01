@@ -1,7 +1,8 @@
-//! Audio services: the input (file, sound card or test tone, converted to the encoder's
-//! rate and channel count), the encoder (FDK-AAC, libxaac for xHE-AAC, Opus, or EnCodec
-//! with the `encodec` feature) and the logical frame of each 400 ms multiplex frame
-//! (audio super frame plus text message piece).
+//! Audio services: the input (file, sound card, web stream — see [`crate::webstream`] —
+//! or test tone, converted to the encoder's rate and channel count), the encoder
+//! (FDK-AAC, libxaac for xHE-AAC, Opus, or EnCodec with the `encodec` feature) and the
+//! logical frame of each 400 ms multiplex frame (audio super frame plus text message
+//! piece; a web stream's titles join the configured messages).
 //!
 //! Timing: one call of [`AudioChain::next_logical_frame`] consumes exactly 400 ms of
 //! PCM at the encoder's input rate — five or ten AAC granules of 960 core samples
@@ -23,6 +24,8 @@
 use crate::config::{AudioInputSettings, Codec, StationConfig};
 use crate::error::{Result, StationError};
 use crate::plan::AudioPlan;
+use crate::station::StopHandle;
+use crate::webstream::{WebStreamOptions, WebStreamSource, WebStreamStatus};
 use decdrm_codecs::{
     AacProfile, CodecError, DrmAacFrame, FdkDrmEncoder, FdkEncoderConfig, OpusDrmEncoder, OpusEncoderConfig,
     XheAacConfig, XheAacEncoder,
@@ -67,27 +70,50 @@ pub(crate) trait AudioSource: Send {
     fn drift_ppm(&self) -> Option<f64> {
         None
     }
+    /// The title the source currently supplies (a web stream's "now playing"), which
+    /// the chain sends as a text message when the input asks for it.
+    fn title(&self) -> Option<String> {
+        None
+    }
+    /// The status of a web stream input.
+    fn web_stream(&self) -> Option<WebStreamStatus> {
+        None
+    }
+    /// Log lines since the last call (a web stream's connections, errors, titles).
+    fn take_log(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Interleaved samples waiting to be consumed.
 #[derive(Default)]
-struct Fifo {
-    buf: Vec<f32>,
+pub(crate) struct Fifo {
+    pub buf: Vec<f32>,
     start: usize,
 }
 
 impl Fifo {
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.buf.len() - self.start
     }
 
     /// Move `n` samples (fewer if not available, then zero padded) to `out`.
-    fn take(&mut self, n: usize, out: &mut Vec<f32>) {
+    pub fn take(&mut self, n: usize, out: &mut Vec<f32>) {
         let k = n.min(self.len());
         out.extend_from_slice(&self.buf[self.start..self.start + k]);
         out.resize(out.len() + (n - k), 0.0);
         self.start += k;
-        // Compact once the consumed head dominates (keeps memory bounded).
+        self.compact();
+    }
+
+    /// Drop the oldest `n` samples (all if fewer).
+    pub fn discard(&mut self, n: usize) {
+        self.start += n.min(self.len());
+        self.compact();
+    }
+
+    /// Compact once the consumed head dominates (keeps memory bounded).
+    fn compact(&mut self) {
         if self.start > self.buf.len() / 2 {
             self.buf.drain(..self.start);
             self.start = 0;
@@ -96,7 +122,7 @@ impl Fifo {
 }
 
 /// Mix or duplicate `input` (`in_ch` channels) to `out_ch` channels, with gain.
-fn map_channels(input: &[f32], in_ch: usize, out_ch: usize, gain: f32, out: &mut Vec<f32>) {
+pub(crate) fn map_channels(input: &[f32], in_ch: usize, out_ch: usize, gain: f32, out: &mut Vec<f32>) {
     for frame in input.chunks_exact(in_ch) {
         if out_ch == 1 {
             out.push(gain * frame.iter().sum::<f32>() / in_ch as f32);
@@ -207,7 +233,8 @@ impl AudioSource for FileSource {
 /// the output's queue is full. At start-up the station fills that queue as fast as it
 /// can, consuming input faster than it arrives; the first read therefore waits for the
 /// target backlog plus the queue plus the read itself, which leaves the target backlog
-/// once the queue is full, and the loop starts after the reads that fill it.
+/// once the queue is full, and the loop starts after the reads that fill it
+/// ([`ClockFollower`], which the web stream input uses too).
 struct DeviceSource {
     name: String,
     stream: InputStream,
@@ -220,22 +247,43 @@ struct DeviceSource {
     fifo: Fifo,
     scratch: Vec<f32>,
     /// Drift compensation (sound-card output).
-    drift: Option<InputDrift>,
-    /// Capacity of the sound-card output's queue, s (with drift compensation).
-    output_queue_s: f64,
+    clock: Option<ClockFollower>,
     /// The first read has waited for the start-up backlog.
     primed: bool,
-    /// Reads left while the station fills the output's queue (the backlog does not
-    /// measure the drift yet).
-    filling_reads: u32,
 }
 
-/// PI loop holding the capture backlog of a sound-card input at a target by trimming
-/// the resampling ratio: a growing backlog (input clock fast) makes the resampler
-/// consume more input per output frame.
+/// Gains and target of an [`InputDrift`] loop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DriftTuning {
+    /// Backlog the loop holds, s.
+    pub target_s: f64,
+    /// Proportional gain (trim per second of excess backlog, as a ratio).
+    pub kp: f64,
+    /// Time constant of the backlog filter, s.
+    pub filter_tau_s: f64,
+}
+
+impl DriftTuning {
+    /// A sound-card input: 0.3 s backlog; 25 ms of excess → 1000 ppm and a 5 s filter,
+    /// as the receiver's player. The capture buffer fills in callback-sized steps
+    /// (10–20 ms), which the proportional term would otherwise pass on as several
+    /// hundred ppm of jitter.
+    pub const SOUND_CARD: DriftTuning = DriftTuning { target_s: 0.3, kp: 0.04, filter_tau_s: 5.0 };
+    /// A network stream: 1.5 s backlog against the network's jitter (data arrives in
+    /// bursts of up to several hundred ms); 250 ms of excess → 1000 ppm and a 20 s
+    /// filter, so that the jitter barely moves the trim (simulated in the tests: ±0.2 s
+    /// of jitter gives under 200 ppm peak). The loop's time constant is about 8 minutes
+    /// (broadcasters' clocks are off by up to ~200 ppm, 0.7 s per hour); gross errors
+    /// are handled by re-buffering and skipping in the web stream source.
+    pub const NETWORK: DriftTuning = DriftTuning { target_s: 1.5, kp: 0.004, filter_tau_s: 20.0 };
+}
+
+/// PI loop holding the backlog of an input running on its own clock at a target by
+/// trimming the resampling ratio: a growing backlog (input clock fast) makes the
+/// resampler consume more input per output frame.
 #[derive(Debug, Clone)]
-struct InputDrift {
-    target_s: f64,
+pub(crate) struct InputDrift {
+    tuning: DriftTuning,
     /// Low-pass filtered backlog, s.
     filtered: Option<f64>,
     integral: f64,
@@ -243,19 +291,16 @@ struct InputDrift {
 }
 
 impl InputDrift {
-    /// Proportional gain: 25 ms of excess backlog → 1000 ppm (as the receiver's player).
-    const KP: f64 = 0.04;
-    /// Integral gain (critically damped).
-    const KI: f64 = Self::KP * Self::KP / 4.0;
     /// Largest trim, ppm (±1.7 cents; sound cards differ by up to ~200 ppm).
     const MAX_PPM: f64 = 1000.0;
-    /// Time constant of the backlog filter, s (as the receiver's player). The capture
-    /// buffer fills in callback-sized steps (10–20 ms), which the proportional term
-    /// would pass on as several hundred ppm of jitter.
-    const FILTER_TAU_S: f64 = 5.0;
 
-    fn new(target_s: f64) -> Self {
-        Self { target_s, filtered: None, integral: 0.0, ppm: 0.0 }
+    fn new(tuning: DriftTuning) -> Self {
+        Self { tuning, filtered: None, integral: 0.0, ppm: 0.0 }
+    }
+
+    /// Integral gain (critically damped).
+    fn ki(&self) -> f64 {
+        self.tuning.kp * self.tuning.kp / 4.0
     }
 
     /// New ratio trim (ppm) for a backlog of `backlog_s` seconds, `dt` seconds after
@@ -263,20 +308,74 @@ impl InputDrift {
     fn update(&mut self, backlog_s: f64, dt: f64) -> f64 {
         let filtered = match self.filtered {
             None => backlog_s,
-            Some(f) => f + (dt / Self::FILTER_TAU_S).min(1.0) * (backlog_s - f),
+            Some(f) => f + (dt / self.tuning.filter_tau_s).min(1.0) * (backlog_s - f),
         };
         self.filtered = Some(filtered);
-        let e = filtered - self.target_s;
-        let limit = Self::MAX_PPM * 1e-6 / Self::KI;
+        let e = filtered - self.tuning.target_s;
+        let ki = self.ki();
+        let limit = Self::MAX_PPM * 1e-6 / ki;
         self.integral = (self.integral + e * dt).clamp(-limit, limit);
-        let u = -(Self::KP * e + Self::KI * self.integral);
+        let u = -(self.tuning.kp * e + ki * self.integral);
         self.ppm = (u * 1e6).clamp(-Self::MAX_PPM, Self::MAX_PPM);
         self.ppm
     }
 }
 
-/// Capture backlog the drift loop holds, s.
-const INPUT_BACKLOG_S: f64 = 0.3;
+/// Follows the clock of an input against a sound-card output (see [`DeviceSource`]):
+/// the start-up backlog the first read waits for, the reads that fill the output's
+/// queue (when the backlog does not measure the drift yet), then an [`InputDrift`]
+/// loop.
+pub(crate) struct ClockFollower {
+    drift: InputDrift,
+    /// Capacity of the sound-card output's queue, s.
+    output_queue_s: f64,
+    /// Reads left while the station fills the output's queue.
+    filling_reads: u32,
+}
+
+impl ClockFollower {
+    pub fn new(tuning: DriftTuning, output_queue: Duration) -> Self {
+        Self { drift: InputDrift::new(tuning), output_queue_s: output_queue.as_secs_f64(), filling_reads: 0 }
+    }
+
+    /// The backlog the loop holds, s.
+    pub fn target_s(&self) -> f64 {
+        self.drift.tuning.target_s
+    }
+
+    /// Backlog the first read of `read_s` seconds waits for: the target, the output's
+    /// queue and the read itself.
+    pub fn start_backlog_s(&self, read_s: f64) -> f64 {
+        self.target_s() + self.output_queue_s + read_s
+    }
+
+    /// The first read has waited: the reads that fill the output's queue follow (each
+    /// read is followed by the frame's write, which blocks once the queue is full).
+    pub fn started(&mut self, read_s: f64) {
+        self.filling_reads = (self.output_queue_s / read_s - 1e-9).ceil().max(0.0) as u32;
+    }
+
+    /// Playback resumes after re-buffering: the backlog filter restarts from the next
+    /// measurement (the loop's integral, the learnt clock offset, is kept).
+    pub fn resume(&mut self) {
+        self.drift.filtered = None;
+    }
+
+    /// After a read of `read_s` seconds leaving `backlog_s`: the new ratio trim, or
+    /// `None` while the output's queue fills.
+    pub fn update(&mut self, backlog_s: f64, read_s: f64) -> Option<f64> {
+        if self.filling_reads > 0 {
+            self.filling_reads -= 1;
+            return None;
+        }
+        Some(self.drift.update(backlog_s, read_s))
+    }
+
+    /// The current trim, ppm.
+    pub fn ppm(&self) -> f64 {
+        self.drift.ppm
+    }
+}
 
 impl DeviceSource {
     /// Open `device` for PCM at `out_rate` with `out_ch` channels. `output_queue` is the
@@ -317,10 +416,8 @@ impl DeviceSource {
             resampler,
             fifo: Fifo::default(),
             scratch: Vec::new(),
-            drift: compensate.then(|| InputDrift::new(INPUT_BACKLOG_S)),
-            output_queue_s: queue.as_secs_f64(),
+            clock: output_queue.map(|q| ClockFollower::new(DriftTuning::SOUND_CARD, q)),
             primed: false,
-            filling_reads: 0,
         })
     }
 
@@ -328,8 +425,9 @@ impl DeviceSource {
     /// `frames` output frames (see the type's documentation). If the station started
     /// late and more has piled up, the oldest audio is dropped instead.
     fn prime(&mut self, frames: usize) {
+        let Some(clock) = self.clock.as_mut() else { return };
         let read_s = frames as f64 / f64::from(self.out_rate);
-        let seconds = INPUT_BACKLOG_S + self.output_queue_s + read_s;
+        let seconds = clock.start_backlog_s(read_s);
         let target = (seconds * f64::from(self.in_rate)) as usize;
         let deadline = std::time::Instant::now() + Duration::from_secs_f64(seconds + 2.0);
         while self.stream.available_frames() < target && std::time::Instant::now() < deadline {
@@ -340,8 +438,7 @@ impl DeviceSource {
             self.stream.read(excess);
         }
         self.primed = true;
-        // Each read is followed by the frame's write, which blocks once the queue is full.
-        self.filling_reads = (self.output_queue_s / read_s - 1e-9).ceil().max(0.0) as u32;
+        clock.started(read_s);
     }
 
     /// Seconds of input captured but not yet consumed (in the capture buffer and,
@@ -354,7 +451,7 @@ impl DeviceSource {
 
 impl AudioSource for DeviceSource {
     fn read(&mut self, frames: usize, out: &mut Vec<f32>) -> std::result::Result<(), String> {
-        if self.drift.is_some() && !self.primed {
+        if self.clock.is_some() && !self.primed {
             self.prime(frames);
         }
         let need = frames * self.out_ch;
@@ -372,10 +469,10 @@ impl AudioSource for DeviceSource {
         }
         self.fifo.take(need, out);
         let backlog = self.backlog_s();
-        if self.filling_reads > 0 {
-            self.filling_reads -= 1;
-        } else if let (Some(drift), Some(r)) = (self.drift.as_mut(), self.resampler.as_mut()) {
-            let ppm = drift.update(backlog, frames as f64 / f64::from(self.out_rate));
+        let read_s = frames as f64 / f64::from(self.out_rate);
+        if let (Some(clock), Some(r)) = (self.clock.as_mut(), self.resampler.as_mut())
+            && let Some(ppm) = clock.update(backlog, read_s)
+        {
             r.set_ratio_adjust_ppm(ppm).map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -386,7 +483,7 @@ impl AudioSource for DeviceSource {
     }
 
     fn drift_ppm(&self) -> Option<f64> {
-        self.drift.as_ref().map(|d| d.ppm)
+        self.clock.as_ref().map(ClockFollower::ppm)
     }
 }
 
@@ -418,7 +515,14 @@ impl AudioSource for ToneSource {
 }
 
 /// Open the source described by `input` for an encoder taking `rate` Hz, `ch` channels.
-fn open_source(cfg: &StationConfig, input: &AudioInputSettings, rate: u32, ch: usize) -> std::result::Result<Box<dyn AudioSource>, String> {
+/// `stop` ends a source's waits (a web stream connecting).
+fn open_source(
+    cfg: &StationConfig,
+    input: &AudioInputSettings,
+    rate: u32,
+    ch: usize,
+    stop: &StopHandle,
+) -> std::result::Result<Box<dyn AudioSource>, String> {
     let gain = db_to_gain(input.gain_db);
     if let Some(f) = &input.file {
         return Ok(Box::new(FileSource::open(&cfg.resolve(f), input.looped, rate, ch, gain)?));
@@ -430,7 +534,15 @@ fn open_source(cfg: &StationConfig, input: &AudioInputSettings, rate: u32, ch: u
         return Ok(Box::new(DeviceSource::open(d, rate, ch, gain, output_queue)?));
     }
     if let Some(url) = &input.url {
-        return Err(format!("web stream input ({url}) is not available in this build yet"));
+        // As with a sound-card input: with a sound-card output the stream's clock is
+        // followed, with file output the stream paces the station.
+        let opts = WebStreamOptions {
+            gain,
+            output_queue: crate::output::device_queue(&cfg.output),
+            stop: stop.clone(),
+            ..WebStreamOptions::new(url, rate, ch)
+        };
+        return WebStreamSource::open(opts).map(|s| Box::new(s) as Box<dyn AudioSource>).map_err(|e| format!("web stream: {e}"));
     }
     let freq = input.tone_hz.ok_or("the audio input needs `file`, `device`, `url` or `tone_hz`")?;
     Ok(Box::new(ToneSource {
@@ -803,6 +915,12 @@ pub(crate) struct AudioChain {
     source: Box<dyn AudioSource>,
     encoder: Encoder,
     text: Option<TextMessageEncoder>,
+    /// The configured text messages.
+    messages: Vec<String>,
+    /// Send the source's titles as text messages (`stream_titles`).
+    titles: bool,
+    /// The title currently in the text message cycle.
+    title: Option<String>,
     stream_len: usize,
     pcm: Vec<f32>,
     pub counters: AudioCounters,
@@ -814,10 +932,11 @@ fn to_db(v: f32) -> f32 {
 
 impl AudioChain {
     /// Open the input and create the encoder of service `service` (for error texts).
-    pub fn new(cfg: &StationConfig, service: usize, plan: &AudioPlan, stream: StreamLengths) -> Result<Self> {
+    /// `stop` ends the input's waits (e.g. a web stream connecting).
+    pub fn new(cfg: &StationConfig, service: usize, plan: &AudioPlan, stream: StreamLengths, stop: &StopHandle) -> Result<Self> {
         let name = format!("service {service} (\"{}\")", cfg.services[service].label);
         let settings = cfg.services[service].audio.as_ref().expect("audio plan has audio settings");
-        let source = open_source(cfg, &settings.input, plan.input_rate, plan.input_channels)
+        let source = open_source(cfg, &settings.input, plan.input_rate, plan.input_channels, stop)
             .map_err(|message| StationError::Input { service: name.clone(), message })?;
         let encoder = match plan.codec {
             Codec::Opus => OpusEncoder::new(plan, stream).map(Encoder::Opus),
@@ -826,9 +945,10 @@ impl AudioChain {
             _ => AacEncoder::new(plan, stream).map(Encoder::Aac),
         }
         .map_err(|source| StationError::Codec { service: name, source })?;
+        let messages: Vec<String> = settings.text.iter().filter(|m| !m.is_empty()).cloned().collect();
         let text = plan.text.then(|| {
             let mut t = TextMessageEncoder::new();
-            for m in settings.text.iter().filter(|m| !m.is_empty()) {
+            for m in &messages {
                 t.add_message(m);
             }
             t
@@ -838,10 +958,30 @@ impl AudioChain {
             source,
             encoder,
             text,
+            messages,
+            titles: settings.input.sends_titles(),
+            title: None,
             stream_len: stream.total(),
             pcm: Vec::new(),
             counters: AudioCounters::default(),
         })
+    }
+
+    /// Put a new title from the source into the text message cycle: the title first,
+    /// then the configured messages (a cleared title leaves just those).
+    fn update_title(&mut self) {
+        if !self.titles {
+            return;
+        }
+        let title = self.source.title().filter(|t| !t.trim().is_empty());
+        if title == self.title {
+            return;
+        }
+        if let Some(text) = self.text.as_mut() {
+            let cycle: Vec<&str> = title.iter().chain(&self.messages).map(String::as_str).collect();
+            text.set_messages(&cycle);
+        }
+        self.title = title;
     }
 
     /// The stream bytes of the next multiplex frame.
@@ -856,6 +996,7 @@ impl AudioChain {
         self.counters.input_rms_dbfs = to_db((sum / self.pcm.len().max(1) as f64).sqrt() as f32);
         self.counters.input_peak_dbfs = to_db(peak);
         self.counters.input_drift_ppm = self.source.drift_ppm();
+        self.update_title();
         let len = self.plan.super_frame_len;
         let mut lf = match &mut self.encoder {
             Encoder::Aac(e) => {
@@ -907,29 +1048,39 @@ impl AudioChain {
     pub fn input_description(&self) -> String {
         self.source.describe()
     }
+
+    /// Status of a web stream input.
+    pub fn web_stream(&self) -> Option<WebStreamStatus> {
+        self.source.web_stream()
+    }
+
+    /// The input's log lines since the last call.
+    pub fn take_log(&mut self) -> Vec<String> {
+        self.source.take_log()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::InputDrift;
+    use super::{DriftTuning, InputDrift};
 
     /// Input clock `offset` fast (fraction), station consuming 400 ms per step, the
-    /// backlog measured with ±10 ms of jitter (the capture buffer fills in steps).
-    /// Returns the mean backlog, the mean trim and the trim's largest deviation from
-    /// its mean over the last 400 s of 1200 s.
-    fn simulate(offset: f64) -> (f64, f64, f64) {
-        let mut drift = InputDrift::new(0.3);
-        let (mut backlog, dt) = (0.3, 0.4);
+    /// backlog measured with ±`jitter_s`/2 of jitter (a capture buffer filling in steps,
+    /// a network delivering in bursts). Returns the mean backlog, the mean trim and the
+    /// trim's largest deviation from its mean over the last third of `steps`.
+    fn simulate(tuning: DriftTuning, offset: f64, jitter_s: f64, steps: usize) -> (f64, f64, f64) {
+        let mut drift = InputDrift::new(tuning);
+        let (mut backlog, dt) = (tuning.target_s, 0.4);
         let mut ppm = 0.0;
         let mut seed = 1u32;
         let mut tail = Vec::new();
-        for step in 0..3000 {
+        for step in 0..steps {
             // Arrived: dt·(1 + offset); consumed: dt / (1 + trim) of input.
             backlog += dt * (1.0 + offset) - dt / (1.0 + ppm * 1e-6);
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let jitter = (f64::from(seed >> 8) / f64::from(1u32 << 24) - 0.5) * 0.02;
+            let jitter = (f64::from(seed >> 8) / f64::from(1u32 << 24) - 0.5) * jitter_s;
             ppm = drift.update(backlog + jitter, dt);
-            if step >= 2000 {
+            if step >= steps * 2 / 3 {
                 tail.push((backlog, ppm));
             }
         }
@@ -943,10 +1094,23 @@ mod tests {
     #[test]
     fn input_drift_loop_follows_the_clock() {
         for offset_ppm in [-200.0, -50.0, 0.0, 100.0, 300.0] {
-            let (backlog, ppm, ripple) = simulate(offset_ppm * 1e-6);
+            // 1200 s with ±10 ms of jitter.
+            let (backlog, ppm, ripple) = simulate(DriftTuning::SOUND_CARD, offset_ppm * 1e-6, 0.02, 3000);
             assert!((backlog - 0.3).abs() < 0.002, "{offset_ppm} ppm: backlog {backlog}");
             assert!((ppm + offset_ppm).abs() < 5.0, "{offset_ppm} ppm: trim {ppm}");
             // Unfiltered, the ±10 ms would give ±400 ppm.
+            assert!(ripple < 200.0, "{offset_ppm} ppm: trim ripple {ripple}");
+        }
+    }
+
+    /// The network tuning: a 1.5 s backlog measured with ±0.2 s of jitter is held with a
+    /// small trim ripple (4 h simulated; the loop settles within the first hour).
+    #[test]
+    fn network_drift_loop_follows_the_clock() {
+        for offset_ppm in [-200.0, 0.0, 150.0] {
+            let (backlog, ppm, ripple) = simulate(DriftTuning::NETWORK, offset_ppm * 1e-6, 0.4, 36_000);
+            assert!((backlog - 1.5).abs() < 0.01, "{offset_ppm} ppm: backlog {backlog}");
+            assert!((ppm + offset_ppm).abs() < 10.0, "{offset_ppm} ppm: trim {ppm}");
             assert!(ripple < 200.0, "{offset_ppm} ppm: trim ripple {ripple}");
         }
     }

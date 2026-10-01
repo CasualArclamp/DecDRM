@@ -951,6 +951,16 @@ fn check_audio(cfg: &StationConfig, name: &str, a: &crate::config::AudioSettings
             p.push(format!("{name}: audio input: {e}"));
         }
     }
+    // A web stream is checked without connecting (validation runs often, e.g. while a
+    // GUI edits the configuration); the connection is made when the station starts.
+    if let Some(url) = &i.url
+        && let Err(e) = crate::webstream::check_url(url)
+    {
+        p.push(format!("{name}: audio input: {e}"));
+    }
+    if i.stream_titles.is_some() && i.url.is_none() {
+        p.push(format!("{name}: stream_titles is only used with a web stream input (`url`)"));
+    }
     let input_rate = match a.codec {
         Codec::Opus => 48_000,
         // Without sample_rate the highest rate the plan may choose; it checks the tone
@@ -1069,6 +1079,12 @@ fn stream_requests(cfg: &StationConfig, p: &mut Problems) -> Vec<Request> {
     requests
 }
 
+/// Whether the audio stream carries text messages: configured ones, or a web stream's
+/// titles (which may come at any time, so the text bytes are always reserved).
+fn has_text(a: &crate::config::AudioSettings) -> bool {
+    a.text.iter().any(|t| !t.is_empty()) || a.input.sends_titles()
+}
+
 /// Codec parameters of an audio service carried in `stream`.
 fn audio_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::result::Result<AudioPlan, String> {
     match a.codec {
@@ -1079,7 +1095,7 @@ fn audio_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::res
     let codec = a.codec;
     let core_rate = a.core_rate.unwrap_or_else(|| default_core_rate(codec));
     let stereo = a.stereo || codec == Codec::HeAacV2;
-    let text = a.text.iter().any(|t| !t.is_empty());
+    let text = has_text(a);
     let len = stream.bytes();
     let super_frame_len = len.saturating_sub(if text { TEXT_MESSAGE_BYTES } else { 0 });
     let kbit = |bytes: usize| bytes as f64 * 8.0 / FRAME_SECONDS / 1000.0;
@@ -1182,7 +1198,7 @@ fn stream_remedy(stream: &StreamPlan) -> &'static str {
 /// the sampling rate, the encoder configuration — checked without, then with libxaac —
 /// and SDC type 9 with the encoder's Static Config.
 fn xhe_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::result::Result<AudioPlan, String> {
-    let text = a.text.iter().any(|t| !t.is_empty());
+    let text = has_text(a);
     let len = stream.bytes();
     let text_bytes = if text { TEXT_MESSAGE_BYTES } else { 0 };
     let super_frame_len = len.saturating_sub(text_bytes);
@@ -1273,7 +1289,7 @@ fn check_encodec(name: &str, a: &crate::config::AudioSettings, rate: u32, p: &mu
 /// bandwidth, or the highest that fits, and the framing that spends the spare bytes on
 /// robustness (`decdrm_encodec::plan`).
 fn encodec_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::result::Result<AudioPlan, String> {
-    let text = a.text.iter().any(|t| !t.is_empty());
+    let text = has_text(a);
     let len = stream.bytes();
     let text_bytes = if text { TEXT_MESSAGE_BYTES } else { 0 };
     let super_frame_len = len.saturating_sub(text_bytes);

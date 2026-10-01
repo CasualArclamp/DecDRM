@@ -19,6 +19,7 @@ use crate::fac::FacScheduler;
 use crate::output::DeviceSink;
 use crate::plan::{FRAME_SECONDS, MultiplexPlan, StreamContent};
 use crate::sdc::{SdcScheduler, entities};
+use crate::webstream::WebStreamStatus;
 use decdrm_core::Cplx;
 use decdrm_core::channel::ChannelSimulator;
 use decdrm_core::channel::resample::Resampler;
@@ -94,6 +95,8 @@ pub struct AudioStatus {
     pub input_finished: bool,
     /// Levels and counters.
     pub counters: AudioCounters,
+    /// A web stream input's state, stream, title and buffer.
+    pub web_stream: Option<WebStreamStatus>,
 }
 
 /// Status of a data application.
@@ -115,9 +118,10 @@ struct DataStream {
 /// Stops a station's sound-card waits from another thread (see [`Station::stop_handle`]).
 ///
 /// After [`StopHandle::stop`], writing to the sound card returns at once (the rest of
-/// the frame is not queued) and [`Station::finish`] does not wait for the queued signal
-/// to play out; file output is unaffected. The station's owner still ends its frame
-/// loop and calls `finish` as usual.
+/// the frame is not queued), [`Station::finish`] does not wait for the queued signal
+/// to play out, and a web stream input stops waiting for audio (silence follows); file
+/// output is unaffected. The station's owner still ends its frame loop and calls
+/// `finish` as usual.
 ///
 /// Rust note: the handle is an `Arc<AtomicBool>` — a flag shared between threads
 /// without a lock; `Clone` gives another handle to the same flag.
@@ -200,11 +204,13 @@ impl Station {
         let names: Vec<String> =
             cfg.services.iter().enumerate().map(|(i, s)| format!("service {i} (\"{}\")", s.label)).collect();
 
+        // Created first: it also ends the waits of inputs (a web stream connecting).
+        let stop = StopHandle::default();
         let mut audio = Vec::new();
         for (i, sp) in plan.services.iter().enumerate() {
             if let Some(a) = &sp.audio {
                 let lengths = plan.streams[usize::from(a.stream)].lengths;
-                audio.push((i, AudioChain::new(&cfg, i, a, lengths)?));
+                audio.push((i, AudioChain::new(&cfg, i, a, lengths, &stop)?));
             }
         }
         let mut data = Vec::new();
@@ -283,7 +289,7 @@ impl Station {
             clock,
             clock_buf: (Vec::new(), Vec::new()),
             samples: Vec::new(),
-            stop: StopHandle::default(),
+            stop,
         };
         station.update_status();
         Ok(station)
@@ -309,6 +315,18 @@ impl Station {
     /// sound card).
     pub fn stop_handle(&self) -> StopHandle {
         self.stop.clone()
+    }
+
+    /// Log lines of the audio inputs since the last call — a web stream's connections,
+    /// redirects, playlists, titles, reconnections, buffer underruns — each prefixed
+    /// with its service, e.g. `service 0 ("Radio"): web stream: title: Artist - Song`.
+    /// Call it in the frame loop and show the lines.
+    pub fn take_log(&mut self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (service, chain) in &mut self.audio {
+            lines.extend(chain.take_log().into_iter().map(|l| format!("{}: {l}", self.names[*service])));
+        }
+        lines
     }
 
     /// Number of output channels (1 real, 2 I/Q) at 48 kHz.
@@ -466,6 +484,7 @@ impl Station {
                         input: chain.map(AudioChain::input_description).unwrap_or_default(),
                         input_finished: chain.is_some_and(AudioChain::input_finished),
                         counters: chain.map(|c| c.counters).unwrap_or_default(),
+                        web_stream: chain.and_then(AudioChain::web_stream),
                     }
                 }),
                 apps: sp

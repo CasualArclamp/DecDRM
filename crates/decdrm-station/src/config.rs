@@ -505,20 +505,20 @@ pub struct AudioInputSettings {
     pub device: Option<String>,
     /// Internet radio stream to transmit (HTTP or HTTPS URL of an Icecast/Shoutcast
     /// stream or a playlist): decoded, resampled and followed in clock; reconnects when
-    /// the stream drops.
+    /// the stream drops (see [`crate::webstream`]).
     #[serde(default)]
     pub url: Option<String>,
     /// Web stream: send the stream's "now playing" titles as the service's text
-    /// messages.
-    #[serde(default = "default_true")]
-    pub stream_titles: bool,
+    /// messages (default: yes; see [`Self::sends_titles`]). Only used with `url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_titles: Option<bool>,
     /// Built-in test tone of this frequency, Hz.
     #[serde(default)]
     pub tone_hz: Option<f64>,
     /// Peak level of the test tone, dBFS.
     #[serde(default = "default_tone_level")]
     pub level_dbfs: f64,
-    /// Gain applied to a file or sound-card input, dB.
+    /// Gain applied to a file, sound-card or web stream input, dB.
     #[serde(default)]
     pub gain_db: f64,
 }
@@ -551,6 +551,13 @@ impl AudioInputSettings {
     pub fn url(url: impl Into<String>) -> Self {
         Self { url: Some(url.into()), ..Self::default() }
     }
+
+    /// Whether the stream's titles go out as text messages: a web stream input with
+    /// `stream_titles` not set to false. The audio stream then carries text messages
+    /// even without configured ones.
+    pub fn sends_titles(&self) -> bool {
+        self.url.is_some() && self.stream_titles.unwrap_or(true)
+    }
 }
 
 impl Default for AudioInputSettings {
@@ -560,7 +567,7 @@ impl Default for AudioInputSettings {
             looped: true,
             device: None,
             url: None,
-            stream_titles: true,
+            stream_titles: None,
             tone_hz: None,
             level_dbfs: default_tone_level(),
             gain_db: 0.0,

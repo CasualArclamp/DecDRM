@@ -5,8 +5,9 @@
 //! bandwidth, MSC/SDC constellations, protection levels, interleaving), the outputs
 //! (WAV/FLAC file and/or sound card, real IF or I/Q), and up to four services — audio
 //! services (AAC, HE-AAC, HE-AAC v2, xHE-AAC, Opus or — with the `encodec` feature —
-//! DecDRM's experimental EnCodec, from a file, a sound card or a test tone, with text
-//! messages) and data services (MOT slideshow, broadcast website,
+//! DecDRM's experimental EnCodec, from a file, a sound card, an internet radio stream
+//! ([`webstream`]) or a test tone, with text messages) and data services (MOT
+//! slideshow, broadcast website,
 //! Journaline, EPG, TPEG or raw data), whose applications may also ride along with an
 //! audio service; plus alternative-frequency signalling ([`afs`]).
 //!
@@ -44,6 +45,7 @@ mod output;
 mod sdc;
 mod station;
 pub mod time;
+pub mod webstream;
 
 pub use afs::{AfsMultiplexSettings, AfsOtherSettings, AfsRegionSettings, AfsScheduleSettings, AfsSettings, OtherSystem};
 pub use audio::AudioCounters;
@@ -56,3 +58,4 @@ pub use data::load_journaline;
 pub use error::{ConfigProblems, Result, StationError};
 pub use plan::{AppPlan, AudioPlan, MultiplexPlan, ServicePlan, StreamContent, StreamPlan};
 pub use station::{AppStatus, AudioStatus, ServiceStatus, Station, StationStatus, StopHandle};
+pub use webstream::{WebStreamState, WebStreamStatus};
