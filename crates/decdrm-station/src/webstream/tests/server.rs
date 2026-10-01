@@ -49,7 +49,16 @@ impl Server {
         routes: Vec<(&str, Handler)>,
         wrap: impl Fn(TcpStream) -> Box<dyn ReadWrite> + Send + Sync + 'static,
     ) -> Server {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+        Self::start_on(0, routes, wrap)
+    }
+
+    /// Like [`Self::start_with`] on `port` of 127.0.0.1 (0: any free one).
+    pub fn start_on(
+        port: u16,
+        routes: Vec<(&str, Handler)>,
+        wrap: impl Fn(TcpStream) -> Box<dyn ReadWrite> + Send + Sync + 'static,
+    ) -> Server {
+        let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind a local port");
         let port = listener.local_addr().expect("local address").port();
         listener.set_nonblocking(true).expect("non-blocking listener");
         let routes: Arc<HashMap<String, Handler>> = Arc::new(routes.into_iter().map(|(p, h)| (p.to_string(), h)).collect());

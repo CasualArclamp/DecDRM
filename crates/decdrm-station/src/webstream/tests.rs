@@ -546,6 +546,66 @@ fn following_a_live_stream_clock() {
     assert!(f64::from_bits(src.shared.trim_ppm.load(Ordering::Relaxed)) < -50.0);
 }
 
+/// In real time, as with a sound-card output: a server that sends a 3 s burst and then
+/// paces the stream; reads every 400 ms as a sound card would ask. The start-up backlog
+/// is reached at once, the burst beyond it dropped, and the backlog then stays near its
+/// target without underruns. (15 s.)
+#[test]
+#[ignore = "real time, 15 s"]
+fn live_stream_with_a_sound_card_output() {
+    let data = mp3(44, 202, 1000); // 24 s, 8000 bytes/s
+    let mut s = Stream::new("audio/mpeg", data);
+    s.pace = Some(8000.0);
+    s.burst = 24_000;
+    let server = Server::start(vec![("/live", s.handler())]);
+    let opts = WebStreamOptions { output_queue: Some(Duration::from_millis(800)), ..options(&server.url("/live"), 24_000, 1) };
+    let mut src = WebStreamSource::open(opts).unwrap();
+    let mut out = Vec::new();
+    let mut levels = Vec::new();
+    // The first read waits for the start-up backlog; it and the next two fill the
+    // output's queue at once; the card then plays, asking for 400 ms every 400 ms.
+    src.read(9600, &mut out).unwrap();
+    levels.push(src.status().buffer_s);
+    let started = Instant::now();
+    for i in 1..36u32 {
+        let due = Duration::from_millis(400) * i.saturating_sub(2);
+        if let Some(wait) = due.checked_sub(started.elapsed()) {
+            std::thread::sleep(wait);
+        }
+        src.read(9600, &mut out).unwrap();
+        levels.push(src.status().buffer_s);
+    }
+    println!("backlog after each read: {levels:.2?}");
+    println!("{:?}", src.take_log());
+    let st = src.status();
+    assert_eq!((st.underruns, st.state), (0, WebStreamState::Playing), "{st:?}");
+    assert!(levels[3..].iter().all(|l| (1.35..1.7).contains(l)), "on target: {levels:.2?}");
+    assert!(src.drift_ppm().is_some_and(|p| p.abs() < 1000.0));
+}
+
+/// For trying the CLI or GUI by hand: serves an endless MP3 stream (a 1.85 kHz tone)
+/// with ICY titles changing every 4 s at http://127.0.0.1:PORT/live (PORT from
+/// `DECDRM_TEST_PORT`, default 8790) for `DECDRM_TEST_SECONDS` (default 60); the first
+/// connection drops after 20 s to show a reconnection.
+#[test]
+#[ignore = "a server for manual tests"]
+fn manual_test_server() {
+    let env = |name: &str, default: u64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+    let mut s = Stream::new("audio/mpeg", mp3(44, 202, 2500)); // 60 s at 8000 bytes/s
+    s.status = "ICY 200 OK";
+    s.headers.push(("icy-name", "DecDRM test stream".into()));
+    s.headers.push(("icy-br", "64".into()));
+    s.metaint = Some(8000);
+    s.titles = (0..15).map(|i| (i * 32_000, format!("Test Artist - Song {}", i + 1))).collect();
+    s.pace = Some(8000.0);
+    s.burst = 32_000;
+    s.repeat = true;
+    s.drop_after = Some(160_000);
+    let server = Server::start_on(env("DECDRM_TEST_PORT", 8790) as u16, vec![("/live", s.handler())], |s| Box::new(s) as Box<dyn server::ReadWrite>);
+    println!("serving {}", server.url("/live"));
+    std::thread::sleep(Duration::from_secs(env("DECDRM_TEST_SECONDS", 60)));
+}
+
 /// A file (a response with a length) is neither trimmed nor skipped.
 #[test]
 fn a_file_has_no_clock() {

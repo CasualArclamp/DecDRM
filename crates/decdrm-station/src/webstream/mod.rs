@@ -490,7 +490,21 @@ impl WebStreamSource {
                 inner = shared.wait(inner, Duration::from_millis(50));
             }
             if !inner.on_demand {
-                // The connection burst beyond the start-up backlog.
+                // Let the burst servers send on connecting finish arriving (while the
+                // FIFO grows faster than real time, at most 1 s), then drop what
+                // exceeds the start-up backlog: arriving later, it would sit in the
+                // backlog for the drift loop to work off over minutes.
+                let settle_until = Instant::now() + Duration::from_secs(1);
+                while !self.stop.is_stopped() && !inner.done && Instant::now() < settle_until {
+                    let before = inner.fifo.len();
+                    let slice_end = Instant::now() + Duration::from_millis(100);
+                    while let Some(left) = slice_end.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) {
+                        inner = shared.wait(inner, left);
+                    }
+                    if (inner.fifo.len().saturating_sub(before) as f64 / per_s) < 0.15 {
+                        break;
+                    }
+                }
                 let excess = self.frames(inner.fifo.len().saturating_sub(want));
                 inner.discard(excess);
             }
