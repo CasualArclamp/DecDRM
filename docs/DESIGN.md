@@ -14,9 +14,9 @@ and the milestone plan. Keep the milestone checklist current.
 | Receiver performance | Match or beat Dream on weak/fading signals (Wiener channel estimation, soft-decision Viterbi, iterative MLC, sample-rate-offset tracking). |
 | Audio decoding | Behind a Rust codec interface. AAC / HE-AAC v1/v2 and **xHE-AAC** via **FDK-AAC** (vendored, built from source, statically linked). **Opus** (Dream's extension) via libopus. CELP/HVXC: detected and reported as unsupported. **EVS** sent as data by KCBS (6140 kHz): recognised always; decoded with the 3GPP reference decoder (feature `evs`) built from a user-supplied source zip, never committed (3GPP/ETSI copyright, patent-licensed codec: private use). |
 | Data services | Text messages, Journaline, MOT Slideshow, EPG, Broadcast Website, TPEG/unknown (raw data saved). Broadcast clock and alternative-frequency (AFS) info from the SDC. |
-| Inputs | Recorded files (WAV/FLAC; real IF or I/Q; any sample rate) and live sound card (including a virtual audio cable fed by web SDRs such as KiwiSDR). No direct SDR drivers, no network clients. |
+| Inputs | Recorded files (WAV/FLAC; real IF or I/Q; any sample rate) and live sound card (including a virtual audio cable fed by web SDRs such as KiwiSDR). No direct SDR drivers, no network clients (the transmitter's web stream audio input is the one network client). |
 | Outputs | Live audio (with clock-drift compensation) and logs/metrics (CSV/JSON). |
-| Transmitter | Full transmitter: AAC/HE-AAC (FDK encoder), xHE-AAC (libxaac encoder), Opus, plus **EnCodec** (Meta's neural codec, via candle) as an experimental DecDRM-only extension. Carries every data service the receiver decodes. Output to WAV/FLAC file and sound card. Includes a channel simulator (spec channel models) for loopback testing. |
+| Transmitter | Full transmitter: AAC/HE-AAC (FDK encoder), xHE-AAC (libxaac encoder), Opus, plus **EnCodec** (Meta's neural codec, via candle) as an experimental DecDRM-only extension. Carries every data service the receiver decodes. Programme audio from a file, a sound card, a test tone or an internet radio stream (Icecast/SHOUTCAST over HTTP/HTTPS, its titles as text messages). Output to WAV/FLAC file and sound card. Includes a channel simulator (spec channel models) for loopback testing. |
 | UI | Library crates + CLI + desktop GUI (**egui**). The GUI has RX/TX modes like Dream; the transmitter is also scriptable from the CLI with a TOML config. |
 | Platforms | Windows x86_64 (primary), Linux x86_64. |
 | Workflow | Max autonomy; commit per milestone; local git + private GitHub repo `CasualArclamp/DecDRM`. |
@@ -47,7 +47,7 @@ and the milestone plan. Keep the milestone checklist current.
   text messages, and the transmitter chain (the exact inverse) plus the channel simulator.
   DSP runs in `f64` (`Complex<f64>`); PCM audio is `f32`.
 * **decdrm-codecs**: safe wrappers over FDK-AAC (DRM transport `TT_DRM`, configured with
-  the raw SDC type-9 bytes, as Dream does) and libopus.
+  the raw SDC type-9 bytes, as Dream does; ADTS for web streams) and libopus.
 * **decdrm-data**: packet-mode reassembly, MSC data groups, MOT (slideshow, broadcast
   website, EPG objects), Journaline, EPG binary→XML, TPEG/raw capture — decode and encode.
 * **decdrm-io**: WAV/FLAC reading and writing, resampling to the 48 kHz working rate,
@@ -56,7 +56,10 @@ and the milestone plan. Keep the milestone checklist current.
   owns the codec/data registries, publishes status snapshots for the UIs, writes logs.
 * **decdrm-station**: the transmitter application layer: a TOML station config
   (services, codecs, data applications, output) → planned multiplex → frames from
-  `decdrm-core::tx` → WAV/FLAC or sound card.
+  `decdrm-core::tx` → WAV/FLAC or sound card. Audio inputs: file, sound card, test
+  tone, web stream (`webstream`: its own HTTP/1.1 client with rustls, ICY metadata,
+  playlists, MP3/ADTS framing and an Ogg demuxer; decoding by symphonia, FDK-AAC and
+  libopus).
 * **decdrm-schedule** (pure Rust, no DSP): broadcast schedules for "what is on the
   air now" — Dream's `DRMSchedule.ini` and EiBi's CSV, on-air logic, sources and
   downloads (curl/wget, on request only); used by `decdrm schedule` and the GUI's
@@ -215,6 +218,39 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       cached per minute and painted with `show_rows`, the received frequency from the
       *Frequency* box or the recording's file name — KiwiSDR, HDSDR, SDR# naming —
       highlighted and named in the log at Start; a click copies the frequency).
+- [x] **Web stream input** (2026-10-01) — the transmitter relays an internet radio
+      stream: `[service.audio.input] url = "…"`, with `stream_titles` (default on).
+      *Done:* `decdrm_station::webstream`. HTTP/1.1 client of our own (SHOUTCAST's
+      `ICY 200 OK`, chunked coding, redirects, reads that poll a stop flag and give up
+      after a stall; rustls with the ring provider and the system's roots); M3U/M3U8/PLS
+      resolve to their first entry (relative entries, dot segments), HLS refused. ICY
+      metadata stripped, `StreamTitle` parsed (apostrophes, Latin-1). Format by sniffing
+      (two agreeing frame headers), then `Content-Type`: MP3/MP2 (own framer, symphonia
+      decoder), AAC/HE-AAC/HE-AAC v2 in ADTS (`decdrm_codecs::FdkAdtsDecoder`; PS known
+      by FDK's flag, as FDK delivers mono HE-AAC as stereo), Ogg Vorbis (symphonia), Ogg
+      Opus (libopus; pre-skip, output gain), FLAC native (CRC-16 framing; a synthetic
+      STREAMINFO when joined mid-way) and in Ogg. Our Ogg demuxer follows Icecast's
+      chained streams and takes titles from their comments (symphonia's stops at a
+      chain). A worker thread decodes, mixes/resamples to the encoder and fills a FIFO,
+      waiting when it is full. Sound-card output: the sound-card input's drift loop,
+      shared as `ClockFollower`, with a network tuning (1.5 s backlog, 250 ms → 1000 ppm,
+      20 s filter: ±0.2 s of jitter → < 200 ppm ripple, simulated); the first read lets
+      the server's connection burst arrive and drops it beyond the start-up backlog
+      (real time: 1.51 ± 0.02 s); re-buffering after an underrun, skipping beyond 2 s
+      over the target; a response with a length (a file) is neither trimmed nor
+      skipped. File output: the stream paces the station. Losses → silence and
+      reconnection with backoff 1–30 s; the first connection's failure is the station's
+      error. Titles are queued with their FIFO position and go on air with their audio,
+      first in the text message cycle (`TextMessageEncoder::set_messages`: segment
+      boundary, toggle bit inverted). Status `WebStreamStatus` (state, codec, bit rate,
+      rate, channels, station name, genre, title, buffer, reconnects, underruns,
+      errors), log via `Station::take_log` (printed by `decdrm tx`). Tests against
+      servers on 127.0.0.1 with streams made from tones (FDK ADTS encoder, minimal MP3
+      and Vorbis writers coding one MDCT line, libopus + Ogg muxer, flacenc), TLS with a
+      test CA, playlists, redirects, dropped connections, errors, pacing, and a station
+      loopback through the receiver; live through the virtual cable: 80 s, 0 underruns,
+      titles received. Not verified: real Icecast/SHOUTCAST servers and real encoders'
+      streams (no internet in development).
 
 ## Conventions
 

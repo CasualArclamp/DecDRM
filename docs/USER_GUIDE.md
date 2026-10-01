@@ -360,7 +360,8 @@ multiplex: streams, bit rates, codec settings and what goes where.
     - `core_rate`, `stereo`;
     - `text = [...]`, text messages sent in turn;
     - `[service.audio.input]`, exactly one of `file` (any WAV/FLAC, `loop`), `device`
-      (a sound card) or `tone_hz` (a test tone);
+      (a sound card), `url` (an internet radio stream, see
+      [below](#relaying-an-internet-radio-stream)) or `tone_hz` (a test tone);
   - a **data service** with `[service.data]`.
 - **Data applications** go in `[service.data]` or `[[service.app]]`, which rides along
   with an audio service:
@@ -423,6 +424,54 @@ buffer. The CLI's status lines show this as *clock trim*.
 
 To hear your own station, point `decdrm rx --device …` (or the GUI) at the other end of
 the cable.
+
+### Relaying an internet radio stream
+
+`[service.audio.input] url = "…"` takes the programme from an internet radio stream.
+Rebroadcasting someone else's programme needs their permission.
+
+```toml
+[service.audio]
+codec = "he-aac"
+text = ["Relayed by DecDRM"]       # optional; the stream's titles go first
+
+[service.audio.input]
+url = "https://radio.example/live.mp3"
+# stream_titles = true             # the stream's "now playing" as text messages (default)
+```
+
+- **Streams:** Icecast and SHOUTCAST over HTTP or HTTPS (checked against the system's
+  trusted certificates), following redirects. A playlist (`.m3u`, `.m3u8`, `.pls`)
+  stands for its first stream. HLS (segmented `.m3u8`), DASH, MP4 and WMA streams are
+  not supported.
+- **Codecs:** MP3 (and MP2), AAC, HE-AAC and HE-AAC v2 in ADTS, Ogg Vorbis, Ogg Opus
+  (mono or stereo), FLAC (native or in Ogg). The format is recognised from the data,
+  from the server's `Content-Type` only when the data does not tell. The audio is mixed
+  or duplicated to the encoder's channels and resampled; `gain_db` applies.
+- **Titles:** with `stream_titles` (the default) the title of what is playing — the
+  ICY `StreamTitle`, or an Ogg stream's comments — goes out as a text message, first in
+  the cycle, followed by the `text` messages. A new title replaces the old one at once
+  (receivers see a new message), and it changes when its audio goes out, not when it
+  arrives.
+- **Timing:** the stream runs on the broadcaster's clock.
+  - With a sound-card output the station keeps 1.5 s of the stream in hand and follows
+    its clock like a sound-card input (*clock trim* in the CLI's status lines). It
+    starts once that much has arrived, sends silence and re-buffers when the stream
+    stalls, and skips ahead when it falls more than 2 s behind (after a reconnection).
+    A URL that serves a file (the server states its length) is neither trimmed nor
+    skipped.
+  - With a file output the stream paces the station: the signal is written as fast as
+    the stream delivers, which after the server's first burst is real time. A web
+    stream does not end: give `--duration` (or use the GUI's *Stop after*).
+- **Interruptions:** when the connection drops, the stream ends or cannot be decoded,
+  the station sends silence and reconnects after 1, 2, 4, 8 and 15 s, then every 30 s
+  (back to 1 s after a connection that lasted a minute). Only the first connection must
+  succeed: a wrong URL, an HTTP error, an unsupported format or no audio within 20 s
+  stop the station with a message that says so.
+- **Status:** the CLI prints connections, playlists, redirects, titles and
+  reconnections as they happen and adds the stream's state (connecting, buffering,
+  playing, reconnecting), buffer and title to its status lines. The station's status
+  also carries the stream's coding, bit rate, sampling rate and station name.
 
 ## EnCodec (experimental)
 

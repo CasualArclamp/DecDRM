@@ -78,16 +78,21 @@ stereo = false               # stereo coding (HE-AAC v2 is always parametric ste
 # hierarchical = false       # HMsym/HMmix: carry this stream in the hierarchical part
 # The audio stream gets whatever the data applications leave; the encoder's bit rate
 # follows from its length. Text messages (up to 128 bytes of UTF-8 each) take 4 bytes
-# of the stream per frame and are sent one after the other.
+# of the stream per frame and are sent one after the other (a web stream's current
+# title first, see stream_titles below).
 text = ["Welcome to DecDRM", "A Rust DRM30 transmitter"]
 
-[service.audio.input]        # exactly one of file / device / tone_hz
+[service.audio.input]        # exactly one of file / device / url / tone_hz
 tone_hz = 1000.0             # built-in test tone ...
 level_dbfs = -12             # ... and its peak level
 # file = "programme.flac"    # WAV/FLAC, any rate and channel count (resampled, mixed)
 # loop = true                # restart the file at its end (false: silence follows)
 # device = "Line In"         # sound-card capture
-# gain_db = 0.0              # gain for file or sound-card input
+# url = "https://radio.example/live.mp3"  # internet radio: an Icecast/SHOUTCAST stream over
+                             # HTTP(S) or an .m3u/.pls playlist (MP3, AAC/HE-AAC, Ogg Vorbis/Opus,
+                             # FLAC); reconnects by itself; endless, so file output needs --duration
+# stream_titles = true       # url only: send the stream's "now playing" titles as text messages
+# gain_db = 0.0              # gain for file, sound-card or web stream input
 
 # A data application that rides along with the audio service (SDC type 5 with this
 # service's Short Id), e.g. a slideshow for the programme:
