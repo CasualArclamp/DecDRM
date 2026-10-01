@@ -278,7 +278,22 @@ fn worker(
         for line in source.take_log() {
             log(line, &mut snap);
         }
-        let Some(frames) = read? else {
+        let read = match read {
+            Ok(r) => r,
+            Err(e) => {
+                // The input ended with an error (e.g. the KiwiSDR closed the connection):
+                // publish the final state first, so the last snapshot is not up to a
+                // publish interval behind, then report it.
+                audio.finish()?;
+                if let Some(l) = logger.as_mut() {
+                    l.finish(source.position_s(), &session, &snap)?;
+                }
+                snap.audio_spectrum = fresh_audio_spectrum(&audio, last_audio_s, source.position_s());
+                publish(shared, &mut snap, &mut session, &source, &audio, true);
+                return Err(e);
+            }
+        };
+        let Some(frames) = read else {
             audio.finish()?;
             if let Some(l) = logger.as_mut() {
                 l.finish(source.position_s(), &session, &snap)?;
