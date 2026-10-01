@@ -322,6 +322,37 @@ fn stop_ends_the_wait() {
     assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
 }
 
+/// A station whose web stream is still connecting can be stopped through a stop handle
+/// made beforehand (a GUI's Stop button while `Station::new` waits).
+#[test]
+fn stopping_a_connecting_station() {
+    let server = Server::start(vec![("/silent", silent())]);
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = crate::StationConfig {
+        output: crate::OutputSettings { file: Some("out.wav".into()), ..Default::default() },
+        base_dir: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    };
+    let mut service = crate::ServiceSettings::new("Web", 0x42);
+    service.audio = Some(crate::AudioSettings::new(crate::Codec::HeAac, crate::AudioInputSettings::url(server.url("/silent"))));
+    cfg.services.push(service);
+    let plan = cfg.validate().unwrap();
+    let stop = StopHandle::default();
+    let t = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            stop.stop();
+        })
+    };
+    let started = Instant::now();
+    let err = crate::Station::with_plan_and_stop(cfg, plan, stop).err().unwrap().to_string();
+    t.join().unwrap();
+    assert!(err.contains("stopped while connecting"), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    assert!(!dir.path().join("out.wav").exists(), "no output file is left behind");
+}
+
 /// With a file output the stream paces the station: reads wait for the audio, which
 /// the server sends in real time after a 0.5 s burst.
 #[test]

@@ -199,13 +199,20 @@ impl Station {
     /// interface has already shown), so the configuration is not checked twice. `plan`
     /// must come from this `cfg`.
     pub fn with_plan(cfg: StationConfig, plan: MultiplexPlan) -> Result<Self> {
+        Self::with_plan_and_stop(cfg, plan, StopHandle::default())
+    }
+
+    /// Like [`Self::with_plan`] with a stop handle made beforehand, so that another
+    /// thread can also end the waits of creating the station: a web stream input waits
+    /// for the stream's first audio (up to 20 s), and [`StopHandle::stop`] makes that
+    /// fail at once ("stopped while connecting"). [`Self::stop_handle`] returns `stop`.
+    pub fn with_plan_and_stop(cfg: StationConfig, plan: MultiplexPlan, stop: StopHandle) -> Result<Self> {
         let tx = Transmitter::new(plan.tx)?;
         let output = OutputStage::new(plan.layout, plan.output)?;
         let names: Vec<String> =
             cfg.services.iter().enumerate().map(|(i, s)| format!("service {i} (\"{}\")", s.label)).collect();
 
-        // Created first: it also ends the waits of inputs (a web stream connecting).
-        let stop = StopHandle::default();
+        // Before the inputs: it also ends their waits (a web stream connecting).
         let mut audio = Vec::new();
         for (i, sp) in plan.services.iter().enumerate() {
             if let Some(a) = &sp.audio {
