@@ -889,6 +889,7 @@ version = "0.2.0"
 dependencies = [
  "cc",
  "flate2",
+ "rustfft",
  "thiserror 2.0.21",
  "zip",
 ]

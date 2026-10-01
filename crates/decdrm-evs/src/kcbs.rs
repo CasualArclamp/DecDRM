@@ -71,6 +71,13 @@ pub fn unreliable(frame: &[u8]) -> bool {
     })
 }
 
+/// Whether a frame is a pause (INACTIVE): concealed, with comfort noise instead
+/// (see [`crate::comfort`]).
+pub fn is_pause(frame: &[u8]) -> bool {
+    use crate::signalling::CoderType;
+    frame.first().is_some_and(|&b| signalling_13k2(b).coder_type == CoderType::Inactive)
+}
+
 /// The inverse of [`frames`] (the first 660 bytes of a data field), for tests and
 /// transmitters.
 pub fn pack(frames: &[[u8; FRAME_BYTES]; FRAMES]) -> Vec<u8> {

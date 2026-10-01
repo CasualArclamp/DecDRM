@@ -178,6 +178,16 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       locks a data channel as EVS after two matching data groups (all 20 frames
       signalling one bandwidth; random data ~10⁻⁸), plays it like an audio service
       (lost data groups concealed) and shows it as EVS in the service bars.
+      *Then:* the decode sounded glitchy because the station's encoder departs from
+      EVS in INACTIVE, TRANSITION and LR-MDCT frames (the decoder's bit-error checks
+      fire on 34 %/42 % of the INACTIVE/MDCT frames, 0 % for the 3GPP encoder; TRANSITION
+      frames clip; EVS 12.0–12.2 decoders do no better). `KcbsDecoder` conceals those
+      types, a burst guard (one frame of delay; on a clipping or +15 dB frame a fresh
+      decoder replays 0.5 s and conceals it and its predecessor) removes the rest (0
+      clipped frames on the recordings, from ~47 per 32 s), and concealed pauses get
+      comfort noise: spectrum and level measured from the pause frames a second decoder
+      decodes normally (outliers rejected; −61 dBFS, hum-weighted), 129-tap FIR-shaped
+      white noise 3 dB below it, 10 ms fades.
 
 ## Conventions
 

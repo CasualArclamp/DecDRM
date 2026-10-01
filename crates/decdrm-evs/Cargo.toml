@@ -18,6 +18,8 @@ decoder = ["dep:cc", "dep:zip", "dep:flate2"]
 
 [dependencies]
 thiserror.workspace = true
+# Comfort noise: measuring the pause spectrum and designing its shaping filter.
+rustfft.workspace = true
 
 [build-dependencies]
 cc = { version = "1.2", features = ["parallel"], optional = true }

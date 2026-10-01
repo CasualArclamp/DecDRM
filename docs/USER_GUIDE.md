@@ -208,6 +208,12 @@ cargo build --release -p decdrm-cli -p decdrm-gui --features decdrm-cli/evs,decd
 Without it the service is marked "no decoder" and its data groups are saved like any
 unknown data (`--data-dir`).
 
+The station's encoder writes some EVS frame types (pauses, speech onsets, music) in a
+form no standard decoder reads correctly. DecDRM conceals those frames, replaces the
+occasional remaining burst (output runs 20 ms behind for that), and fills pauses with
+comfort noise shaped like the station's own background. Speech sounds clean; onsets
+are a little soft, and the rare music passages stay silent.
+
 ### Data services
 
 | Application | GUI | Saved with `--data-dir DIR` (GUI: *Data info → Folder…*) |
