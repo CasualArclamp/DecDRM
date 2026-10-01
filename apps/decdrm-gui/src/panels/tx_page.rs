@@ -17,7 +17,7 @@ use crate::indicators::fmt_time;
 use crate::settings::{Settings, TxOutput};
 use crate::transmitter::TxSession;
 use crate::tx_config::{self, EXAMPLE_STATION, Overrides};
-use decdrm_station::{MultiplexPlan, StationConfig};
+use decdrm_station::{MultiplexPlan, StationConfig, WebStreamState, WebStreamStatus};
 use eframe::egui::{self, Color32, RichText, Ui};
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::path::{Path, PathBuf};
@@ -730,6 +730,68 @@ fn output_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
     });
 }
 
+/// A web stream input: state, what is playing, the stream, the buffer, trouble.
+fn web_stream_status(ui: &mut Ui, w: &WebStreamStatus, short_id: u8, pal: &Palette) {
+    let light = match w.state {
+        WebStreamState::Playing => GOOD,
+        WebStreamState::Connecting | WebStreamState::Buffering => WARN,
+        WebStreamState::Reconnecting => HOT,
+    };
+    ui.horizontal_wrapped(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+        ui.painter().circle_filled(rect.center(), 4.0, light);
+        ui.label(RichText::new(format!("web stream {}", w.state)).strong());
+        if let Some(name) = &w.station_name {
+            ui.label(RichText::new(name).weak());
+        }
+    });
+    if let Some(title) = &w.title {
+        ui.add(egui::Label::new(RichText::new(format!("now playing: {title}")).italics()).wrap());
+    }
+    let mut details = Vec::new();
+    if let Some(c) = &w.codec {
+        details.push(c.clone());
+    }
+    if let Some(b) = w.bitrate {
+        details.push(format!("{} kbit/s", b / 1000));
+    }
+    if let Some(r) = w.sample_rate {
+        details.push(format!("{:.1} kHz", f64::from(r) / 1000.0));
+    }
+    if let Some(ch) = w.channels {
+        details.push(if ch == 1 { "mono".into() } else { "stereo".into() });
+    }
+    if !details.is_empty() {
+        ui.label(RichText::new(details.join(" \u{b7} ")).weak().small())
+            .on_hover_text(w.stream_url.as_deref().unwrap_or(&w.url).to_string());
+    }
+    if w.buffer_target_s > 0.0 {
+        let fill = (w.buffer_s / (2.0 * w.buffer_target_s)).clamp(0.0, 1.0) as f32;
+        ui.add(
+            egui::ProgressBar::new(fill)
+                .desired_width((ui.available_width() - 4.0).max(120.0))
+                .text(format!("buffer {:.2} s (target {:.1} s)", w.buffer_s, w.buffer_target_s)),
+        )
+        .on_hover_text(format!("Audio received but not yet sent (service {short_id}); the middle of the bar is the target."));
+    }
+    let mut trouble = Vec::new();
+    if w.reconnects > 0 {
+        trouble.push(format!("{} reconnects", w.reconnects));
+    }
+    if w.underruns > 0 {
+        trouble.push(format!("{} underruns", w.underruns));
+    }
+    if w.decode_errors > 0 {
+        trouble.push(format!("{} decode errors", w.decode_errors));
+    }
+    if !trouble.is_empty() {
+        ui.colored_label(pal.error, trouble.join(", "));
+    }
+    if let Some(e) = &w.last_error {
+        ui.add(egui::Label::new(RichText::new(format!("last error: {e}")).weak().small()).wrap());
+    }
+}
+
 /// One block per service: its bit rate, the input level meter, codec and input, data.
 fn services_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
     let s = &tx.snap.status;
@@ -775,6 +837,9 @@ fn services_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
                 }
                 if !notes.is_empty() {
                     ui.colored_label(pal.error, notes.join(", "));
+                }
+                if let Some(w) = &a.web_stream {
+                    web_stream_status(ui, w, sv.short_id, pal);
                 }
                 if let Some(ppm) = a.counters.input_drift_ppm {
                     ui.label(RichText::new(format!("following the input clock: {ppm:+.0} ppm")).weak().small());

@@ -166,10 +166,16 @@ fn run(
     let log = |line: String| {
         let _ = events.send(TxEvent::Log(line));
     };
-    // The GUI has just validated `cfg` and shown this plan; no need to check twice.
-    let mut station = Station::with_plan(cfg, plan).map_err(|e| e.to_string())?;
+    // The stop handle exists before the station, so Stop also ends the wait of
+    // creating it (a web stream input connecting, up to 20 s). The GUI has just
+    // validated `cfg` and shown this plan; no need to check twice.
+    let handle = StopHandle::default();
     if let Ok(mut slot) = stop.lock() {
-        *slot = Some(station.stop_handle());
+        *slot = Some(handle.clone());
+    }
+    let mut station = Station::with_plan_and_stop(cfg, plan, handle).map_err(|e| e.to_string())?;
+    for line in station.take_log() {
+        log(line);
     }
     let plan = station.plan();
     let (dc, band) = signal_band(plan.layout, plan.output.format);
@@ -205,6 +211,10 @@ fn run(
                 spectrum.push(samples, channels);
             }
         });
+        // The inputs' own log: a web stream's connections, titles, reconnections.
+        for line in station.take_log() {
+            log(line);
+        }
         if let Err(e) = sent {
             // Still complete the output file, so what was sent is readable.
             let _ = station.finish();
