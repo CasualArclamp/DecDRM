@@ -64,10 +64,16 @@ pub fn run(a: TxArgs) -> Result<()> {
     if frames.is_none() && cfg.output.device.is_none() && !cfg.inputs_finite() {
         bail!("the signal goes to a file but has no end: give --duration SECS (or set `loop = false` on every audio input file)");
     }
+    for url in cfg.services.iter().filter_map(|s| s.audio.as_ref()?.input.url.as_ref()) {
+        println!("web stream: connecting to {url}");
+    }
     let mut station = Station::new(cfg)?;
     if let Some(dev) = &station.status().device {
         println!("sound card: {dev}");
     }
+    // The inputs' log: web stream connections, titles, reconnections.
+    let print_log = |station: &mut Station| station.take_log().iter().for_each(|line| println!("{line}"));
+    print_log(&mut station);
     let started = Instant::now();
     let mut next_status = a.status_every;
     let mut printed_at = None;
@@ -79,6 +85,7 @@ pub fn run(a: TxArgs) -> Result<()> {
             _ => {}
         }
         station.transmit_frame()?;
+        print_log(&mut station);
         let s = station.status();
         if a.status_every > 0.0 && s.seconds >= next_status {
             next_status += a.status_every;
@@ -86,6 +93,7 @@ pub fn run(a: TxArgs) -> Result<()> {
             printed_at = Some(s.frames);
         }
     }
+    print_log(&mut station);
     let s = station.finish()?;
     if printed_at != Some(s.frames) {
         print_status(&s);
@@ -110,10 +118,19 @@ fn print_status(s: &StationStatus) {
         let mut line = format!("          service {} {:06X} \"{}\" {:.2} kbit/s", sv.short_id, sv.service_id, sv.label, sv.bitrate / 1000.0);
         if let Some(a) = &sv.audio {
             line.push_str(&format!(
-                ": {}, input {:.1} dBFS{}{}{}",
+                ": {}, input {:.1} dBFS{}{}{}{}",
                 a.codec,
                 a.counters.input_rms_dbfs,
                 if a.input_finished { " (ended)" } else { "" },
+                a.web_stream
+                    .as_ref()
+                    .map(|w| format!(
+                        ", web stream {} ({:.1} s buffered){}",
+                        w.state,
+                        w.buffer_s,
+                        w.title.as_ref().map(|t| format!(", \"{t}\"")).unwrap_or_default()
+                    ))
+                    .unwrap_or_default(),
                 a.counters.input_drift_ppm.map(|p| format!(", clock trim {p:+.0} ppm")).unwrap_or_default(),
                 if a.counters.frames_dropped > 0 { format!(", {} frames dropped", a.counters.frames_dropped) } else { String::new() }
             ));
