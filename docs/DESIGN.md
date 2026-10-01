@@ -215,8 +215,10 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       file has no "DRM" at all — the first version, looking for that word, found 0 of
       its 118 DRM entries), or the word "DRM" in station, remarks or language. On
       air: the start day decides (Dream misses Friday's 2300-0100 on Saturday at
-      00:30), `start == stop` is all day, annual validity
-      dates are taken within the broadcast season, Dream's ending-soon (10 min) and
+      00:30), `start == stop` is all day, a single annual validity date is taken within
+      the broadcast season and two make a window that recurs every year (compared by
+      month and day, so a permanent entry's `05-15`…`12-20` holds in either season's
+      file), Dream's ending-soon (10 min) and
       starting-soon (15 min) states. UTC calendar from `SystemTime` (civil-from-days),
       seasons A/B from the last Sundays of March/October (`sked-a26.csv`). Sources
       (EiBi's current season file, Dream's DRMDX URL on baseportal.com) configurable
@@ -227,11 +229,16 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       cached per minute and painted with `show_rows`, the received frequency from the
       *Frequency* box or the recording's file name — KiwiSDR, HDSDR, SDR# naming —
       highlighted and named in the log at Start; a click copies the frequency).
-      *Open* (EiBi's README, not applied yet): persistence codes (`P`: 4 = active
-      only in the winter season, 5 = only in the summer season, 8 = inactive; a start
-      date alone on a permanent entry, `P` = 1, is for information only) and the Days
-      forms `1.Sa` (first Saturday of the month), `1WeFr`, `Last7`, `altFr`, `MF-15`,
-      `15Sep` (that date only).
+      EiBi's README codes (`entry::Activity`, `MonthDays`): persistence code 4 = only
+      in the winter (B) seasons, 5 = only in the summer (A) seasons, 8 = inactive (never
+      on the air, like `alt`, an alternative frequency not usually in use), 90 + a code
+      = utility station; a single date on codes 1–5 (copied into every season's file)
+      is a note, not a bound; Days forms `1.Sa`/`2.Su` (the n-th weekday of the month),
+      `1WeFr` (the first Wednesday and the Friday after it), `Last7`, `MF-15` (Monday to
+      Friday up to the 15th), `15Sep` (that day only), `altFr` (every Friday, noted as
+      alternate weeks). In the A26 file this takes the 359 winter-only entries (among
+      them CNR1 DIGITAL on 15180 kHz and Scandinavian Weekend Radio's winter schedule)
+      and the 80 inactive ones (SE-TA2 DIGITAL) off the air.
 - [x] **Fading and delay–Doppler maps** (2026-10-01) — two displays Dream lacks.
       *Done:* `rx::scatter`: the last 6 s of channel estimates (one row per symbol,
       brought to the newest timing with each row's cumulative shift) → Hann-windowed

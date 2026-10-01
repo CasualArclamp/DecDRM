@@ -8,9 +8,12 @@
 //!   Friday 2300-0100 broadcast was off at 00:30 on Saturday; here each day's broadcast
 //!   is checked on its own.
 //! * `start == stop` (e.g. `0000-0000`) means all day; Dream never shows it as on air.
+//!
+//! Beyond Dream, for EiBi's codes: an [`Activity`] (winter or summer season only,
+//! inactive) and [`MonthDays`] (the first Saturday of the month, one day of the year, …).
 
 use crate::season::Season;
-use crate::time::{DAY_MIN, Date, UtcTime, Weekday};
+use crate::time::{DAY_MIN, Date, MONTH_ABBREVS, UtcTime, Weekday, days_in_month};
 use std::fmt;
 
 /// Minutes before its end at which an on-air broadcast counts as ending soon (Dream's
@@ -112,6 +115,110 @@ impl fmt::Display for DateBound {
     }
 }
 
+/// Whether a broadcast is in use at all in a season, beyond its days and validity
+/// dates (EiBi's persistence codes 4, 5 and 8, and its `alt`).
+///
+/// Rust note: `#[default]` marks the variant `Activity::default()` returns; deriving
+/// `Default` for an enum needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Activity {
+    /// Whenever its days and dates say.
+    #[default]
+    Always,
+    /// Only in the winter (B) seasons: EiBi's persistence code 4.
+    WinterOnly,
+    /// Only in the summer (A) seasons: persistence code 5.
+    SummerOnly,
+    /// Never on the air: an inactive entry (persistence code 8) or an alternative
+    /// frequency that is not usually in use (`alt`).
+    Inactive,
+}
+
+impl Activity {
+    /// Whether the broadcast may run on day `d`.
+    pub fn allows(self, d: Date) -> bool {
+        match self {
+            Activity::Always => true,
+            Activity::WinterOnly => Season::at(d).is_b(),
+            Activity::SummerOnly => !Season::at(d).is_b(),
+            Activity::Inactive => false,
+        }
+    }
+}
+
+/// Which days of the month a broadcast runs on, beyond its weekdays (EiBi's day forms,
+/// its README's entry #3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MonthDays {
+    /// The `n`-th (1–5) `anchor` weekday of the month and the days after it until the
+    /// next `anchor`: `1.Sa` is the first Saturday; `1WeFr` (weekdays We and Fr) the
+    /// first Wednesday and the Friday after it.
+    Nth { n: u8, anchor: Weekday },
+    /// The last `anchor` weekday of the month and the days after it: `Last7` is the last
+    /// Sunday.
+    Last { anchor: Weekday },
+    /// Days 1 to `n` of the month: `MF-15` is Monday to Friday up to the 15th.
+    UpTo(u8),
+    /// One day of the year: `15Sep`.
+    OnDate { month: u8, day: u8 },
+}
+
+impl MonthDays {
+    /// Whether day `d` is one of these days (its weekday is checked separately).
+    pub fn contains(self, d: Date) -> bool {
+        // The latest `anchor` weekday on or before `d`.
+        let latest = |anchor: Weekday| {
+            let back = (d.weekday().index() + 7 - anchor.index()) % 7;
+            d.add_days(-(back as i64))
+        };
+        match self {
+            MonthDays::Nth { n, anchor } => {
+                let a = latest(anchor);
+                (a.day() - 1) / 7 + 1 == u32::from(n)
+            }
+            MonthDays::Last { anchor } => {
+                let a = latest(anchor);
+                a.day() + 7 > days_in_month(a.year(), a.month())
+            }
+            MonthDays::UpTo(n) => d.day() <= u32::from(n),
+            MonthDays::OnDate { month, day } => {
+                (d.month(), d.day()) == (u32::from(month), u32::from(day))
+            }
+        }
+    }
+
+    /// The days to show, given the weekdays `days`: `1st Sa`, `1st We, then Fr`, `last
+    /// Su`, `Mo-Fr, days 1-15`, `15 Sep`.
+    pub fn label(self, days: Days) -> String {
+        // The weekdays besides the anchor (`1WeFr`).
+        let then = |anchor: Weekday| {
+            let rest = Days::from_bits(days.bits() & !(1 << anchor.index()));
+            if rest.is_empty() {
+                String::new()
+            } else {
+                format!(", then {rest}")
+            }
+        };
+        match self {
+            MonthDays::Nth { n, anchor } => {
+                let suffix = match n {
+                    1 => "st",
+                    2 => "nd",
+                    3 => "rd",
+                    _ => "th",
+                };
+                format!("{n}{suffix} {}{}", anchor.abbrev(), then(anchor))
+            }
+            MonthDays::Last { anchor } => format!("last {}{}", anchor.abbrev(), then(anchor)),
+            MonthDays::UpTo(n) => format!("{days}, days 1-{n}"),
+            MonthDays::OnDate { month, day } => {
+                let name = MONTH_ABBREVS.get(usize::from(month).wrapping_sub(1));
+                format!("{day} {}", name.copied().unwrap_or("?"))
+            }
+        }
+    }
+}
+
 /// Where a broadcast stands at a given time (Dream's `Station::EState`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AirState {
@@ -150,6 +257,12 @@ pub struct Entry {
     /// Irregular operation (Dream's `0000000`, EiBi's `irr`): the days say little, so
     /// the broadcast counts as possibly on the air on any day (as in Dream).
     pub irregular: bool,
+    /// Which days of the month (or the one day of the year) the broadcast runs on,
+    /// beyond its weekdays: EiBi's `1.Sa`, `Last7`, `MF-15`, `15Sep`. `None`: every week.
+    pub month_days: Option<MonthDays>,
+    /// Whether it is in use at all in a season (EiBi's persistence codes 4, 5 and 8;
+    /// `alt`).
+    pub activity: Activity,
     pub station: String,
     pub language: String,
     /// Target area.
@@ -179,15 +292,38 @@ impl Entry {
         if stop > start { stop } else { stop + DAY_MIN }
     }
 
-    /// Whether a broadcast starts on day `d` (weekday and validity).
+    /// Whether a broadcast starts on day `d` (activity, weekday, day of the month and
+    /// validity).
     pub fn runs_on(&self, d: Date) -> bool {
-        (self.irregular || self.days.contains(d.weekday())) && self.valid_on(d)
+        self.activity.allows(d)
+            && (self.irregular || self.days.contains(d.weekday()))
+            && self.month_days.is_none_or(|m| m.contains(d))
+            && self.valid_on(d)
     }
 
-    /// Whether `d` lies in the validity period (both ends included). Annual bounds
-    /// (day and month) are dates of the broadcast season `d` falls in, so a B-season window
-    /// `12-01`…`01-15` spans New Year.
+    /// Whether `d` lies in the validity period (both ends included).
+    ///
+    /// Two annual bounds (day and month) are a window that recurs every year, compared
+    /// by month and day: it wraps over New Year when it ends before it starts
+    /// (`12-01`…`01-15`), and a window over the summer (`05-15`…`12-20`) also holds on
+    /// the days of a winter season inside it — EiBi copies its everlasting entries into
+    /// every season's file. A single annual bound is a date of the broadcast season `d`
+    /// falls in.
     pub fn valid_on(&self, d: Date) -> bool {
+        if let (
+            Some(DateBound::Annual { month: m0, day: d0 }),
+            Some(DateBound::Annual { month: m1, day: d1 }),
+        ) = (self.valid_from, self.valid_to)
+        {
+            // Rust note: tuples compare lexicographically, so (month, day) pairs order
+            // like the days of a year.
+            let (from, to, day) = ((m0, d0), (m1, d1), (d.month() as u8, d.day() as u8));
+            return if from <= to {
+                from <= day && day <= to
+            } else {
+                day >= from || day <= to
+            };
+        }
         // Rust note: `Option::is_none_or(f)` is `true` for `None`, else `f(value)`: a
         // missing bound (or an impossible date) does not restrict.
         self.valid_from
@@ -252,12 +388,19 @@ impl Entry {
         format!("{}-{}", hhmm(start), hhmm(stop.min(DAY_MIN)))
     }
 
-    /// The days to show: `daily`, `Mo-Fr`, …, or `irregular`.
+    /// The days to show: `daily`, `Mo-Fr`, `1st Sa`, `15 Sep`, …, or `irregular`.
     pub fn days_label(&self) -> String {
-        match (self.irregular, self.days.is_daily() || self.days.is_empty()) {
-            (true, true) => "irregular".into(),
-            (true, false) => format!("{} (irregular)", self.days),
-            (false, _) => self.days.to_string(),
+        let days = match self.month_days {
+            Some(m) => m.label(self.days),
+            None if self.irregular && (self.days.is_daily() || self.days.is_empty()) => {
+                return "irregular".into();
+            }
+            None => self.days.to_string(),
+        };
+        if self.irregular {
+            format!("{days} (irregular)")
+        } else {
+            days
         }
     }
 
@@ -521,6 +664,81 @@ mod tests {
         assert_eq!(soon("2026-10-02T23:50Z"), AirState::Off);
         assert!(weekdays.starts_within(at("2026-10-04T23:45Z"), 15));
         assert!(!weekdays.starts_within(at("2026-10-04T23:44Z"), 15));
+    }
+
+    #[test]
+    fn month_days_activity_and_recurring_windows() {
+        // October 2026: Saturdays 3, 10, …, 31; Sundays 4, 11, 18, 25; Wednesday the 7th.
+        let d = |m, day| Date::new(2026, m, day).unwrap();
+        let first_sa = MonthDays::Nth {
+            n: 1,
+            anchor: Weekday::Sat,
+        };
+        assert!(first_sa.contains(d(10, 3)) && !first_sa.contains(d(10, 10)));
+        let second_su = MonthDays::Nth {
+            n: 2,
+            anchor: Weekday::Sun,
+        };
+        assert!(second_su.contains(d(10, 11)) && !second_su.contains(d(10, 4)));
+        // `1WeFr`: the first Wednesday (the 7th) and the Friday after it, not the Friday
+        // before (the 2nd follows September's fifth Wednesday).
+        let first_we = MonthDays::Nth {
+            n: 1,
+            anchor: Weekday::Wed,
+        };
+        assert!(first_we.contains(d(10, 7)) && first_we.contains(d(10, 9)));
+        assert!(!first_we.contains(d(10, 2)));
+        let last_su = MonthDays::Last {
+            anchor: Weekday::Sun,
+        };
+        assert!(last_su.contains(d(10, 25)) && !last_su.contains(d(10, 18)));
+        let up_to = MonthDays::UpTo(15);
+        assert!(up_to.contains(d(10, 15)) && !up_to.contains(d(10, 16)));
+        let sep15 = MonthDays::OnDate { month: 9, day: 15 };
+        assert!(sep15.contains(d(9, 15)) && !sep15.contains(d(10, 15)));
+
+        // In an entry, with the weekdays; and the labels.
+        let mut e = entry("1200-1300", Days::NONE.with(Weekday::Sat));
+        e.month_days = Some(first_sa);
+        assert!(e.is_on_air(at("2026-10-03T12:30Z")) && !e.is_on_air(at("2026-10-10T12:30Z")));
+        assert_eq!(e.days_label(), "1st Sa");
+        e.days = Days::NONE.with(Weekday::Wed).with(Weekday::Fri);
+        e.month_days = Some(first_we);
+        assert_eq!(e.days_label(), "1st We, then Fr");
+        e.days = Days::NONE.with(Weekday::Sun);
+        e.month_days = Some(last_su);
+        assert_eq!(e.days_label(), "last Su");
+        e.days = MO_FR;
+        e.month_days = Some(up_to);
+        assert_eq!(e.days_label(), "Mo-Fr, days 1-15");
+        e.days = Days::DAILY;
+        e.month_days = Some(sep15);
+        assert_eq!(e.days_label(), "15 Sep");
+        e.irregular = true;
+        assert_eq!(e.days_label(), "15 Sep (irregular)");
+
+        // Activity: 2026-10-01 is in the summer season A26, 2026-11-15 in the winter B26.
+        let mut e = entry("1000-1100", Days::DAILY);
+        e.activity = Activity::WinterOnly;
+        assert!(!e.is_on_air(at("2026-10-01T10:30Z")) && e.is_on_air(at("2026-11-15T10:30Z")));
+        e.activity = Activity::SummerOnly;
+        assert!(e.is_on_air(at("2026-10-01T10:30Z")) && !e.is_on_air(at("2026-11-15T10:30Z")));
+        e.activity = Activity::Inactive;
+        assert!(!e.is_on_air(at("2026-10-01T10:30Z")));
+        assert_eq!(
+            e.state_at(at("2026-10-01T09:50Z"), 15),
+            AirState::Off,
+            "never starting soon either"
+        );
+
+        // Two annual bounds recur every year: 15 May to 20 December also holds in the
+        // winter season, until 20 December (as dates of the B season, 2027-05-15 to
+        // 2026-12-20, it held never).
+        let annual = |month, day| Some(DateBound::Annual { month, day });
+        e.activity = Activity::Always;
+        (e.valid_from, e.valid_to) = (annual(5, 15), annual(12, 20));
+        assert!(e.is_on_air(at("2026-11-15T10:30Z")) && e.is_on_air(at("2026-06-01T10:30Z")));
+        assert!(!e.is_on_air(at("2026-12-21T10:30Z")) && !e.is_on_air(at("2027-03-01T10:30Z")));
     }
 
     #[test]

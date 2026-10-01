@@ -78,6 +78,12 @@ pub fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
+/// English month abbreviations, as EiBi writes them in its day forms (`15Sep`): "Jan" …
+/// "Dec".
+pub const MONTH_ABBREVS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
 /// Days in `month` (1–12) of `year`; 0 for an invalid month.
 pub fn days_in_month(year: i32, month: u32) -> u32 {
     match month {

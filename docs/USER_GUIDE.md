@@ -147,7 +147,10 @@ like Dream's *Stations* dialog. It reads two kinds of schedule:
   `sked-a26.csv` from the last Sunday of March, `sked-b26.csv` from the last Sunday of
   October. DecDRM shows the DRM ones, which EiBi marks with DIGITAL after the station
   name (*BBC DIGITAL*, *KCBS DIGITAL*), or every broadcast on request. EiBi's codes are
-  spelled out: languages, target areas, countries and transmitter sites.
+  spelled out: languages, target areas, countries and transmitter sites. Its day codes
+  count too (*1st Sa* is the first Saturday of the month, *15 Sep* that day only), and
+  entries EiBi marks winter-only, summer-only or inactive are on the air only when that
+  applies; the note says so (*winter only*, *inactive*, *last logged 2026-02*).
 - **Dream (DRMDX)**: the DRM-only `DRMSchedule.ini` that Dream's *Stations* dialog
   downloads.
 

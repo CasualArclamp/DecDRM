@@ -16,16 +16,27 @@
 //! when there is a header, else in this order):
 //! * `kHz` — frequency (may have decimals);
 //! * `Time(UTC)` — `HHMM-HHMM` (empty: all day);
-//! * `Days` — empty for daily; `Mo-Fr`, `Sa,Su`, `MoWeFr`, digits `1245` (1 = Monday), or
-//!   keywords such as `irr` (irregular), `alt`, `tent`, `test`, `Ram` ([`parse_days`]);
+//! * `Days` — empty for daily; `Mo-Fr`, `Sa,Su`, `MoWeFr`, digits `1245` (1 = Monday);
+//!   days of the month ([`MonthDays`]): `1.Sa` (the first Saturday), `1WeFr` (the first
+//!   Wednesday and the Friday after it), `Last7` (the last Sunday), `MF-15` (Monday to
+//!   Friday up to the 15th); one day of the year, `15Sep`; `altFr` (alternate Fridays);
+//!   or keywords such as `irr` (irregular), `alt` (an alternative frequency, not usually
+//!   in use), `tent`, `test`, `Ram` ([`parse_days`]);
 //! * `ITU` — the broadcaster's country (ITU code, e.g. `D`, `KRE`);
 //! * `Station`, `Lng` (language code, e.g. `E`), `Target` (area code, e.g. `WAf`);
 //! * `Remarks` — the transmitter site: `x` (site *x* of the home country), `/ABC-x` (site
 //!   *x* in country ABC), empty (the home country's main site);
-//! * `P` — persistence code (ignored), `Start` / `Stop` — validity dates `ddmm` for
-//!   entries that do not cover the whole season ([`parse_date`]); `Stop` may end in
-//!   `[mmyy]`, the month the broadcast was last heard (`[0226]`, `1906[0626]`), which
-//!   becomes a note.
+//! * `P` — persistence code ([`Activity`]): 4 = active only in the winter (B) season, 5 =
+//!   only in the summer (A) season, 8 = inactive; 0 = this season only, 1–3 = every
+//!   season (copied into each season's file), 6 = part of this season; 90 + a code is a
+//!   utility station;
+//! * `Start` / `Stop` — validity dates `ddmm` ([`parse_date`]): the part of the season a
+//!   code-6 entry runs in, or, both given, a window that recurs every year (utility
+//!   stations' seasons). A single date on codes 1–5 (the README: when a new service
+//!   started) is a note, not a bound: it would fall in the wrong year in a later
+//!   season's file.
+//!   `Stop` may end in `[mmyy]`, the month the broadcast was last heard (`[0226]`,
+//!   `1906[0626]`), which becomes a note.
 //!
 //! **DRM**: the file covers all broadcasts. EiBi marks the DRM ones with the word
 //! `DIGITAL` after the station name (`BBC DIGITAL`, `KCBS DIGITAL`; `sked-a26.csv` has no
@@ -37,9 +48,9 @@
 //! [`url`] (`http://www.eibispace.de/dx/sked-a26.csv`).
 
 use crate::eibi_tables::{COUNTRIES, LANGUAGES, SITES, TARGETS};
-use crate::entry::{DateBound, Days, Entry, parse_time_range};
+use crate::entry::{Activity, DateBound, Days, Entry, MonthDays, parse_time_range};
 use crate::season::Season;
-use crate::time::{Date, Weekday, days_in_month};
+use crate::time::{Date, MONTH_ABBREVS, Weekday, days_in_month};
 use crate::{Schedule, Skipped};
 
 /// Download URL of a season's file; `{season}` stands for the season code (`a26`).
@@ -121,7 +132,12 @@ pub struct ParsedDays {
     pub days: Days,
     /// `irr`: irregular operation.
     pub irregular: bool,
-    /// Words that are not days (`tent`, `Ram`, `alt`, …), space-separated.
+    /// Days of the month or of the year: `1.Sa`, `1WeFr`, `Last7`, `MF-15`, `15Sep`.
+    pub month_days: Option<MonthDays>,
+    /// `alt`: an alternative frequency, not usually in use.
+    pub alternative: bool,
+    /// Words that are not days (`tent`, `Ram`, …) and remarks (`alternate weeks` for
+    /// `altFr`), separated by commas.
     pub note: String,
 }
 
@@ -152,15 +168,94 @@ fn day_name(word_lower: &str) -> Option<Weekday> {
         .map(Weekday::from_index)
 }
 
-/// Parse an EiBi `Days` field (see the module docs). Lenient: separators (`,` `/`
+/// The weekdays of a word: one day name (`sa`, `tue`) or a run of two-letter ones
+/// (`wefr`).
+fn weekdays_of(word_lower: &str) -> Option<Vec<Weekday>> {
+    day_name(word_lower)
+        .map(|d| vec![d])
+        .or_else(|| two_letter_run(word_lower))
+}
+
+/// EiBi's forms for days of the month or of the year (its README, entry #3), when they
+/// make up the whole field: `1.Sa`, `2.Su` (the n-th weekday of the month); `1WeFr` (the
+/// first Wednesday, repeated the following Friday); `Last7` (the last Sunday; also
+/// `LastSu`); `MF-15` (Monday to Friday, up to the 15th); `15Sep` (that day only);
+/// `altFr` (alternating Fridays: the weeks are unknown, so every Friday, with a note).
+fn month_form(field: &str) -> Option<ParsedDays> {
+    let lower = field.to_lowercase();
+    let form = |days: Days, month_days: Option<MonthDays>, note: &str| ParsedDays {
+        days,
+        irregular: false,
+        month_days,
+        alternative: false,
+        note: note.to_string(),
+    };
+    let mask = |w: &[Weekday]| w.iter().fold(Days::NONE, |d, w| d.with(*w));
+    // A digit 1-5, maybe a dot, one or two weekdays: `1.Sa`, `1WeFr`.
+    if let Some(n @ 1..=5) = lower.chars().next().and_then(|c| c.to_digit(10))
+        && let Some(w) = weekdays_of(lower[1..].trim_start_matches('.'))
+        && w.len() <= 2
+    {
+        let nth = MonthDays::Nth {
+            n: n as u8,
+            anchor: w[0],
+        };
+        return Some(form(mask(&w), Some(nth), ""));
+    }
+    if let Some(rest) = lower.strip_prefix("last") {
+        let rest = rest.trim_start_matches('.');
+        let anchor = match rest.parse::<usize>() {
+            Ok(n @ 1..=7) => Some(Weekday::from_index(n - 1)),
+            _ => day_name(rest),
+        };
+        if let Some(anchor) = anchor {
+            let last = MonthDays::Last { anchor };
+            return Some(form(Days::NONE.with(anchor), Some(last), ""));
+        }
+    }
+    if let Some(n) = lower.strip_prefix("mf-").and_then(|n| n.parse::<u8>().ok())
+        && (1..=31).contains(&n)
+    {
+        let mo_fr = Days::from_bits(0b001_1111);
+        return Some(form(mo_fr, Some(MonthDays::UpTo(n)), ""));
+    }
+    // One or two digits and a month: `15Sep`, `5Apr`.
+    let digits = lower.chars().take_while(char::is_ascii_digit).count();
+    if (1..=2).contains(&digits) {
+        let (day, month) = lower.split_at(digits);
+        let month = MONTH_ABBREVS
+            .iter()
+            .position(|m| m.eq_ignore_ascii_case(month.trim_start_matches(['.', ' '])));
+        if let (Ok(day), Some(m)) = (day.parse::<u32>(), month) {
+            let month = m as u32 + 1;
+            if day >= 1 && day <= days_in_month(2000, month) {
+                let date = MonthDays::OnDate {
+                    month: month as u8,
+                    day: day as u8,
+                };
+                return Some(form(Days::DAILY, Some(date), ""));
+            }
+        }
+    }
+    if let Some(w) = lower.strip_prefix("alt").and_then(weekdays_of) {
+        return Some(form(mask(&w), None, "alternate weeks"));
+    }
+    None
+}
+
+/// Parse an EiBi `Days` field (see the module docs). The forms for days of the month
+/// or of the year come first ([`MonthDays`]); otherwise lenient: separators (`,` `/`
 /// space `.`) are ignored, `a-b` is a range (wrapping over the weekend, so `Fr-Mo`
 /// works), runs of two-letter names (`SaSu`) and of digits (`1245`, 1 = Monday) are split
 /// into days, `daily` is every day, and unknown words go to the note. No days at all
 /// means daily.
 pub fn parse_days(field: &str) -> ParsedDays {
+    if let Some(form) = month_form(field.trim()) {
+        return form;
+    }
     let mut tokens = Vec::new();
     let mut notes: Vec<String> = Vec::new();
-    let (mut irregular, mut daily) = (false, false);
+    let (mut irregular, mut daily, mut alternative) = (false, false, false);
     let chars: Vec<char> = field.trim().chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -180,6 +275,9 @@ pub fn parse_days(field: &str) -> ParsedDays {
             let lower = word.to_lowercase();
             if matches!(lower.as_str(), "irr" | "irreg" | "irregular") {
                 irregular = true;
+            } else if lower == "alt" {
+                alternative = true;
+                notes.push("alternative frequency".into());
             } else if lower == "daily" {
                 daily = true;
             } else if let Some(d) = day_name(&lower) {
@@ -224,7 +322,9 @@ pub fn parse_days(field: &str) -> ParsedDays {
     ParsedDays {
         days,
         irregular,
-        note: notes.join(" "),
+        month_days: None,
+        alternative,
+        note: notes.join(", "),
     }
 }
 
@@ -292,6 +392,7 @@ struct Columns {
     language: Option<usize>,
     target: Option<usize>,
     remarks: Option<usize>,
+    persistence: Option<usize>,
     start: Option<usize>,
     stop: Option<usize>,
 }
@@ -307,6 +408,7 @@ impl Default for Columns {
             language: Some(5),
             target: Some(6),
             remarks: Some(7),
+            persistence: Some(8),
             start: Some(9),
             stop: Some(10),
         }
@@ -332,6 +434,7 @@ impl Columns {
             language: find(&["Lng", "Language"]),
             target: find(&["Target"]),
             remarks: find(&["Remarks", "Site"]),
+            persistence: find(&["P", "Persistence"]),
             start: find(&["Start"]),
             stop: find(&["Stop"]),
         })
@@ -397,7 +500,19 @@ fn parse_row(fields: &[&str], cols: &Columns) -> Result<Entry, String> {
     let (station, language, remarks) = (get(cols.station), get(cols.language), get(cols.remarks));
     let target = get(cols.target);
     let (site, remark_note) = site_of(remarks, itu);
-    let mut notes: Vec<String> = [days.note, remark_note]
+    // The persistence code (README, entry #9); 90 plus a code marks a utility station.
+    let persistence = get(cols.persistence)
+        .parse::<u8>()
+        .ok()
+        .map(|p| if p >= 90 { p - 90 } else { p });
+    let (activity, activity_note) = match persistence {
+        _ if days.alternative => (Activity::Inactive, ""),
+        Some(4) => (Activity::WinterOnly, "winter only"),
+        Some(5) => (Activity::SummerOnly, "summer only"),
+        Some(8) => (Activity::Inactive, "inactive"),
+        _ => (Activity::Always, ""),
+    };
+    let mut notes: Vec<String> = [days.note, remark_note, activity_note.to_string()]
         .into_iter()
         .filter(|n| !n.is_empty())
         .collect();
@@ -409,9 +524,18 @@ fn parse_row(fields: &[&str], cols: &Columns) -> Result<Entry, String> {
         }
         d
     };
-    let valid_from = date(get(cols.start), "from");
+    let mut valid_from = date(get(cols.start), "from");
     let (stop_date, logged) = split_last_logged(get(cols.stop));
-    let valid_to = date(stop_date, "until");
+    let mut valid_to = date(stop_date, "until");
+    // On codes 1-5 (copied into every season's file) a single date is information, a
+    // new service's start (README, entry #10): as a bound it would fall in the wrong
+    // year in a later season's file. Both dates are a window that recurs every year.
+    if persistence.is_some_and(|p| (1..=5).contains(&p))
+        && valid_from.is_some() != valid_to.is_some()
+    {
+        notes.extend(valid_from.take().map(|d| format!("since {d}")));
+        notes.extend(valid_to.take().map(|d| format!("until {d}")));
+    }
     notes.extend(logged.map(last_logged_note));
     Ok(Entry {
         khz,
@@ -419,6 +543,8 @@ fn parse_row(fields: &[&str], cols: &Columns) -> Result<Entry, String> {
         stop,
         days: days.days,
         irregular: days.irregular,
+        month_days: days.month_days,
+        activity,
         station: station.to_string(),
         language: language_names(language),
         target: target_name(target)
@@ -538,7 +664,7 @@ kHz:75;Time(UTC):93;Days:59;ITU:49;Station:201;Lng:49;Target:62;Remarks:135;P:35
 11700;1200-1300;Mo-Fr;USA;Some station;E;LAm;;1;;
 not a frequency;0600-0700;;D;Broken;E;Eu;;1;;
 6000;0600-2500;;CUB;Broken time;S;Am;;1;;
-7350;0800-0900;tent;AUT;DRM Test;D,E;CEu;;1;20261010;
+7350;0800-0900;tent;AUT;DRM Test;D,E;CEu;;6;20261010;
 ";
 
     #[test]
@@ -787,6 +913,147 @@ kHz:75;Time(UTC):93;Days:59;ITU:49;Station:201;Lng:49;Target:62;Remarks:135;P:35
         );
         assert_eq!(parse_days("test").note, "test", "not Tuesday");
         assert_eq!(parse_days("0").note, "0");
+
+        // Days of the month and of the year (the README's entry #3).
+        let form = |f: &str| {
+            let p = parse_days(f);
+            (p.days.to_string(), p.month_days)
+        };
+        let nth = |n, anchor| Some(MonthDays::Nth { n, anchor });
+        assert_eq!(form("1.Sa"), ("Sa".into(), nth(1, Weekday::Sat)));
+        assert_eq!(form("2.Su"), ("Su".into(), nth(2, Weekday::Sun)));
+        assert_eq!(form("1WeFr"), ("We,Fr".into(), nth(1, Weekday::Wed)));
+        let last_su = Some(MonthDays::Last {
+            anchor: Weekday::Sun,
+        });
+        assert_eq!(form("Last7"), ("Su".into(), last_su));
+        assert_eq!(form("LastSu"), ("Su".into(), last_su));
+        assert_eq!(form("MF-15"), ("Mo-Fr".into(), Some(MonthDays::UpTo(15))));
+        let on = |month, day| Some(MonthDays::OnDate { month, day });
+        assert_eq!(form("15Sep"), ("daily".into(), on(9, 15)));
+        assert_eq!(form("5Apr"), ("daily".into(), on(4, 5)));
+        assert_eq!(form("31Feb").1, None, "no such day");
+        // Digits alone are still weekdays.
+        assert_eq!(form("156"), ("Mo,Fr,Sa".into(), None));
+        assert_eq!(form("1-5"), ("Mo-Fr".into(), None));
+        let alt_fr = parse_days("altFr");
+        assert_eq!(
+            (alt_fr.days.to_string(), alt_fr.note.as_str()),
+            ("Fr".to_string(), "alternate weeks")
+        );
+        let alt = parse_days("alt");
+        assert!(alt.alternative && alt.days.is_daily() && !alt_fr.alternative);
+        assert_eq!(alt.note, "alternative frequency");
+    }
+
+    /// More lines of `sked-a26.csv` as they are: persistence codes 2-5 and 8, days of the
+    /// month (`1.Sa`, `Last7`, `2.Su`, `10Oct`), a start date alone on a permanent entry,
+    /// and a permanent window (15 May to 20 December).
+    const A26_CODES: &str = "\
+kHz:75;Time(UTC):93;Days:59;ITU:49;Station:201;Lng:49;Target:62;Remarks:135;P:35;Start:60;Stop:60;
+1602;0000-1800;1.Sa;FIN;Scandinavian Weekend R.;FI;FIN;v;5;;
+1602;0000-1900;1.Sa;FIN;Scandinavian Weekend R.;FI;FIN;v;4;;[1123]
+3900;0800-0830;Last7;NZL;NZART Official Broadc.;E;NZL;xx;3;;
+3965;0000-2400;;DNK;World Music Radio;E;Eu;hv;1;1905;[0826]
+6095;1100-1200;2.Su;D;SM Radio Dessau;D;Eu;n;2;;[0626]
+6095;1200-1300;10Oct;D;SM Radio Dessau;D;Eu;n;6;0104;1010
+6195;0900-1400;irr;D;Radio SE-TA2 DIGITAL;D;Eu;wh;8;;
+12290;0000-2400;;CAN;VFF Iqaluit Radio;E;NAm;i;1;1505;2012
+13810;0400-1100;;CHN;CNR1 DIGITAL;M;FE;k;5;;[0925]
+15180;0800-1100;;CHN;CNR1 DIGITAL;M;FE;k;4;;
+";
+
+    #[test]
+    fn eibi_persistence_codes_and_month_days() {
+        let s = parse(A26_CODES);
+        assert!(s.skipped.is_empty(), "{:?}", s.skipped);
+        let e = &s.entries;
+        let annual = |month, day| Some(DateBound::Annual { month, day });
+        // Scandinavian Weekend Radio: the first Saturday, a summer and a winter schedule.
+        assert_eq!(e[0].days_label(), "1st Sa");
+        assert_eq!(
+            (e[0].activity, e[0].note.as_str()),
+            (Activity::SummerOnly, "summer only")
+        );
+        assert_eq!(
+            (e[1].activity, e[1].note.as_str()),
+            (Activity::WinterOnly, "winter only; last logged 2023-11")
+        );
+        assert_eq!(e[2].days_label(), "last Su");
+        // A start date alone on a permanent entry (code 1) is information.
+        assert_eq!(
+            (e[3].valid_from, e[3].note.as_str()),
+            (None, "since 05-19; last logged 2026-08")
+        );
+        assert_eq!(e[4].days_label(), "2nd Su");
+        assert_eq!(e[5].days_label(), "10 Oct");
+        assert_eq!(
+            (e[5].valid_from, e[5].valid_to),
+            (annual(4, 1), annual(10, 10))
+        );
+        assert_eq!(
+            (e[6].activity, e[6].note.as_str(), e[6].drm),
+            (Activity::Inactive, "inactive", true)
+        );
+        assert_eq!(
+            (e[7].valid_from, e[7].valid_to),
+            (annual(5, 15), annual(12, 20))
+        );
+
+        let on_at = |t: &str| -> Vec<String> {
+            on_air(&s.entries, UtcTime::parse(t).unwrap())
+                .into_iter()
+                .map(|e| format!("{} {} {}", e.khz_label(), e.times(), e.station))
+                .collect()
+        };
+        const MUSIC: &str = "3965 0000-2400 World Music Radio";
+        const VFF: &str = "12290 0000-2400 VFF Iqaluit Radio";
+        let cases: [(&str, &[&str]); 7] = [
+            // Thursday in the summer season: the summer-only CNR1, not the winter-only
+            // one, not the inactive SE-TA2 entry.
+            (
+                "2026-10-01T09:00Z",
+                &[MUSIC, VFF, "13810 0400-1100 CNR1 DIGITAL"],
+            ),
+            // Sunday in the winter season: the winter-only CNR1; World Music Radio's start
+            // date and VFF's window (15 May to 20 December) do not hide them.
+            (
+                "2026-11-15T09:00Z",
+                &[MUSIC, VFF, "15180 0800-1100 CNR1 DIGITAL"],
+            ),
+            // The first Saturday of October (summer) and of November (winter).
+            (
+                "2026-10-03T12:00Z",
+                &["1602 0000-1800 Scandinavian Weekend R.", MUSIC, VFF],
+            ),
+            (
+                "2026-11-07T18:30Z",
+                &["1602 0000-1900 Scandinavian Weekend R.", MUSIC, VFF],
+            ),
+            // 10 October, the second Saturday: SM Radio Dessau's one day, no SWR.
+            (
+                "2026-10-10T12:30Z",
+                &[MUSIC, "6095 1200-1300 SM Radio Dessau", VFF],
+            ),
+            // The second Sunday.
+            (
+                "2026-10-11T11:30Z",
+                &[MUSIC, "6095 1100-1200 SM Radio Dessau", VFF],
+            ),
+            // The last Sunday of October, the winter season's first day.
+            (
+                "2026-10-25T08:15Z",
+                &[
+                    "3900 0800-0830 NZART Official Broadc.",
+                    MUSIC,
+                    VFF,
+                    "15180 0800-1100 CNR1 DIGITAL",
+                ],
+            ),
+        ];
+        for (t, want) in cases {
+            assert_eq!(on_at(t), want, "{t}");
+        }
     }
 
     #[test]
