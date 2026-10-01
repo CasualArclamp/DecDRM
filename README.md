@@ -10,6 +10,10 @@ algorithms from [Dream](https://sourceforge.net/projects/drm/); audio uses Fraun
 FDK-AAC (AAC, HE-AAC v1/v2, xHE-AAC decoding; AAC/HE-AAC encoding), libxaac (xHE-AAC
 encoding) and libopus.
 
+![DecDRM receiving a Deutsche Welle recording: spectrum, FAC/SDC/MSC constellations, the service with its text message, HE-AAC v2 audio and Journaline news pages](docs/images/receiver.png)
+
+*Receiving a Deutsche Welle recording (mode B, 10 kHz, 64-QAM): HE-AAC v2 stereo audio, text messages, the broadcast clock and Journaline news pages.*
+
 > **Status:** the receiver decodes audio, text messages and data services from every
 > DRM test recording available here (modes A/B/C, 9–20 kHz, real and I/Q inputs,
 > inverted spectra, clock offsets up to 1250 ppm, AAC/HE-AAC/xHE-AAC/Opus). The
