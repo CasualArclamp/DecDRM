@@ -205,9 +205,11 @@ pub fn spectrum_points(db: &[f64], centre_hz: f64, span_hz: f64, real: bool) -> 
         .collect()
 }
 
-/// Display range for a dB trace: the top at the next 10 dB above the peak (+3 dB
-/// headroom), the bottom at the lowest value rounded down to 10 dB but showing between
-/// 40 and 120 dB. Empty data gives −100…0 dB.
+/// Display range for a dB trace: the bottom at the lowest value rounded down to 10 dB,
+/// but at most 120 dB below the peak; the top at the next 10 dB above the peak plus
+/// 3 dB and a tenth of the data's range (room for the band label above the trace,
+/// also on a short plot of a deep range); at least 40 dB shown. Empty data gives
+/// −100…0 dB.
 pub fn level_range(values: impl Iterator<Item = f64>) -> (f64, f64) {
     let (lo, hi) = values
         .filter(|v| v.is_finite())
@@ -217,9 +219,9 @@ pub fn level_range(values: impl Iterator<Item = f64>) -> (f64, f64) {
     if lo > hi {
         return (-100.0, 0.0);
     }
-    let top = ((hi + 3.0) / 10.0).ceil() * 10.0;
-    let bottom = ((lo / 10.0).floor() * 10.0).clamp(top - 120.0, top - 40.0);
-    (bottom, top)
+    let floor = ((lo / 10.0).floor() * 10.0).max(((hi - 120.0) / 10.0).floor() * 10.0);
+    let top = ((hi + 3.0 + 0.1 * (hi - floor).clamp(40.0, 120.0)) / 10.0).ceil() * 10.0;
+    (floor.min(top - 40.0), top)
 }
 
 /// Equalised cells as (I, Q) points, thinned to at most
@@ -446,13 +448,14 @@ mod tests {
 
     #[test]
     fn level_ranges() {
+        // 45 dB of data: 3 + 4.5 dB above the peak, up to the next 10 dB.
         assert_eq!(
             level_range([-35.0, -80.0, -62.5].into_iter()),
-            (-80.0, -30.0)
+            (-80.0, -20.0)
         );
         assert_eq!(level_range(std::iter::empty()), (-100.0, 0.0));
-        // Very deep noise floors are cut at 120 dB below the top …
-        assert_eq!(level_range([-3.0, -300.0].into_iter()), (-120.0, 0.0));
+        // Very deep noise floors are cut at 120 dB below the peak (then 15 dB above it) …
+        assert_eq!(level_range([-3.0, -300.0].into_iter()), (-130.0, 20.0));
         // … and at least 40 dB are always shown (non-finite values are ignored).
         assert_eq!(
             level_range([f64::NEG_INFINITY, -20.0].into_iter()),
