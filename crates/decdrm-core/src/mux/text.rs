@@ -219,6 +219,8 @@ fn crc_ok(seg: &[u8], body_len: usize) -> bool {
 /// Text message encoder (transmitter side, Dream's `CTextMessageEncoder`): cycles
 /// through the configured messages; call [`TextMessageEncoder::next_piece`] once per
 /// logical frame. With several messages the toggle bit changes from one to the next.
+/// [`TextMessageEncoder::set_messages`] replaces the cycle while it runs (e.g. with a
+/// web stream's current title).
 #[derive(Debug, Clone, Default)]
 pub struct TextMessageEncoder {
     messages: Vec<Vec<u8>>,
@@ -229,6 +231,17 @@ pub struct TextMessageEncoder {
     pos: usize,
     message: usize,
     toggle: bool,
+    /// Messages replacing the cycle at the next segment boundary.
+    pending: Option<Vec<Vec<u8>>>,
+}
+
+/// `text` truncated to [`MAX_MESSAGE_BYTES`] at a character boundary; `None` if empty.
+fn message_bytes(text: &str) -> Option<Vec<u8>> {
+    let mut end = text.len().min(MAX_MESSAGE_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (end > 0).then(|| text.as_bytes()[..end].to_vec())
 }
 
 impl TextMessageEncoder {
@@ -239,14 +252,8 @@ impl TextMessageEncoder {
     /// Add a message to the cycle (truncated to 128 bytes at a character boundary;
     /// empty messages are ignored).
     pub fn add_message(&mut self, text: &str) {
-        let mut end = text.len().min(MAX_MESSAGE_BYTES);
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        if end == 0 {
-            return;
-        }
-        self.messages.push(text.as_bytes()[..end].to_vec());
+        let Some(bytes) = message_bytes(text) else { return };
+        self.messages.push(bytes);
         if self.messages.len() == 1 {
             self.start_message(0);
         }
@@ -257,8 +264,37 @@ impl TextMessageEncoder {
         *self = Self::default();
     }
 
+    /// Replace the cycle with `texts` (truncated as by [`Self::add_message`]; empty ones
+    /// are ignored, an empty list stops the text). The segment being sent is finished
+    /// first, so receivers never see a broken one; then the first new message starts
+    /// with the toggle bit inverted, which tells receivers that a new message begins
+    /// (ES 201 980 §6.5.2). A second call before that boundary replaces the first.
+    pub fn set_messages<S: AsRef<str>>(&mut self, texts: &[S]) {
+        self.pending = Some(texts.iter().filter_map(|t| message_bytes(t.as_ref())).collect());
+        if self.pos == 0 {
+            self.apply_pending();
+        }
+    }
+
+    /// Switch to the pending messages (at a segment boundary).
+    fn apply_pending(&mut self) {
+        let Some(messages) = self.pending.take() else { return };
+        self.messages = messages;
+        self.toggle = !self.toggle;
+        if self.messages.is_empty() {
+            self.segments.clear();
+            self.segment = 0;
+            self.pos = 0;
+        } else {
+            self.start_message(0);
+        }
+    }
+
     /// The four text bytes for the next logical frame.
     pub fn next_piece(&mut self) -> [u8; 4] {
+        if self.pos == 0 {
+            self.apply_pending();
+        }
         // `let … else`: bind `seg` if there is a segment, otherwise leave the function.
         let Some(seg) = self.segments.get(self.segment) else { return [0; 4] };
         let mut piece = [0u8; 4];
@@ -452,6 +488,47 @@ mod tests {
         let mut enc = TextMessageEncoder::new();
         assert_eq!(enc.next_piece(), [0; 4]);
         enc.add_message("");
+        assert_eq!(enc.next_piece(), [0; 4]);
+    }
+
+    /// A replaced cycle starts at the next segment boundary with the toggle bit
+    /// inverted, and the decoder reports the new message.
+    #[test]
+    fn replacing_the_messages() {
+        let mut enc = TextMessageEncoder::new();
+        let mut dec = TextMessageDecoder::new();
+        // Nothing yet, then a title: it starts at once.
+        enc.set_messages(&["Artist - First song"]);
+        let ev = run(&mut enc, &mut dec, 40);
+        assert_eq!(ev, vec![TextEvent::Message(TextMessage { bytes: b"Artist - First song".to_vec(), text_control: 0 })]);
+        let toggle = enc.toggle;
+        // Mid-segment: the current segment is finished before the switch.
+        while enc.pos == 0 {
+            dec.push(enc.next_piece());
+        }
+        enc.set_messages(&["Artist - Second song", "Static message"]);
+        assert_ne!(enc.pos, 0, "switch deferred to the boundary");
+        while enc.pos != 0 {
+            assert_eq!(dec.push(enc.next_piece()), None);
+        }
+        let marker = enc.next_piece();
+        assert_eq!(marker, MARKER, "the new message starts with a segment");
+        assert_ne!(enc.toggle, toggle, "the toggle bit changed");
+        dec.push(marker);
+        let mut seen = Vec::new();
+        for _ in 0..200 {
+            if let Some(TextEvent::Message(m)) = dec.push(enc.next_piece()) {
+                seen.push(m.text());
+            }
+        }
+        assert_eq!(seen[0], "Artist - Second song", "{seen:?}");
+        assert!(seen.iter().any(|t| t == "Static message"));
+        assert!(seen.iter().all(|t| t != "Artist - First song"), "{seen:?}");
+        // An empty list stops the text after the current segment.
+        enc.set_messages::<&str>(&[]);
+        for _ in 0..12 {
+            enc.next_piece();
+        }
         assert_eq!(enc.next_piece(), [0; 4]);
     }
 }
