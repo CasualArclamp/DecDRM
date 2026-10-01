@@ -225,11 +225,13 @@ GUI plot tabs:
 | Tab | Shows |
 |---|---|
 | Overview | input spectrum with the DRM band and DC carrier; FAC/SDC/MSC constellations |
-| Spectrum, Waterfall | the input spectrum, and its history over the last minutes |
+| Spectrum, Waterfall | the input spectrum, and its history over the last minutes (the waterfall fits the DRM signal once one is found; *Fit to the DRM signal* below it switches back to the whole band) |
 | Constellations | FAC, SDC and MSC cells against the ideal points |
 | Audio | spectrum of the decoded audio |
 | Channel | the channel's magnitude and group delay per carrier |
+| Fading | the channel's gain per carrier over the last minute: frequency-selective fades as dark notches, 1/delay apart for two paths of different delay, moving when their Doppler shifts differ |
 | Impulse response | power-delay profile, with the guard interval and delay spread |
+| Delay–Doppler | the propagation paths of the last 6 s: each spot is a path at its delay (from the receiver's timing) and Doppler shift (from the frequency the receiver tracks); spread along the Doppler axis is how fast that path fades. Separate ionospheric modes show as separate spots; the lines mark the guard interval |
 | SNR per carrier | where in the band the noise or interference sits |
 | History | SNR/MER/WMER, Doppler, delay, SRO over the last five minutes of signal, and FAC/SDC/MSC/audio error rates per 10 s |
 | Schedule | the DRM broadcasts on the air now, from EiBi's or Dream's schedule (see [Station schedule](#station-schedule-what-is-on-the-air)) |

@@ -227,6 +227,16 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       date alone on a permanent entry, `P` = 1, is for information only) and the Days
       forms `1.Sa` (first Saturday of the month), `1WeFr`, `Last7`, `altFr`, `MF-15`,
       `15Sep` (that date only).
+- [x] **Fading and delay–Doppler maps** (2026-10-01) — two displays Dream lacks.
+      *Done:* `rx::scatter`: the last 6 s of channel estimates (one row per symbol,
+      brought to the newest timing with each row's cumulative shift) → Hann-windowed
+      inverse FFT over the carriers (delay, 2× zero padding) → Hann-windowed FFT over
+      time per delay (Doppler, ≥ 4× zero padding), once a second; dB below the strongest
+      point, floor −40 dB, delays −Tg/4 … 1.25 Tg, Doppler ±5/8/10 Hz by mode. GUI tabs
+      *Fading* (gain per carrier per snapshot, a minute, colours from the median gain)
+      and *Delay–Doppler*. Checked against channel model 3 (four paths, spreads
+      0.1–2 Hz, in place) and on KCBS (separate ionospheric paths). The waterfall also
+      fits the DRM signal now, at the spectrum's full 2048-bin resolution.
 - [x] **KiwiSDR client** (2026-10-01) — DecDRM tunes a KiwiSDR itself and decodes its
       I/Q, instead of a browser tab and a virtual audio cable.
       *Done:* `decdrm-kiwi`. The protocol follows the reference client kiwiclient

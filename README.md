@@ -50,7 +50,9 @@ encoding) and libopus.
   simulator (the DRM channel models 1–6, noise, frequency and clock offsets:
   `[simulate]` or `decdrm tx … --channel-model 3 --snr 18`) for testing receivers.
 - Desktop GUI (egui): spectrum, waterfall, constellations, audio spectrum, channel,
-  impulse response, SNR per carrier, reception history, status LEDs, Dream-style service
+  impulse response, SNR per carrier, reception history, and two displays Dream lacks: a
+  fading map (channel gain per carrier over time) and a delay–Doppler map (each
+  propagation path at its delay and Doppler shift), status LEDs, Dream-style service
   bars (codec, SBR/PS, bit rate, protection, data applications), text,
   slideshow, Journaline browser, broadcast website, EPG, broadcast clock, alternative
   frequencies, and a transmitter tab.
