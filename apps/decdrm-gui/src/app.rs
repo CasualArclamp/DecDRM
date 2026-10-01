@@ -321,6 +321,10 @@ impl DecDrmApp {
                     self.settings.source = SourceKind::Kiwi;
                     self.start();
                 }
+                Some(KiwiPick::Second(address)) => {
+                    self.settings.kiwi.address2 = address;
+                    self.settings.source = SourceKind::Kiwi;
+                }
                 None => {}
             }
         }

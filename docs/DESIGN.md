@@ -250,6 +250,43 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       *Delay–Doppler*. Checked against channel model 3 (four paths, spreads
       0.1–2 Hz, in place) and on KCBS (separate ionospheric paths). The waterfall also
       fits the DRM signal now, at the spectrum's full 2048-bin resolution.
+- [x] **Diversity reception** (2026-10-01) — one station through two KiwiSDRs far
+      apart, combined before decoding (the user's choice of next feature; Dream has
+      no such thing).
+      *Done:* `rx::diversity`: a `DiversityReceiver` of two full receivers in branch
+      mode (`ReceiverConfig::diversity_branch`: the chain hands each multiplex frame's
+      equalised MSC cells out, `ReceiverEvent::MscCells`, instead of decoding them;
+      `MscDecoder` extracted from the chain and shared). The combiner pairs the
+      frames carrying the same transmitted frame, maximum-ratio combines them and
+      decodes once. Weights: |H|²/σ² per cell, σ² per branch and frame from the
+      decision-directed error times |H|² (as the WMER), in two passes, the second
+      against the first combination's decisions (a weak branch's noise reads low
+      against its own wrong decisions; without the second pass combining with a very
+      poor branch came out 2 % worse than the good branch alone). Pairing: frames
+      numbered per branch from the input time since the branch's previous frame,
+      snapped to the frame's super-frame position (jitter and the Kiwis' clock drift
+      do not matter; an absolute time grid flipped numbers near half-way points); the
+      second branch anchored by content (hard-decision agreement 6σ above chance,
+      1/points); every pair checked the same way, three mismatches or a branch falling
+      more than `MAX_LAG` (8) frames behind the decoded ones (input lost: a Kiwi
+      reconnection) re-anchor it. Frame n is decoded once both gave it or none can any
+      more (went past it, or lags more than `MAX_LAG`); `flush()` at the end of input.
+      Engine: `InputSpec::Diversity` (two sources read side by side with a short wait
+      each; one ending leaves the other running), `Session::new_diversity`/
+      `push_branch`/`flush` (a branch losing sync keeps the multiplex while the other
+      holds; status and plots from the branch with the better SNR, the MSC
+      constellation from the combined cells), snapshot `diversity` and `input.kiwi2`.
+      CLI `--kiwi2`; GUI *2nd KiwiSDR* field, *Find…* context menu, status strip
+      (both Kiwis, *Diversity*). Tests: combiner units (pairing by content then time,
+      SNR weights, a lone branch, a branch that stops, a stream that skips, another
+      station's frames, clock phase and drift), `tests/diversity.rs` (two independently
+      fading channels, branch B 0.9 s late on its own clock: channel 3 at 13 dB 92
+      frames vs 61 / 32 alone of 100; the ignored sweep over channels 1–4 and 8–20 dB:
+      never below the better branch, e.g. AWGN 8 dB 124 vs 0 / 0, channel 4 10 dB 97 vs
+      6 / 1, channel 3 12 dB 137 vs 26 / 28 of 150), and two stand-in Kiwis end to end
+      through the engine. Live: CNR1 6030 kHz via Mishima and Osaka, 133 frames
+      combined, 140 of 145 multiplex frames correct, no audio concealed (Mishima alone a
+      minute before: 110 of 132, 20 concealed).
 - [x] **Plots at 60 Hz** (2026-10-01) — the plots follow the signal as fast as it
       changes, at the user's request (they updated at 10 Hz).
       *Done:* `EngineConfig::publish_interval` (100 ms by default, so the CLI is

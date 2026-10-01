@@ -61,6 +61,12 @@ encoding) and libopus.
   public Kiwis whose owners allow apps, and a double-click in the *Schedule* tab). It
   respects the Kiwis' limits: busy, password or app-limited Kiwis are not retried, and
   sessions the Kiwi ends are not reconnected.
+- Diversity reception, which Dream lacks: one station through two KiwiSDRs far apart,
+  combined cell by cell before decoding (maximum-ratio combining weighted by each one's
+  SNR; frames paired by content, so the Kiwis' different network delays and clocks do
+  not matter). On simulated fading channels it decodes almost every frame where each
+  KiwiSDR alone loses most of them (`decdrm rx --kiwi A --kiwi2 B --freq KHZ`; in the
+  GUI a *2nd KiwiSDR* field).
 - Station schedule, like Dream's *Stations* dialog: the DRM broadcasts on the air now
   from EiBi's or Dream's schedule (downloaded on request), in the GUI's *Schedule* tab
   and with `decdrm schedule`; a frequency in a recording's file name (KiwiSDR

@@ -76,6 +76,23 @@ decdrm rx --kiwi "http://kiwi.example:8073/?f=6140iqz10" --duration 600 --out kc
   station after about a second (samples from before the retune are dropped).
   Double-clicking a broadcast in the *Schedule* tab retunes the running Kiwi the same
   way.
+- **Diversity reception (two KiwiSDRs):** enter a second Kiwi in the *2nd KiwiSDR*
+  field (or right-click one in *Find…* → *Use it as the 2nd KiwiSDR*), and DecDRM
+  receives the station through both and combines them before decoding. Two Kiwis far
+  apart (a hundred kilometres is plenty) fade independently, so when one fades the
+  other usually does not: far fewer audio dropouts on weak, fading stations. Each Kiwi
+  is weighted by its signal-to-noise ratio, so a poor one does no harm; a frame only
+  one Kiwi got is decoded from it alone. The Kiwis' different network delays do not
+  matter: frames are matched by their content. The status strip shows both Kiwis and
+  *Diversity* (the share of frames combined; counts, SNRs, weights and which Kiwi is
+  ahead on hover), and the MSC constellation shows the combined cells. Command line:
+  `decdrm rx --kiwi A --kiwi2 B --freq KHZ`. Retuning tunes both.
+
+  On the simulated DRM channels (`cargo test --release -p decdrm-core --test diversity
+  -- --ignored --nocapture`, frames decoded of 150): AWGN at 8 dB 124 against 0 for
+  either Kiwi alone; channel 4 (CCIR poor) at 10 dB 97 against 6 and 1; channel 3 (US
+  Consortium) at 12 dB 137 against 26 and 28. On air (CNR1 on 6030 kHz through Kiwis
+  in Mishima and Osaka) 140 of 145 multiplex frames decoded, no audio concealed.
 - **Finding a Kiwi:** *Find…* lists the public KiwiSDRs (from kiwisdr.com/public, as
   published by rx.linkfanel.net; downloaded only when you press *Update list*). By
   default it shows the Kiwis whose owners allow apps, that have a free channel and that

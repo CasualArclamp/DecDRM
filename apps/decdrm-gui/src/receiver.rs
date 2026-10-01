@@ -187,8 +187,13 @@ impl RxSession {
     pub fn start(&mut self, cfg: EngineConfig, label: String) {
         self.shutdown();
         self.live = cfg.input.is_live();
+        // The KiwiSDR (diversity reception: the first) that a retune goes to.
         self.kiwi = match &cfg.input {
             InputSpec::Kiwi(k) => Some(k.address.clone()),
+            InputSpec::Diversity(b) => match &b[0] {
+                InputSpec::Kiwi(k) => Some(k.address.clone()),
+                _ => None,
+            },
             _ => None,
         };
         self.clear_views();

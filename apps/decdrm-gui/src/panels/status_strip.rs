@@ -122,15 +122,16 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
     }
 }
 
-/// A KiwiSDR input: connection state, S-meter and the receiver's name (details on hover).
-fn kiwi_status(ui: &mut Ui, k: &KiwiStatus) {
+/// A KiwiSDR input (`label`: "KiwiSDR", or "KiwiSDR 1"/"2" in diversity reception):
+/// connection state, S-meter and the receiver's name (details on hover).
+fn kiwi_status(ui: &mut Ui, label: &str, k: &KiwiStatus) {
     let light = match k.state {
         KiwiState::Streaming => Led::Green,
         KiwiState::Connecting | KiwiState::Reconnecting => Led::Yellow,
         KiwiState::Failed => Led::Red,
         KiwiState::Stopped => Led::Off,
     };
-    led(ui, light, &format!("KiwiSDR {}", k.state), "State of the connection to the KiwiSDR");
+    led(ui, light, &format!("{label} {}", k.state), "State of the connection to the KiwiSDR");
     value(ui, "S-meter", k.rssi_dbm.map_or_else(|| "–".to_string(), |r| format!("{r:.0} dBm")))
         .on_hover_text("Signal level in the KiwiSDR's passband");
     let mut details = vec![format!("{} at {:.3} kHz", k.address, k.freq_khz)];
@@ -152,6 +153,29 @@ fn kiwi_status(ui: &mut Ui, k: &KiwiStatus) {
     }
     let name = k.name.clone().unwrap_or_else(|| k.address.clone());
     ui.add(egui::Label::new(RichText::new(name).weak()).truncate()).on_hover_text(details.join("\n"));
+}
+
+/// Diversity reception: the share of frames combined from both KiwiSDRs (counts, SNRs,
+/// weights and which one is ahead on hover).
+fn diversity_status(ui: &mut Ui, d: &decdrm_engine::DiversityView) {
+    let s = &d.stats;
+    let total = s.combined + s.single[0] + s.single[1] + s.lost;
+    let text = if total == 0 { "–".to_string() } else { format!("{:.0} % combined", 100.0 * s.combined as f64 / total as f64) };
+    let snr = |b: usize| d.branches[b].snr_db.map_or_else(|| "–".into(), |x| format!("{x:.1} dB"));
+    let mut details = vec![
+        format!("Multiplex frames: {} combined from both KiwiSDRs, {} from KiwiSDR 1 alone, {} from KiwiSDR 2 alone, {} lost", s.combined, s.single[0], s.single[1], s.lost),
+        format!("SNR: KiwiSDR 1 {}, KiwiSDR 2 {}", snr(0), snr(1)),
+    ];
+    if let Some(w) = s.share {
+        details.push(format!("Weights in the last combined frame: {:.0} % / {:.0} %", 100.0 * w, 100.0 * (1.0 - w)));
+    }
+    details.push(match s.lead_frames {
+        Some(l) if l > 0 => format!("KiwiSDR 1 is {:.1} s ahead", l as f64 * 0.4),
+        Some(l) if l < 0 => format!("KiwiSDR 2 is {:.1} s ahead", -l as f64 * 0.4),
+        Some(_) => "Both KiwiSDRs in step".into(),
+        None => "Not paired yet (each frame is matched by its content first)".into(),
+    });
+    value(ui, "Diversity", text).on_hover_text(details.join("\n"));
 }
 
 /// Input level bar (−90 … 0 dBFS); `None` before the first samples or when stopped.
@@ -186,7 +210,16 @@ fn position(ui: &mut Ui, snap: &decdrm_engine::Snapshot) {
     let pos = snap.input.position_s;
     if let Some(k) = &snap.input.kiwi {
         value(ui, "Elapsed", fmt_time(pos));
-        kiwi_status(ui, k);
+        match &snap.input.kiwi2 {
+            Some(k2) => {
+                kiwi_status(ui, "KiwiSDR 1", k);
+                kiwi_status(ui, "KiwiSDR 2", k2);
+            }
+            None => kiwi_status(ui, "KiwiSDR", k),
+        }
+        if let Some(d) = &snap.diversity {
+            diversity_status(ui, d);
+        }
         return;
     }
     match info.duration_s.filter(|d| *d > 0.0) {

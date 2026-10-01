@@ -202,6 +202,11 @@ fn kiwi_picker(ui: &mut Ui, settings: &mut Settings, free: bool, tunable: bool) 
                 .response
                 .on_hover_text("KiwiSDRs used before");
         }
+        ui.add(egui::TextEdit::singleline(&mut k.address2).desired_width(150.0).hint_text("2nd KiwiSDR (diversity)"))
+            .on_hover_text(
+                "Diversity reception: a second KiwiSDR far from the first, on the same frequency. Their signals fade \
+                 independently, and the two are combined before decoding: fewer dropouts. Leave empty for one KiwiSDR.",
+            );
     });
     // A retune waits for the end of an edit: typing sets the value on Enter (or when the
     // box loses focus), dragging when the mouse is released; the arrow keys step it.

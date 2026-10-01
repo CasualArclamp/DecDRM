@@ -13,6 +13,8 @@ pub enum KiwiPick {
     Select(String),
     /// Use it and start receiving.
     Listen(String),
+    /// Use it as the second KiwiSDR of diversity reception.
+    Second(String),
 }
 
 /// Column widths (the antenna takes the rest).
@@ -133,6 +135,14 @@ fn table(ui: &mut Ui, rows: &[&KiwiEntry], current: &str, pick: &mut Option<Kiwi
             } else if response.clicked() {
                 *pick = Some(KiwiPick::Select(address.clone()));
             }
+            response.context_menu(|ui| {
+                if ui.button("Use this KiwiSDR").clicked() {
+                    *pick = Some(KiwiPick::Select(address.clone()));
+                }
+                if ui.button("Use it as the 2nd KiwiSDR (diversity)").clicked() {
+                    *pick = Some(KiwiPick::Second(address.clone()));
+                }
+            });
             response.on_hover_ui(|ui| {
                 ui.label(details(e));
             });

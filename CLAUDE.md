@@ -7,7 +7,8 @@ milestone checklist (keep it current).
 ## Layout
 - `crates/decdrm-core` — pure-Rust PHY/FEC/multiplex: `params`, `tables`, `cellmap`,
   `fec/` (CRC, dispersal, interleavers, conv code, Viterbi, QAM metrics, MLC),
-  `interleave` (MSC cell interleaver), `fac`, `rx/` (receiver chain), `tx/`, `channel/`,
+  `interleave` (MSC cell interleaver), `fac`, `rx/` (receiver chain; `rx::diversity`
+  combines two receivers' MSC cells), `tx/`, `channel/`,
   `mux/` (SDC, service info, MSC demux, audio super frames, text messages), `dsp/`.
 - `crates/decdrm-codecs` (+ `decdrm-fdk-sys`, `decdrm-opus-sys`, `decdrm-xaac-sys`) —
   FDK-AAC / libopus / libxaac (xHE-AAC encoder, patched at build time) FFI.
@@ -33,7 +34,7 @@ milestone checklist (keep it current).
 - `crates/decdrm-encodec` — experimental EnCodec codec; candle only with the
   `encodec` feature (engine/station/cli/gui forward it). Weights live in the
   git-ignored `models/` (`decdrm models download encodec`).
-- `apps/decdrm-cli` (binary `decdrm`: `rx` (also `--kiwi`), `tx`, `schedule`, `devices`, `models`), `apps/decdrm-gui` (egui,
+- `apps/decdrm-cli` (binary `decdrm`: `rx` (also `--kiwi`, `--kiwi2` for diversity), `tx`, `schedule`, `devices`, `models`), `apps/decdrm-gui` (egui,
   MSRV 1.95 because of eframe).
 - `third_party/` — pinned submodules (fdk-aac v2.0.3, opus v1.6.1, libxaac v0.1.13);
   clone with `--recursive`.

@@ -33,6 +33,9 @@ pub enum SourceKind {
 pub struct KiwiSettings {
     /// Address as typed: host, host:port or a URL copied from the browser.
     pub address: String,
+    /// Diversity reception: a second KiwiSDR on the same frequency, combined with the
+    /// first (empty: one KiwiSDR).
+    pub address2: String,
     /// Frequency to tune, kHz (0: not set yet).
     pub freq_khz: f64,
     /// Addresses used before, newest first.
@@ -46,7 +49,14 @@ pub struct KiwiSettings {
 
 impl Default for KiwiSettings {
     fn default() -> Self {
-        Self { address: String::new(), freq_khz: 0.0, recent: Vec::new(), name: "DecDRM".into(), password: String::new() }
+        Self {
+            address: String::new(),
+            address2: String::new(),
+            freq_khz: 0.0,
+            recent: Vec::new(),
+            name: "DecDRM".into(),
+            password: String::new(),
+        }
     }
 }
 
@@ -54,21 +64,43 @@ impl KiwiSettings {
     /// How many addresses [`Self::recent`] keeps.
     pub const MAX_RECENT: usize = 8;
 
-    /// Put the current address at the top of [`Self::recent`].
+    /// Put the current addresses at the top of [`Self::recent`].
     pub fn remember(&mut self) {
-        let a = self.address.trim().to_string();
-        if a.is_empty() {
-            return;
+        for a in [self.address2.trim().to_string(), self.address.trim().to_string()] {
+            if a.is_empty() {
+                continue;
+            }
+            self.recent.retain(|r| !r.eq_ignore_ascii_case(&a));
+            self.recent.insert(0, a);
         }
-        self.recent.retain(|r| !r.eq_ignore_ascii_case(&a));
-        self.recent.insert(0, a);
         self.recent.truncate(Self::MAX_RECENT);
+    }
+
+    /// Diversity reception from two KiwiSDRs.
+    pub fn diversity(&self) -> bool {
+        !self.address2.trim().is_empty()
+    }
+
+    /// The input: one KiwiSDR, or two for diversity reception; or what is missing.
+    pub fn input(&self) -> Result<decdrm_engine::InputSpec, String> {
+        use decdrm_engine::InputSpec;
+        let first = InputSpec::Kiwi(self.config()?);
+        if !self.diversity() {
+            return Ok(first);
+        }
+        let second = self.config_for(&self.address2).map_err(|e| format!("second {e}"))?;
+        Ok(InputSpec::Diversity(Box::new([first, InputSpec::Kiwi(second)])))
     }
 
     /// The connection to make, or what is missing.
     pub fn config(&self) -> Result<decdrm_engine::decdrm_kiwi::KiwiConfig, String> {
+        self.config_for(&self.address)
+    }
+
+    /// The connection to the KiwiSDR at `address`, or what is missing.
+    fn config_for(&self, address: &str) -> Result<decdrm_engine::decdrm_kiwi::KiwiConfig, String> {
         use decdrm_engine::decdrm_kiwi::{AddressError, KiwiAddress, KiwiConfig};
-        let address = KiwiAddress::parse(&self.address).map_err(|e| match e {
+        let address = KiwiAddress::parse(address).map_err(|e| match e {
             AddressError::Empty => "enter a KiwiSDR address (host, host:port or its URL), or use \"Find…\"".to_string(),
             e => format!("KiwiSDR address: {e}"),
         })?;
@@ -419,7 +451,7 @@ impl Settings {
                 channels: self.format.is_iq().then_some(2),
             },
             // Always I/Q: the engine sets the receiver's format itself.
-            SourceKind::Kiwi => InputSpec::Kiwi(self.kiwi.config()?),
+            SourceKind::Kiwi => self.kiwi.input()?,
         };
         // `..EngineConfig::default()` ("struct update syntax") takes every field not
         // named here from the engine's defaults, so this keeps compiling when the
@@ -466,6 +498,12 @@ impl Settings {
                     self.input_device.as_deref().unwrap_or("default input")
                 )
             }
+            SourceKind::Kiwi if self.kiwi.diversity() => format!(
+                "KiwiSDR {} + {} at {:.1} kHz (I/Q, diversity)",
+                self.kiwi.address.trim(),
+                self.kiwi.address2.trim(),
+                self.kiwi.freq_khz
+            ),
             SourceKind::Kiwi => format!("KiwiSDR {} at {:.1} kHz (I/Q)", self.kiwi.address.trim(), self.kiwi.freq_khz),
         }
     }
@@ -637,6 +675,7 @@ mod tests {
             },
             kiwi: KiwiSettings {
                 address: "kiwi.example:8074".into(),
+                address2: "second.example".into(),
                 freq_khz: 6140.0,
                 recent: vec!["kiwi.example:8074".into(), "other.example".into()],
                 name: "Listener".into(),
@@ -723,6 +762,19 @@ mod tests {
         assert_eq!((k.address.host.as_str(), k.address.port, k.freq_khz), ("kiwi.example", 8074, 6140.0));
         assert_eq!((k.password.as_str(), k.ident.as_str()), ("secret", "DecDRM"));
         assert!(s.source_label().starts_with("KiwiSDR http://kiwi.example:8074"));
+        // A second Kiwi: diversity reception from both, on the same frequency.
+        s.kiwi.address2 = "bad address".into();
+        assert!(s.engine_config().unwrap_err().starts_with("second KiwiSDR address"));
+        s.kiwi.address2 = "far.example".into();
+        let cfg = s.engine_config().unwrap();
+        let InputSpec::Diversity(b) = cfg.input else { panic!("not a diversity input") };
+        let [InputSpec::Kiwi(k1), InputSpec::Kiwi(k2)] = *b else { panic!("not two Kiwis") };
+        assert_eq!((k1.address.host.as_str(), k2.address.host.as_str(), k2.address.port), ("kiwi.example", "far.example", 8073));
+        assert_eq!((k2.freq_khz, k2.password.as_str()), (6140.0, "secret"));
+        assert!(s.source_label().contains("+ far.example") && s.source_label().contains("diversity"));
+        s.kiwi.remember();
+        assert_eq!(&s.kiwi.recent[..2], ["http://kiwi.example:8074/?f=6140iqz10", "far.example"]);
+        s.kiwi.address2.clear();
         // Recent addresses: newest first, no duplicates, at most MAX_RECENT.
         for i in 0..10 {
             s.kiwi.address = format!("k{i}.example");
