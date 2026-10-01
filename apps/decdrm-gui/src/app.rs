@@ -13,7 +13,7 @@ use crate::panels::epg::EpgView;
 use crate::kiwi_list::KiwiList;
 use crate::panels::journaline::JournalineView;
 use crate::panels::kiwi_list::KiwiPick;
-use crate::panels::plots::WaterfallTexture;
+use crate::panels::plots::PlotTextures;
 use crate::panels::slideshow::SlideshowView;
 use crate::panels::source::{DeviceLists, SourceAction};
 use crate::panels::tx_page::TxPage;
@@ -96,7 +96,8 @@ pub struct DecDrmApp {
     journaline: JournalineView,
     website: WebsiteView,
     epg: EpgView,
-    waterfall: WaterfallTexture,
+    /// Images of the waterfall, fading and delay–Doppler tabs on the GPU.
+    textures: PlotTextures,
     /// The Schedule tab (its files are read and downloaded on a background thread).
     schedule: ScheduleView,
     /// The "Find a KiwiSDR" window and its list.
@@ -169,7 +170,7 @@ impl DecDrmApp {
             journaline: JournalineView::default(),
             website: WebsiteView::default(),
             epg: EpgView::default(),
-            waterfall: WaterfallTexture::default(),
+            textures: PlotTextures::default(),
             schedule,
             kiwi_list,
             automation: Automation {
@@ -320,7 +321,8 @@ impl DecDrmApp {
                 &mut self.settings.plot_tab,
                 &self.rx.plots,
                 &self.rx.waterfall,
-                &mut self.waterfall,
+                &self.rx.fading,
+                &mut self.textures,
                 &mut self.settings.waterfall_fit,
                 &self.rx.history,
             );

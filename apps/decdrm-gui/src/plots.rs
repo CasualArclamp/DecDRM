@@ -7,7 +7,7 @@
 use decdrm_core::Cplx;
 use decdrm_core::fac::{ChannelParams, MscMode, SdcMode};
 use decdrm_core::params::{RobustnessMode, SAMPLE_RATE, carrier_range};
-use decdrm_core::rx::{ChainVisuals, PdsAxis, Visuals};
+use decdrm_core::rx::{ChainVisuals, DelayDoppler, PdsAxis, Visuals};
 use decdrm_core::tables;
 use decdrm_engine::{AudioSpectrum, Snapshot};
 use std::f64::consts::PI;
@@ -149,6 +149,8 @@ pub struct PlotData {
     pub snr: Points,
     /// Carrier-index range of the current layout, for the per-carrier plots.
     pub carriers: Option<(f64, f64)>,
+    /// The latest delay–Doppler map (one a second, once a few seconds are tracked).
+    pub delay_doppler: Option<DelayDoppler>,
 }
 
 impl PlotData {
@@ -185,6 +187,7 @@ impl PlotData {
                 .map(|&(k, db)| [f64::from(k), db])
                 .collect(),
             carriers,
+            delay_doppler: chain.delay_doppler.clone(),
         }
     }
 }

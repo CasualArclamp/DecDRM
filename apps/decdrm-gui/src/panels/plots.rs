@@ -1,5 +1,6 @@
-//! Plot tabs: input spectrum and its waterfall, constellations, decoded audio, channel,
-//! impulse response, SNR and the reception history.
+//! Plot tabs: input spectrum and its waterfall, constellations, decoded audio, channel
+//! and its fading over time, impulse response, delay–Doppler map, SNR and the reception
+//! history.
 //!
 //! The plots are monitoring displays: their axes are set from the data every frame and
 //! zooming/dragging is disabled; hovering shows the value under the cursor.
@@ -8,7 +9,10 @@ use super::{Palette, placeholder};
 use crate::history::History;
 use crate::plots::{AUDIO_FLOOR_DB, AudioPlot, DB_FLOOR, PlotData, Points, SpectrumPlot};
 use crate::settings::PlotTab;
+use crate::fading::{FADING_ROWS, FadingMap};
 use crate::waterfall::{ROW_SECONDS, WATERFALL_ROWS, Waterfall};
+use decdrm_core::rx::DelayDoppler;
+use decdrm_core::rx::scatter::FLOOR_DB;
 use eframe::egui::{Color32, RichText, TextureHandle, TextureOptions, Ui};
 use egui_plot::{
     HLine, HoverPosition, Line, LineStyle, MarkerShape, Plot, PlotBounds, PlotImage, PlotPoint,
@@ -23,13 +27,23 @@ pub struct WaterfallTexture {
     generation: u64,
 }
 
+/// The images of the map tabs on the GPU.
+#[derive(Default)]
+pub struct PlotTextures {
+    pub waterfall: WaterfallTexture,
+    fading: WaterfallTexture,
+    delay_doppler: Option<(TextureHandle, DelayDoppler)>,
+}
+
 /// Tab bar plus the selected tab.
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
     tab: &mut PlotTab,
     data: &PlotData,
     waterfall: &Waterfall,
-    texture: &mut WaterfallTexture,
+    fading: &FadingMap,
+    textures: &mut PlotTextures,
     waterfall_fit: &mut bool,
     history: &History,
 ) {
@@ -51,7 +65,9 @@ pub fn show(
             &pal,
             avail.y,
         ),
-        PlotTab::Waterfall => waterfall_plot(ui, data, waterfall, texture, waterfall_fit, &pal, avail.y - 22.0),
+        PlotTab::Waterfall => waterfall_plot(ui, data, waterfall, &mut textures.waterfall, waterfall_fit, &pal, avail.y - 22.0),
+        PlotTab::Fading => fading_plot(ui, fading, &mut textures.fading, &pal, avail.y - 22.0),
+        PlotTab::DelayDoppler => delay_doppler_plot(ui, data, &mut textures.delay_doppler, &pal, avail.y - 22.0),
         PlotTab::Constellations => {
             let side = (avail.x / 3.0 - 8.0).min(avail.y - 24.0).max(80.0);
             constellation_row(ui, data, &pal, side);
@@ -289,6 +305,117 @@ fn waterfall_plot(
             .small(),
         );
     });
+}
+
+/// The channel gain per carrier over the last minute (see `fading`).
+fn fading_plot(ui: &mut Ui, fading: &FadingMap, texture: &mut WaterfallTexture, pal: &Palette, height: f32) {
+    if fading.is_empty() {
+        placeholder(ui, "No channel estimate yet: the fading map fills once the receiver tracks a signal.");
+        return;
+    }
+    if texture.handle.is_none() || texture.generation != fading.generation() {
+        let image = fading.image();
+        match &mut texture.handle {
+            Some(h) => h.set(image, TextureOptions::LINEAR),
+            None => texture.handle = Some(ui.ctx().load_texture("fading", image, TextureOptions::LINEAR)),
+        }
+        texture.generation = fading.generation();
+    }
+    let Some(handle) = &texture.handle else { return };
+    let (x0, x1) = fading.span_khz();
+    let seconds = FADING_ROWS as f64 * ROW_SECONDS;
+    base_plot("fading")
+        .height(height.max(120.0))
+        .x_axis_label("frequency (kHz, from the DC carrier)")
+        .y_axis_label("time (s)")
+        .label_formatter(hover_label("kHz", 2, "s", 1))
+        .show(ui, |p| {
+            p.set_plot_bounds(PlotBounds::from_min_max([x0, -seconds], [x1, 0.0]));
+            p.image(PlotImage::new(
+                "fading",
+                handle.id(),
+                PlotPoint::new((x0 + x1) / 2.0, -seconds / 2.0),
+                [(x1 - x0) as f32, seconds as f32],
+            ));
+            p.vline(VLine::new("DC carrier", 0.0).color(pal.marker).style(LineStyle::dashed_dense()));
+        });
+    let (lo, hi) = fading.levels();
+    let m = fading.median_db();
+    ui.label(
+        RichText::new(format!(
+            "Channel gain per carrier, {} rows (~{:.0} s), newest at the top; colours {:.0} … {:+.0} dB around the median gain. \
+             Dark bands are fades: two paths cancel at frequencies 1/delay apart, and a Doppler difference makes the notches move.",
+            fading.rows(),
+            fading.rows() as f64 * ROW_SECONDS,
+            lo - m,
+            hi - m
+        ))
+        .weak()
+        .small(),
+    );
+}
+
+/// The delay–Doppler map (see `decdrm_core::rx::scatter`).
+fn delay_doppler_plot(ui: &mut Ui, data: &PlotData, texture: &mut Option<(TextureHandle, DelayDoppler)>, pal: &Palette, height: f32) {
+    let Some(map) = &data.delay_doppler else {
+        placeholder(ui, "No map yet: it appears a few seconds after the receiver starts tracking a signal.");
+        return;
+    };
+    if texture.as_ref().is_none_or(|(_, shown)| shown != map) {
+        let image = delay_doppler_image(map);
+        match texture {
+            Some((h, shown)) => {
+                h.set(image, TextureOptions::LINEAR);
+                shown.clone_from(map);
+            }
+            None => *texture = Some((ui.ctx().load_texture("delay_doppler", image, TextureOptions::LINEAR), map.clone())),
+        }
+    }
+    let Some((handle, _)) = texture else { return };
+    let (x0, x1) = (map.delay_ms(0) - map.delay_step_ms / 2.0, map.delay_ms(map.delays) - map.delay_step_ms / 2.0);
+    let (y0, y1) = (map.doppler_hz(0) - map.doppler_step_hz / 2.0, map.doppler_hz(map.dopplers) - map.doppler_step_hz / 2.0);
+    base_plot("delay_doppler")
+        .height(height.max(120.0))
+        .x_axis_label("delay (ms)")
+        .y_axis_label("Doppler shift (Hz)")
+        .label_formatter(hover_label("ms", 2, "Hz", 2))
+        .show(ui, |p| {
+            p.set_plot_bounds(PlotBounds::from_min_max([x0, y0], [x1, y1]));
+            p.image(PlotImage::new(
+                "delay–Doppler",
+                handle.id(),
+                PlotPoint::new((x0 + x1) / 2.0, (y0 + y1) / 2.0),
+                [(x1 - x0) as f32, (y1 - y0) as f32],
+            ));
+            for x in [0.0, map.guard_ms] {
+                p.vline(VLine::new("guard interval", x).color(pal.band_edge).width(1.0));
+            }
+            p.hline(HLine::new("no Doppler shift", 0.0).color(pal.marker).style(LineStyle::dashed_dense()));
+        });
+    ui.label(
+        RichText::new(format!(
+            "The last {:.0} s of channel estimates: each spot is a propagation path, at its delay (from the receiver's timing) and \
+             Doppler shift (from the frequency the receiver tracks); spread along the Doppler axis is the path's fading rate. \
+             Colours {FLOOR_DB:.0} … 0 dB below the strongest path; lines: the guard interval (later echoes interfere).",
+            map.window_s
+        ))
+        .weak()
+        .small(),
+    );
+}
+
+/// The map as an image: delays across, the highest Doppler shift at the top.
+fn delay_doppler_image(map: &DelayDoppler) -> eframe::egui::ColorImage {
+    let lut = crate::waterfall::palette();
+    let scale = (lut.len() - 1) as f32 / -FLOOR_DB;
+    let mut pixels = Vec::with_capacity(map.delays * map.dopplers);
+    for r in (0..map.dopplers).rev() {
+        for c in 0..map.delays {
+            let i = ((map.at(r, c) - FLOOR_DB) * scale).clamp(0.0, (lut.len() - 1) as f32);
+            pixels.push(lut[i as usize]);
+        }
+    }
+    eframe::egui::ColorImage::new([map.delays, map.dopplers], pixels)
 }
 
 /// The frequency span (kHz) showing `band` with a margin of a tenth of its width on

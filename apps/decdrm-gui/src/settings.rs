@@ -191,7 +191,11 @@ pub enum PlotTab {
     /// Spectrum of the decoded audio.
     Audio,
     Channel,
+    /// The channel's gain per carrier over time.
+    Fading,
     Impulse,
+    /// The channel's scattering function: propagation paths by delay and Doppler.
+    DelayDoppler,
     Snr,
     /// Reception figures and error rates of the last minutes.
     History,
@@ -201,14 +205,16 @@ pub enum PlotTab {
 }
 
 impl PlotTab {
-    pub const ALL: [PlotTab; 10] = [
+    pub const ALL: [PlotTab; 12] = [
         Self::Overview,
         Self::Spectrum,
         Self::Waterfall,
         Self::Constellations,
         Self::Audio,
         Self::Channel,
+        Self::Fading,
         Self::Impulse,
+        Self::DelayDoppler,
         Self::Snr,
         Self::History,
         Self::Schedule,
@@ -222,7 +228,9 @@ impl PlotTab {
             Self::Constellations => "Constellations",
             Self::Audio => "Audio",
             Self::Channel => "Channel",
+            Self::Fading => "Fading",
             Self::Impulse => "Impulse response",
+            Self::DelayDoppler => "Delay–Doppler",
             Self::Snr => "SNR per carrier",
             Self::History => "History",
             Self::Schedule => "Schedule",

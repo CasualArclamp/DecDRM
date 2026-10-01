@@ -42,6 +42,9 @@ pub struct EqSymbol {
     pub cells: Vec<EqCell>,
     /// Channel estimate per carrier.
     pub chan: Vec<Cplx>,
+    /// Cumulative timing shift of this symbol's window (samples at 48 kHz), the timing
+    /// `chan` refers to.
+    pub cum_shift: i64,
 }
 
 /// Measurements published by the estimator.
@@ -301,8 +304,8 @@ impl ChannelEstimator {
         self.grid = grid;
 
         // Equalise the delayed symbol.
-        let (data, out_s, _) = self.hist.front().expect("history filled");
-        let out_s = *out_s;
+        let (data, out_s, cum_shift) = self.hist.front().expect("history filled");
+        let (out_s, cum_shift) = (*out_s, *cum_shift);
         let cells: Vec<EqCell> = data
             .iter()
             .zip(&chan)
@@ -313,7 +316,7 @@ impl ChannelEstimator {
             .collect();
 
         self.update_quality(&map, &cells, out_s);
-        Some(EqSymbol { symbol: out_s, cells, chan })
+        Some(EqSymbol { symbol: out_s, cells, chan, cum_shift })
     }
 
     fn update_quality(&mut self, map: &CellMap, cells: &[EqCell], s: usize) {

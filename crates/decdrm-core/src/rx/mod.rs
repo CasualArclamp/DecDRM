@@ -19,11 +19,13 @@ pub mod framesync;
 pub mod freqacq;
 pub mod input;
 pub mod ofdm;
+pub mod scatter;
 pub mod timesync;
 mod chain;
 
 pub use chain::{ChainVisuals, MscConfig, MscFrame, SdcBlock};
 pub use chanest::PdsAxis;
+pub use scatter::DelayDoppler;
 pub use input::{InputFormat, RealChannel};
 
 use crate::dsp::resampler::FracResampler;

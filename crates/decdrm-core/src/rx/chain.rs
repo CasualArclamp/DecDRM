@@ -64,6 +64,10 @@ pub struct ChainVisuals {
     pub pds_axis: Option<PdsAxis>,
     /// Per-carrier MSC SNR (carrier index, dB).
     pub snr_profile: Vec<(i32, Real)>,
+    /// Carrier spacing, Hz (carrier `kmin + i` is at `(kmin + i) · spacing_hz`).
+    pub spacing_hz: Real,
+    /// Delay–Doppler map of the last seconds of channel estimates (see `rx::scatter`).
+    pub delay_doppler: Option<super::scatter::DelayDoppler>,
 }
 
 pub(super) enum ChainEvent {
@@ -98,6 +102,8 @@ pub(super) struct SymbolChain {
     ofdm: OfdmDemod,
     frame: FrameSync,
     chanest: ChannelEstimator,
+    /// The last seconds of channel estimates, for the delay–Doppler map.
+    history: super::scatter::ChannelHistory,
     cells: Vec<Cplx>,
     /// The most recent windows given to the channel estimator (samples, timing
     /// shift, frame symbol index), replayed through a new carrier layout when the
@@ -146,6 +152,7 @@ impl SymbolChain {
             ofdm: OfdmDemod::new(&map),
             frame: FrameSync::new(&map),
             chanest: ChannelEstimator::new(Arc::clone(&map)),
+            history: super::scatter::ChannelHistory::new(&map),
             cells: Vec::new(),
             recent: VecDeque::new(),
             frame_id: None,
@@ -316,6 +323,7 @@ impl SymbolChain {
             self.msc_gap = true;
             self.sf_synced = false;
             self.recent.clear();
+            self.history.clear();
         }
         let eq = self.chanest.process(&cells, fs.symbol, win.shift);
         self.cells = cells;
@@ -328,6 +336,7 @@ impl SymbolChain {
         track_reset(&mut self.chanest);
 
         let Some(eq) = eq else { return out };
+        self.history.push(&eq.chan, eq.cum_shift);
         self.capture(&eq.cells, eq.symbol, &eq.chan);
         self.demap(&eq.cells, eq.symbol, &mut out.events);
         out
@@ -389,6 +398,7 @@ impl SymbolChain {
             self.vis_msc.push(cells[c as usize].sig);
         }
         self.vis.kmin = map.kmin;
+        self.vis.spacing_hz = map.mode().carrier_spacing();
         self.vis.chan.clear();
         self.vis.chan.extend_from_slice(chan);
     }
@@ -400,6 +410,7 @@ impl SymbolChain {
         v.pds = pds;
         v.pds_axis = Some(axis);
         v.snr_profile = self.chanest.snr_profile();
+        v.delay_doppler = self.history.map().cloned();
         v
     }
 

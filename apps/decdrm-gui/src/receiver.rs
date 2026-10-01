@@ -118,6 +118,8 @@ pub struct RxSession {
     pub plots: PlotData,
     /// History of the input spectrum.
     pub waterfall: Waterfall,
+    /// Channel gain per carrier over the last minute.
+    pub fading: crate::fading::FadingMap,
     /// Reception figures and error rates of the last minutes.
     pub history: History,
     pub indicators: Indicators,
@@ -150,6 +152,7 @@ impl Default for RxSession {
             snap: Snapshot::default(),
             plots: PlotData::default(),
             waterfall: Waterfall::default(),
+            fading: crate::fading::FadingMap::default(),
             history: History::default(),
             indicators: Indicators::default(),
             data: DataServices::default(),
@@ -183,6 +186,7 @@ impl RxSession {
         self.snap = Snapshot::default();
         self.plots = PlotData::default();
         self.waterfall.clear();
+        self.fading.clear();
         self.history.clear();
         self.indicators.clear();
         self.data.clear();
@@ -312,6 +316,8 @@ impl RxSession {
                 self.plots = PlotData::from_snapshot(&snap);
                 self.waterfall
                     .push(&snap.visuals.spectrum_db, snap.visuals.real_input);
+                let chain = &snap.visuals.chain;
+                self.fading.push(&chain.chan, chain.kmin, chain.spacing_hz);
                 self.history.push(&snap);
             }
             self.snap = snap;
