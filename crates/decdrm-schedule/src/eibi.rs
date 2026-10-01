@@ -11,8 +11,9 @@
 //! 6140;1950-1400;;KRE;KCBS DIGITAL;K;KRE;p;1;;[0226]
 //! ```
 //!
-//! Columns (`;`-separated; found by their header names when there is a header, else in
-//! this order):
+//! Columns (described in EiBi's `README.TXT`, "Format of the CSV database",
+//! `http://www.eibispace.de/dx/README.TXT`; `;`-separated; found by their header names
+//! when there is a header, else in this order):
 //! * `kHz` — frequency (may have decimals);
 //! * `Time(UTC)` — `HHMM-HHMM` (empty: all day);
 //! * `Days` — empty for daily; `Mo-Fr`, `Sa,Su`, `MoWeFr`, digits `1245` (1 = Monday), or
@@ -23,13 +24,14 @@
 //!   *x* in country ABC), empty (the home country's main site);
 //! * `P` — persistence code (ignored), `Start` / `Stop` — validity dates `ddmm` for
 //!   entries that do not cover the whole season ([`parse_date`]); `Stop` may end in
-//!   `[mmyy]`, the month the broadcast was last logged (`[0226]`, `1906[0626]`), which
+//!   `[mmyy]`, the month the broadcast was last heard (`[0226]`, `1906[0626]`), which
 //!   becomes a note.
 //!
 //! **DRM**: the file covers all broadcasts. EiBi marks the DRM ones with the word
 //! `DIGITAL` after the station name (`BBC DIGITAL`, `KCBS DIGITAL`; `sked-a26.csv` has no
-//! "DRM" anywhere); the word `DRM` in the station, remarks or language field counts too
-//! ([`is_drm`]). Dream's AM schedule does not distinguish DRM at all.
+//! "DRM" anywhere, and the README mentions neither); the word `DRM` in the station,
+//! remarks or language field counts too ([`is_drm`]). Dream's AM schedule does not
+//! distinguish DRM at all.
 //!
 //! The file for the current season is [`file_name`] (`sked-a26.csv`), downloaded from
 //! [`url`] (`http://www.eibispace.de/dx/sked-a26.csv`).
@@ -237,12 +239,11 @@ fn two_letter_run(word_lower: &str) -> Option<Vec<Weekday>> {
         .collect()
 }
 
-/// Parse a `Start`/`Stop` validity date. EiBi writes `ddmm`, a day of the season: in
-/// `sked-a26.csv` the commonest are `2903` and `2510` (29 March and 25 October, the days
-/// the season starts and ends), and 1415 of its dates are valid only as `ddmm`, none
-/// only as `mmdd`. A value valid only as `mmdd` is still read that way. Also accepted,
-/// for other lists in this format: `yyyymmdd`, `yyyy-mm-dd`, `dd.mm.` and `dd.mm.yyyy`.
-/// `None` for an empty or unreadable field.
+/// Parse a `Start`/`Stop` validity date. EiBi writes `ddmm`, a day of the season (its
+/// README: `0401` is 4 January; in `sked-a26.csv` 1415 dates are valid only as `ddmm`,
+/// none only as `mmdd`). A value valid only as `mmdd` is still read that way. Also
+/// accepted, for other lists in this format: `yyyymmdd`, `yyyy-mm-dd`, `dd.mm.` and
+/// `dd.mm.yyyy`. `None` for an empty or unreadable field.
 pub fn parse_date(field: &str) -> Option<DateBound> {
     let s = field.trim();
     let annual = |month: u32, day: u32| {
@@ -436,9 +437,8 @@ fn parse_row(fields: &[&str], cols: &Columns) -> Result<Entry, String> {
 }
 
 /// Split EiBi's `[mmyy]` off a `Stop` field: `1906[0626]` → `1906` and `0626`; `[0226]` →
-/// no date and `0226`. The brackets hold the month the broadcast was last logged —
-/// inferred from `sked-a26.csv`: every one is a past month (up to 08/2026 in a file of
-/// 10/2026), going back to 2014-2016 for rarely heard coast stations.
+/// no date and `0226`. The brackets hold the date of the most recent log (EiBi's README,
+/// entry #11: `[0212]` is last heard in February 2012).
 fn split_last_logged(field: &str) -> (&str, Option<&str>) {
     match field.split_once('[') {
         Some((stop, rest)) => {

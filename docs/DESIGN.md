@@ -204,9 +204,9 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       Dream's code tables (`TableStations.cpp`, generated into `eibi_tables.rs`) for
       languages, targets, countries and sites; columns found by header name, lenient
       days (`Mo-Fr`, `Sa,Su`, `SaSu`, `1245`, `Fr-Mo`, keywords) and validity dates
-      (`ddmm`, as the A26 file shows: 1415 of its dates valid only so, none only as
-      `mmdd`; a `[mmyy]` after the stop date is the month last logged, shown as a
-      note); DRM = EiBi's mark `DIGITAL` after the station name (`BBC DIGITAL`; the A26
+      (`ddmm`, as EiBi's `README.TXT` says and the A26 file confirms; a `[mmyy]` after
+      the stop date is the month last heard, shown as a note); DRM = EiBi's mark
+      `DIGITAL` after the station name (`BBC DIGITAL`; not in the README, and the A26
       file has no "DRM" at all — the first version, looking for that word, found 0 of
       its 118 DRM entries), or the word "DRM" in station, remarks or language. On
       air: the start day decides (Dream misses Friday's 2300-0100 on Saturday at
@@ -222,6 +222,11 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       cached per minute and painted with `show_rows`, the received frequency from the
       *Frequency* box or the recording's file name — KiwiSDR, HDSDR, SDR# naming —
       highlighted and named in the log at Start; a click copies the frequency).
+      *Open* (EiBi's README, not applied yet): persistence codes (`P`: 4 = active
+      only in the winter season, 5 = only in the summer season, 8 = inactive; a start
+      date alone on a permanent entry, `P` = 1, is for information only) and the Days
+      forms `1.Sa` (first Saturday of the month), `1WeFr`, `Last7`, `altFr`, `MF-15`,
+      `15Sep` (that date only).
 - [x] **KiwiSDR client** (2026-10-01) — DecDRM tunes a KiwiSDR itself and decodes its
       I/Q, instead of a browser tab and a virtual audio cable.
       *Done:* `decdrm-kiwi`. The protocol follows the reference client kiwiclient
