@@ -1,7 +1,7 @@
 //! The client against the stand-in KiwiSDR ([`decdrm_kiwi::mock`]).
 
 use decdrm_kiwi::mock::{MockConfig, MockEnd, MockKiwi, MockSession};
-use decdrm_kiwi::{KiwiAddress, KiwiConfig, KiwiState, KiwiStream};
+use decdrm_kiwi::{KiwiAddress, KiwiConfig, KiwiState, KiwiStream, RETUNE_SETTLE};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -161,6 +161,51 @@ fn reconnects_after_a_lost_connection() {
     assert_eq!((st.state, st.reconnects), (KiwiState::Streaming, 1));
     let log = s.take_log();
     assert!(log.iter().any(|l| l.contains("connection lost") && l.contains("reconnecting")), "{log:?}");
+    s.stop_and_join();
+}
+
+#[test]
+fn retunes_on_the_open_connection() {
+    // Paced like a real Kiwi, so blocks keep coming while the retune settles.
+    let kiwi = MockKiwi::start(MockConfig { iq: Arc::new(tone(12_000)), paced: true, ..MockConfig::default() }).unwrap();
+    let s = KiwiStream::start(config_for(&kiwi.address()));
+    let (got, err) = read_frames(&s, 2 * BLOCK, Duration::from_secs(10));
+    assert_eq!((got.len(), err), (2 * 2 * BLOCK, None));
+    let asked = Instant::now();
+    s.tune(7325.0);
+    assert_eq!(s.status().freq_khz, 7325.0);
+    // Nothing of the old frequency is read: the first samples come after the settling
+    // time (which starts once the command is sent, after `tune`).
+    let (got, err) = read_frames(&s, BLOCK, Duration::from_secs(10));
+    assert_eq!((got.len(), err), (2 * BLOCK, None));
+    assert!(asked.elapsed() >= RETUNE_SETTLE, "samples {:?} after the retune", asked.elapsed());
+    let cmds = kiwi.commands();
+    assert!(cmds.iter().any(|c| c == "SET mod=iq low_cut=-5000 high_cut=5000 freq=7325.000"), "{cmds:?}");
+    assert_eq!(kiwi.connections(), 1, "retuned without reconnecting");
+    let log = s.take_log();
+    assert!(log.iter().any(|l| l == "KiwiSDR: retuned to 7325.000 kHz"), "{log:?}");
+    s.stop_and_join();
+}
+
+#[test]
+fn a_reconnection_keeps_the_new_frequency() {
+    let kiwi = mock(
+        vec![MockSession::Stream { blocks: Some(10), end: MockEnd::Drop }, MockSession::Stream { blocks: None, end: MockEnd::Wait }],
+        tone(1200),
+    );
+    let mut cfg = config_for(&kiwi.address());
+    // Time to retune before the second connection sets up the receiver.
+    cfg.reconnect_delay = Duration::from_secs(1);
+    let s = KiwiStream::start(cfg);
+    let (_, err) = read_frames(&s, 4 * BLOCK, Duration::from_secs(10));
+    assert_eq!(err, None);
+    s.tune(7325.0);
+    assert!(wait_for(Duration::from_secs(10), || kiwi.connections() == 2 && !read_frames(&s, BLOCK, Duration::from_millis(300)).0.is_empty()));
+    let cmds = kiwi.commands();
+    let second = cmds.iter().rposition(|c| c.starts_with("SET auth")).unwrap();
+    assert!(second > 0, "{cmds:?}");
+    assert!(cmds[second..].iter().any(|c| c == "SET mod=iq low_cut=-5000 high_cut=5000 freq=7325.000"), "{cmds:?}");
+    assert!(!cmds[second..].iter().any(|c| c.contains("freq=6140")), "{cmds:?}");
     s.stop_and_join();
 }
 

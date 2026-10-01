@@ -4,7 +4,7 @@
 
 use decdrm_engine::decdrm_kiwi::mock::{MockConfig, MockEnd, MockKiwi, MockSession};
 use decdrm_engine::decdrm_kiwi::{KiwiAddress, KiwiConfig, KiwiState};
-use decdrm_engine::{Engine, EngineConfig, EngineEvent, InputSpec};
+use decdrm_engine::{Command, Engine, EngineConfig, EngineEvent, InputSpec, Snapshot};
 use decdrm_io::{FileReader, Resampler, ResamplerQuality};
 use decdrm_station::{Station, StationConfig};
 use std::sync::Arc;
@@ -48,7 +48,60 @@ fn kiwi_signal() -> Vec<(i16, i16)> {
     let mut iq12 = down.process(&iq48);
     iq12.extend(down.flush());
     let q = |v: f32| (v * 32767.0).round().clamp(-32768.0, 32767.0) as i16;
-    iq12.chunks_exact(2).map(|p| (q(p[0]), q(p[1]))).collect()
+    iq12.as_chunks::<2>().0.iter().map(|&[i, qv]| (q(i), q(qv))).collect()
+}
+
+/// Collect the engine's log until `done` holds for a snapshot or `limit` passes.
+fn run_until(engine: &Engine, log: &mut Vec<String>, limit: Duration, done: impl Fn(&Snapshot) -> bool) -> bool {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        if let Some(EngineEvent::Log(l)) = engine.recv_event(Duration::from_millis(100)) {
+            log.push(l);
+        }
+        if done(&engine.snapshot()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// A retune keeps the connection, tells the Kiwi, and starts the receiver afresh; the
+/// stand-in serves the same station on every frequency, so it is found again.
+#[test]
+fn retuning_keeps_the_connection_and_starts_afresh() {
+    let kiwi = MockKiwi::start(MockConfig {
+        iq: Arc::new(kiwi_signal()),
+        // In real time, as a Kiwi sends, so the signal goes on while the retune settles.
+        paced: true,
+        sessions: vec![MockSession::Stream { blocks: None, end: MockEnd::Wait }],
+        ..MockConfig::default()
+    })
+    .unwrap();
+    let input = InputSpec::Kiwi(KiwiConfig::new(KiwiAddress::parse(&kiwi.address()).unwrap(), 6140.0));
+    let engine = Engine::start(EngineConfig { input, ..EngineConfig::default() });
+    let mut log = Vec::new();
+    let decoding = |s: &Snapshot| s.audio.frames_ok >= 10 && s.services.iter().any(|v| v.label == "Kiwi Test");
+    assert!(run_until(&engine, &mut log, Duration::from_secs(60), decoding), "{log:#?}");
+
+    engine.command(Command::Tune(7325.0));
+    // At once: nothing of the old station on show, the new frequency in the status.
+    let fresh = |s: &Snapshot| {
+        s.services.is_empty() && s.audio.frames_ok == 0 && s.input.kiwi.as_ref().is_some_and(|k| k.freq_khz == 7325.0)
+    };
+    assert!(run_until(&engine, &mut log, Duration::from_secs(10), fresh), "{log:#?}");
+    assert!(run_until(&engine, &mut log, Duration::from_secs(60), decoding), "{log:#?}");
+    let snap = engine.snapshot();
+    drop(engine);
+    for l in &log {
+        println!("{l}");
+    }
+    assert!(snap.input.info.name.ends_with("at 7325.000 kHz"), "{}", snap.input.info.name);
+    let at = |text: &str| log.iter().position(|l| l.contains(text)).unwrap_or_else(|| panic!("no {text:?} in {log:#?}"));
+    let tuned = at("tuning to 7325.000 kHz");
+    assert!(at("KiwiSDR: retuned to 7325.000 kHz") > tuned);
+    assert!(log[tuned..].iter().any(|l| l.contains("signal found")), "{log:#?}");
+    assert!(kiwi.commands().iter().any(|c| c == "SET mod=iq low_cut=-5000 high_cut=5000 freq=7325.000"));
+    assert_eq!(kiwi.connections(), 1, "retuned on the same connection");
 }
 
 #[test]

@@ -70,6 +70,12 @@ decdrm rx --kiwi "http://kiwi.example:8073/?f=6140iqz10" --duration 600 --out kc
   lists the Kiwis used before. The status strip shows the connection, the Kiwi's
   S-meter and its name (location, firmware and more on hover); the log shows the
   connection's events.
+- **Changing the frequency while connected:** the frequency box stays live while the
+  Kiwi runs. Type a new frequency and press Enter, or drag the box and let go, and
+  DecDRM retunes the Kiwi on the same connection: the receiver starts afresh on the new
+  station after about a second (samples from before the retune are dropped).
+  Double-clicking a broadcast in the *Schedule* tab retunes the running Kiwi the same
+  way.
 - **Finding a Kiwi:** *Find…* lists the public KiwiSDRs (from kiwisdr.com/public, as
   published by rx.linkfanel.net; downloaded only when you press *Update list*). By
   default it shows the Kiwis whose owners allow apps, that have a free channel and that

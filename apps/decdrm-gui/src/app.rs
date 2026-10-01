@@ -24,6 +24,7 @@ use crate::schedule::ScheduleView;
 use crate::settings::{DataTab, Page, PlotTab, Settings, SettingsStore, SignalFormat, SourceKind, ThemeChoice};
 use crate::transmitter::TxSession;
 use crate::tx_config;
+use decdrm_engine::decdrm_kiwi::KiwiAddress;
 use eframe::egui::{self, RichText, Ui};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -229,17 +230,37 @@ impl DecDrmApp {
             SourceAction::Stop => self.rx.stop(),
             SourceAction::Restart => self.rx.restart(),
             SourceAction::FindKiwi => self.kiwi_list.open_window(),
+            SourceAction::Tune => self.tune_kiwi(),
         }
     }
 
-    /// Receive `khz` on the KiwiSDR (from the Schedule tab): start at once if a KiwiSDR
-    /// is set, otherwise open the list to choose one first.
+    /// Retune the running KiwiSDR to the frequency in the source bar (another station:
+    /// the views start afresh, the connection stays).
+    fn tune_kiwi(&mut self) {
+        let khz = self.settings.kiwi.freq_khz;
+        if !khz.is_finite() || khz <= 0.0 || self.rx.kiwi_freq_khz().is_some_and(|f| (f - khz).abs() < 1e-6) {
+            return;
+        }
+        self.slideshow.clear();
+        self.notice = None;
+        self.rx.tune(khz, self.settings.source_label());
+        if let Some(r) = crate::schedule::reception(&self.settings) {
+            let all = self.settings.schedule.all_broadcasts;
+            self.schedule.note_reception(r, all);
+        }
+    }
+
+    /// Receive `khz` on the KiwiSDR (from the Schedule tab): retune the KiwiSDR already
+    /// running, start at once if one is set, otherwise open the list to choose one first.
     fn listen_on_kiwi(&mut self, khz: f64) {
         self.settings.source = SourceKind::Kiwi;
         self.settings.kiwi.freq_khz = khz;
+        let address = KiwiAddress::parse(&self.settings.kiwi.address).ok();
         if self.settings.kiwi.address.trim().is_empty() {
             self.kiwi_list.open_window();
             self.notice = Some("Choose a KiwiSDR (double-click one to start receiving).".into());
+        } else if address.is_some() && self.rx.kiwi() == address.as_ref() {
+            self.tune_kiwi();
         } else {
             self.start();
         }
@@ -279,6 +300,7 @@ impl DecDrmApp {
                 &mut self.devices,
                 self.rx.is_running(),
                 self.rx.is_stopping(),
+                self.rx.kiwi().is_some(),
             );
             if let Some(n) = &self.notice {
                 ui.colored_label(ui.visuals().warn_fg_color, n);

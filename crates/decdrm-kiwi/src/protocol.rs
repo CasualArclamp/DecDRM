@@ -294,7 +294,6 @@ pub struct Tuning {
 /// Kiwi's converter offset (`freq_offset`, kHz) removed from the frequency when the
 /// requested frequency lies above it.
 pub fn setup(t: &Tuning, freq_offset_khz: f64) -> Vec<String> {
-    let freq = if freq_offset_khz != 0.0 && t.freq_khz >= freq_offset_khz { t.freq_khz - freq_offset_khz } else { t.freq_khz };
     let agc = match t.agc {
         Agc::On => "SET agc=1 hang=0 thresh=-100 slope=6 decay=1000 manGain=50".to_string(),
         Agc::Manual(g) => format!("SET agc=0 hang=0 thresh=-100 slope=6 decay=1000 manGain={}", g.min(120)),
@@ -304,11 +303,19 @@ pub fn setup(t: &Tuning, freq_offset_khz: f64) -> Vec<String> {
         "SET genattn=0".into(),
         "SET gen=0 mix=-1".into(),
         format!("SET ident_user={}", percent_encode(&t.ident)),
-        format!("SET mod=iq low_cut={} high_cut={} freq={freq:.3}", t.low_cut_hz, t.high_cut_hz),
+        tune(t, freq_offset_khz),
         agc,
         "SET compression=0".into(),
         "SET keepalive".into(),
     ]
+}
+
+/// The command that sets the modulation, passband and frequency: part of [`setup`], and
+/// alone it retunes the receiver during a session (as the Kiwi's web page and
+/// kiwirecorder's scanning do). The converter offset is removed as in [`setup`].
+pub fn tune(t: &Tuning, freq_offset_khz: f64) -> String {
+    let freq = if freq_offset_khz != 0.0 && t.freq_khz >= freq_offset_khz { t.freq_khz - freq_offset_khz } else { t.freq_khz };
+    format!("SET mod=iq low_cut={} high_cut={} freq={freq:.3}", t.low_cut_hz, t.high_cut_hz)
 }
 
 /// The keepalive the Kiwi expects about once a second.
@@ -416,6 +423,8 @@ mod tests {
         // A converter offset is removed; a frequency below it is taken as it is.
         assert!(setup(&Tuning { freq_khz: 100_006.0, ..t.clone() }, 100_000.0).contains(&"SET mod=iq low_cut=-5000 high_cut=5000 freq=6.000".to_string()));
         assert!(setup(&t, 100_000.0).iter().any(|c| c.ends_with("freq=6140.000")));
+        // Retuning is the same command alone.
+        assert_eq!(tune(&Tuning { freq_khz: 15_120.5, ..t.clone() }, 0.0), "SET mod=iq low_cut=-5000 high_cut=5000 freq=15120.500");
         let manual = setup(&Tuning { agc: Agc::Manual(200), ..t }, 0.0);
         assert!(manual.iter().any(|c| c.starts_with("SET agc=0") && c.ends_with("manGain=120")));
     }

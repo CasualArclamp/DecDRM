@@ -24,7 +24,8 @@ use crate::plots::PlotData;
 use crate::waterfall::Waterfall;
 use crate::website::{SiteFiles, SiteStore, default_sites_dir};
 use decdrm_data::DataEvent;
-use decdrm_engine::{Command, Engine, EngineConfig, EngineEvent, ServiceView, Snapshot};
+use decdrm_engine::decdrm_kiwi::KiwiAddress;
+use decdrm_engine::{Command, Engine, EngineConfig, EngineEvent, InputSpec, ServiceView, Snapshot};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -137,6 +138,8 @@ pub struct RxSession {
     pub texts: VecDeque<String>,
     /// Description of the current source (for the title / log).
     pub source_label: String,
+    /// The KiwiSDR the running engine receives from (it can be retuned).
+    kiwi: Option<KiwiAddress>,
     /// Live sound-card input (slideshow trigger times use the wall clock).
     live: bool,
     epoch: Instant,
@@ -162,6 +165,7 @@ impl Default for RxSession {
             log: LogBuffer::default(),
             texts: VecDeque::new(),
             source_label: String::new(),
+            kiwi: None,
             live: false,
             epoch: Instant::now(),
             last_fetch: None,
@@ -183,6 +187,23 @@ impl RxSession {
     pub fn start(&mut self, cfg: EngineConfig, label: String) {
         self.shutdown();
         self.live = cfg.input.is_live();
+        self.kiwi = match &cfg.input {
+            InputSpec::Kiwi(k) => Some(k.address.clone()),
+            _ => None,
+        };
+        self.clear_views();
+        self.sites = SiteFiles::new(match &cfg.data_dir {
+            Some(dir) => SiteStore::Engine(dir.clone()),
+            None => SiteStore::Own(self.sites_dir.clone()),
+        });
+        self.log.push(format!("── start: {label}"));
+        self.source_label = label;
+        self.engine = Some(Engine::start(cfg));
+        self.last_fetch = None;
+    }
+
+    /// Forget everything shown of the previous source or station.
+    fn clear_views(&mut self) {
         self.snap = Snapshot::default();
         self.plots = PlotData::default();
         self.waterfall.clear();
@@ -190,15 +211,35 @@ impl RxSession {
         self.history.clear();
         self.indicators.clear();
         self.data.clear();
-        self.sites = SiteFiles::new(match &cfg.data_dir {
-            Some(dir) => SiteStore::Engine(dir.clone()),
-            None => SiteStore::Own(self.sites_dir.clone()),
-        });
+        self.sites = SiteFiles::new(self.sites.store().clone());
         self.texts.clear();
-        self.log.push(format!("── start: {label}"));
+    }
+
+    /// The KiwiSDR the running engine receives from.
+    pub fn kiwi(&self) -> Option<&KiwiAddress> {
+        self.kiwi.as_ref().filter(|_| self.engine.is_some() && !self.stopping)
+    }
+
+    /// The frequency the running KiwiSDR is tuned to, kHz.
+    pub fn kiwi_freq_khz(&self) -> Option<f64> {
+        self.kiwi()?;
+        self.snap.input.kiwi.as_ref().map(|k| k.freq_khz)
+    }
+
+    /// Retune the running KiwiSDR to `freq_khz`: another station, so the views start
+    /// afresh (the engine keeps the connection and restarts the receiver).
+    pub fn tune(&mut self, freq_khz: f64, label: String) {
+        let Some(engine) = self.engine.as_ref().filter(|_| self.kiwi().is_some()) else { return };
+        engine.command(Command::Tune(freq_khz));
+        // Keep the input status (the KiwiSDR's name, S-meter) until the next snapshot.
+        let input = std::mem::take(&mut self.snap.input);
+        self.clear_views();
+        self.snap.input = input;
+        if let Some(k) = &mut self.snap.input.kiwi {
+            k.freq_khz = freq_khz;
+        }
+        self.log.push(format!("── retune: {label}"));
         self.source_label = label;
-        self.engine = Some(Engine::start(cfg));
-        self.last_fetch = None;
     }
 
     /// Ask the worker to stop; the handle is released when it reports `Stopped`.

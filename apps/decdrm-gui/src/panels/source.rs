@@ -13,6 +13,8 @@ pub enum SourceAction {
     Restart,
     /// Open the list of public KiwiSDRs.
     FindKiwi,
+    /// Retune the running KiwiSDR to the frequency in the bar.
+    Tune,
 }
 
 /// Sound-card names, enumerated on first use (WASAPI/ALSA enumeration takes a moment,
@@ -57,32 +59,46 @@ fn names(
     }
 }
 
+/// Run `add` greyed out and inert unless `on`. Unlike `add_enabled_ui`, which puts the
+/// controls in a child area that wraps on its own, they stay in the caller's row.
+/// (Rust note: a closure `FnOnce(&mut Ui) -> Response` is itself a widget, so
+/// `add_enabled` can run it; `out` carries its result out.)
+fn enabled<R>(ui: &mut Ui, on: bool, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let mut out = None;
+    ui.add_enabled(on, |ui: &mut Ui| {
+        out = Some(add(ui));
+        ui.response()
+    });
+    out.expect("add_enabled runs the closure")
+}
+
 /// Draw the bar. Controls that define the source are locked while the engine runs
-/// (they take effect on the next Start).
+/// (they take effect on the next Start), except the frequency of a running KiwiSDR
+/// (`tunable`), which retunes it.
 pub fn show(
     ui: &mut Ui,
     settings: &mut Settings,
     devices: &mut DeviceLists,
     running: bool,
     stopping: bool,
+    tunable: bool,
 ) -> Option<SourceAction> {
     let mut action = None;
+    let free = !running;
     ui.horizontal_wrapped(|ui| {
-        ui.add_enabled_ui(!running, |ui| {
+        enabled(ui, free, |ui| {
             ui.selectable_value(&mut settings.source, SourceKind::File, "Recording");
             ui.selectable_value(&mut settings.source, SourceKind::Device, "Sound card");
             ui.selectable_value(&mut settings.source, SourceKind::Kiwi, "KiwiSDR")
                 .on_hover_text("Receive from a KiwiSDR on the internet: DecDRM tunes it and takes its I/Q.");
             ui.separator();
-            match settings.source {
-                SourceKind::File => file_picker(ui, settings),
-                SourceKind::Device => device_picker(ui, settings, devices),
-                SourceKind::Kiwi => {
-                    if kiwi_picker(ui, settings) {
-                        action = Some(SourceAction::FindKiwi);
-                    }
-                }
-            }
+        });
+        match settings.source {
+            SourceKind::File => enabled(ui, free, |ui| file_picker(ui, settings)),
+            SourceKind::Device => enabled(ui, free, |ui| device_picker(ui, settings, devices)),
+            SourceKind::Kiwi => action = kiwi_picker(ui, settings, free, tunable),
+        }
+        enabled(ui, free, |ui| {
             ui.separator();
             if settings.source == SourceKind::Kiwi {
                 ui.label(RichText::new("I/Q").weak()).on_hover_text("A KiwiSDR delivers I/Q; the format setting does not apply.");
@@ -155,36 +171,65 @@ fn file_picker(ui: &mut Ui, settings: &mut Settings) {
     }
 }
 
-/// Address (and those used before), frequency, name and password. Returns whether
-/// "Find…" was clicked.
-fn kiwi_picker(ui: &mut Ui, settings: &mut Settings) -> bool {
+/// Address (and those used before), frequency, name and password. While a KiwiSDR
+/// runs (`tunable`) only the frequency can be changed, and a new one retunes it once
+/// typed (Enter) or dragged to. `free`: nothing runs. Returns "Find…" or a retune.
+fn kiwi_picker(ui: &mut Ui, settings: &mut Settings, free: bool, tunable: bool) -> Option<SourceAction> {
     use decdrm_engine::decdrm_kiwi::frequency_from_url;
+    let mut action = None;
     let k = &mut settings.kiwi;
-    let edit = ui
-        .add(egui::TextEdit::singleline(&mut k.address).desired_width(200.0).hint_text("KiwiSDR address"))
-        .on_hover_text("host, host:port (port 8073 if left out), or a URL copied from the browser, whose f= also sets the frequency");
-    if edit.changed()
-        && let Some(f) = frequency_from_url(&k.address)
-    {
-        k.freq_khz = f;
-    }
-    if !k.recent.is_empty() {
-        // An empty combo box: just its arrow, opening the list.
-        ComboBox::from_id_salt("kiwi_recent")
-            .width(16.0)
-            .selected_text("")
-            .show_ui(ui, |ui| {
-                for r in k.recent.clone() {
-                    if ui.selectable_label(r.eq_ignore_ascii_case(k.address.trim()), &r).clicked() {
-                        k.address = r;
+    enabled(ui, free, |ui| {
+        let edit = ui
+            .add(egui::TextEdit::singleline(&mut k.address).desired_width(200.0).hint_text("KiwiSDR address"))
+            .on_hover_text("host, host:port (port 8073 if left out), or a URL copied from the browser, whose f= also sets the frequency");
+        if edit.changed()
+            && let Some(f) = frequency_from_url(&k.address)
+        {
+            k.freq_khz = f;
+        }
+        if !k.recent.is_empty() {
+            // An empty combo box: just its arrow, opening the list.
+            ComboBox::from_id_salt("kiwi_recent")
+                .width(16.0)
+                .selected_text("")
+                .show_ui(ui, |ui| {
+                    for r in k.recent.clone() {
+                        if ui.selectable_label(r.eq_ignore_ascii_case(k.address.trim()), &r).clicked() {
+                            k.address = r;
+                        }
                     }
-                }
-            })
-            .response
-            .on_hover_text("KiwiSDRs used before");
+                })
+                .response
+                .on_hover_text("KiwiSDRs used before");
+        }
+    });
+    // A retune waits for the end of an edit: typing sets the value on Enter (or when the
+    // box loses focus), dragging when the mouse is released; the arrow keys step it.
+    let freq = ui
+        .add_enabled(
+            free || tunable,
+            egui::DragValue::new(&mut k.freq_khz)
+                .range(0.0..=32_000.0)
+                .speed(1.0)
+                .max_decimals(1)
+                .suffix(" kHz")
+                .update_while_editing(!tunable),
+        )
+        .on_hover_text(if tunable {
+            "Frequency the KiwiSDR is tuned to: type a new one and press Enter, or drag, to retune it"
+        } else {
+            "Frequency to tune the KiwiSDR to: the DRM frequency"
+        });
+    if tunable && ((freq.changed() && !freq.dragged()) || freq.drag_stopped()) {
+        action = Some(SourceAction::Tune);
     }
-    ui.add(egui::DragValue::new(&mut k.freq_khz).range(0.0..=32_000.0).speed(1.0).max_decimals(1).suffix(" kHz"))
-        .on_hover_text("Frequency to tune the KiwiSDR to: the DRM frequency");
+    enabled(ui, free, |ui| kiwi_options(ui, settings, &mut action));
+    action
+}
+
+/// The ⚙ menu (name, password) and "Find…".
+fn kiwi_options(ui: &mut Ui, settings: &mut Settings, action: &mut Option<SourceAction>) {
+    let k = &mut settings.kiwi;
     ui.menu_button("⚙", |ui| {
         egui::Grid::new("kiwi_options").num_columns(2).show(ui, |ui| {
             ui.label("Your name");
@@ -203,7 +248,9 @@ fn kiwi_picker(ui: &mut Ui, settings: &mut Settings) -> bool {
     })
     .response
     .on_hover_text("Your name on the KiwiSDR, and a password");
-    ui.button("Find…").on_hover_text("Choose from the public KiwiSDRs whose owners allow apps").clicked()
+    if ui.button("Find…").on_hover_text("Choose from the public KiwiSDRs whose owners allow apps").clicked() {
+        *action = Some(SourceAction::FindKiwi);
+    }
 }
 
 fn device_picker(ui: &mut Ui, settings: &mut Settings, devices: &mut DeviceLists) {

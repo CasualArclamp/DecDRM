@@ -56,7 +56,8 @@ pub struct Source {
 enum Kind {
     File(FileReader),
     Device(InputStream),
-    Kiwi(KiwiStream),
+    /// The stream and the address it was opened with (for the name).
+    Kiwi(KiwiStream, String),
 }
 
 impl Source {
@@ -103,7 +104,8 @@ impl Source {
                     duration_s: None,
                     is_file: false,
                 };
-                return Ok(Self { kind: Kind::Kiwi(KiwiStream::start(cfg.clone())), to48: None, info, frames_read: 0 });
+                let kind = Kind::Kiwi(KiwiStream::start(cfg.clone()), cfg.address.to_string());
+                return Ok(Self { kind, to48: None, info, frames_read: 0 });
             }
         };
         let to48 = To48k::new(info.sample_rate, info.channels).context("creating resampler")?;
@@ -122,7 +124,7 @@ impl Source {
     /// Connection events of a KiwiSDR input since the last call (for the log).
     pub fn take_log(&self) -> Vec<String> {
         match &self.kind {
-            Kind::Kiwi(s) => s.take_log(),
+            Kind::Kiwi(s, _) => s.take_log(),
             _ => Vec::new(),
         }
     }
@@ -130,9 +132,20 @@ impl Source {
     /// The state of a KiwiSDR input.
     pub fn kiwi_status(&self) -> Option<KiwiStatus> {
         match &self.kind {
-            Kind::Kiwi(s) => Some(s.status()),
+            Kind::Kiwi(s, _) => Some(s.status()),
             _ => None,
         }
+    }
+
+    /// Retune a KiwiSDR input to `freq_khz` (see [`KiwiStream::tune`]); `false` for an
+    /// input that cannot be tuned.
+    pub fn tune(&mut self, freq_khz: f64) -> bool {
+        let Kind::Kiwi(s, address) = &self.kind else { return false };
+        s.tune(freq_khz);
+        self.info.name = format!("KiwiSDR {address} at {freq_khz:.3} kHz");
+        // A fresh resampler: its history belongs to the old frequency.
+        self.to48 = None;
+        true
     }
 
     /// Read up to `max_frames` source frames and return them converted to 48 kHz.
@@ -153,7 +166,7 @@ impl Source {
                 }
                 s.read_blocking(max_frames, Duration::from_millis(500)).unwrap_or_default()
             }
-            Kind::Kiwi(s) => {
+            Kind::Kiwi(s, _) => {
                 let raw = s.read_blocking(max_frames, Duration::from_millis(500)).map_err(|e| anyhow::anyhow!("{e}"))?;
                 // The resampler follows the Kiwi's reported rate (rounded to 1 Hz; the
                 // receiver tracks the rest), also after a redirection to another Kiwi.

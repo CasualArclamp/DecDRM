@@ -272,6 +272,20 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       stand-in (205 audio frames, none concealed). Live: KCBS on 6140 kHz locked through
       Kiwis in Japan (25.8 dB SNR, every 16-QAM MSC frame correct, at a Kiwi that then
       applied its app cap) and streamed 60 s without interruption elsewhere.
+      *Retuning* (2026-10-01): `KiwiStream::tune` sends `SET mod=iq … freq=` on the
+      open connection (as the Kiwi's web page and kiwirecorder's scanning do), and a
+      reconnection sets up the new frequency. Unread samples are discarded, and blocks
+      are dropped until `RETUNE_SETTLE` (1 s) after the command. On the Mishima Kiwi the
+      S-meter followed 0.3–0.5 s after it, so 0.5 s was too tight. Engine
+      `Command::Tune` restarts the receiver as a new station (the selection and the
+      frame counts go too). In the GUI the frequency box stays live while a Kiwi runs:
+      the other source controls are locked one by one, so the row wraps as before. A
+      typed value is applied on Enter and a drag on release, and a *Schedule*
+      double-click retunes the running Kiwi. Tests: the retune on the open connection
+      (no samples before the settling time), a reconnection keeping the new frequency,
+      and end to end (the station found and decoded again on the same connection).
+      Live: KCBS 6140 → CNR1 6030 kHz on one connection; CNR1 found 1.9 s after the
+      retune, xHE-AAC audio from 4.3 s.
 - [x] **Web stream input** (2026-10-01) — the transmitter relays an internet radio
       stream: `[service.audio.input] url = "…"`, with `stream_titles` (default on).
       *Done:* `decdrm_station::webstream`. HTTP/1.1 client of our own (SHOUTCAST's

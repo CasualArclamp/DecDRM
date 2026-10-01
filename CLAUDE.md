@@ -25,7 +25,8 @@ milestone checklist (keep it current).
   the EVS source (3GPP copyright, patent-licensed codec).
 - `crates/decdrm-kiwi` — KiwiSDR client (WebSocket protocol after kiwiclient, typed
   path `/no_wf/<ts>/SND`, own upgrade handshake for the proxy's HTTP/1.0 redirects,
-  tungstenite framing), `KiwiStream` (thread + I/Q FIFO), the public Kiwi list parser,
+  tungstenite framing), `KiwiStream` (thread + I/Q FIFO; `tune` retunes on the open
+  connection, `--example tune` checks that live), the public Kiwi list parser,
   and `mock::MockKiwi` (a stand-in Kiwi on 127.0.0.1 for tests). Engine input
   `InputSpec::Kiwi`; CLI `decdrm rx --kiwi`; GUI *KiwiSDR* source and *Find…* window.
   Live tests on public Kiwis only when the user agrees; never pretend to be a browser.

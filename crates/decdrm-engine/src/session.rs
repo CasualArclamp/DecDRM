@@ -198,6 +198,15 @@ impl Session {
         self.reset_multiplex();
     }
 
+    /// Start afresh on another station (a retuned input): [`Self::restart`], and what
+    /// belonged to the old one goes too: the service chosen there and the frame counts.
+    pub fn new_station(&mut self) {
+        self.restart();
+        self.selected = None;
+        self.audio_stats = AudioStats::default();
+        self.msc_stats = MscStats::default();
+    }
+
     fn reset_multiplex(&mut self) {
         self.ens.reset();
         self.msc_config = None;

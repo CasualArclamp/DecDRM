@@ -93,6 +93,9 @@ pub enum Command {
     /// Change the playback volume (linear gain); it applies at once, not after the
     /// audio already queued on the sound card.
     SetVolume(f32),
+    /// Retune a KiwiSDR input to this frequency, kHz, on the open connection; the
+    /// receiver starts afresh (another station). Other inputs ignore it.
+    Tune(f64),
     Stop,
 }
 
@@ -239,6 +242,19 @@ fn worker(
                     snap.selected_service = session.selected_service();
                 }
                 Command::SetVolume(gain) => audio.set_volume(gain),
+                Command::Tune(freq_khz) => {
+                    if source.tune(freq_khz) {
+                        session.new_station();
+                        // Nothing of the previous station stays on show.
+                        snap.services = session.service_views();
+                        snap.selected_service = session.selected_service();
+                        snap.text = None;
+                        last_audio_s = None;
+                        log(format!("tuning to {freq_khz:.3} kHz"), &mut snap);
+                    } else {
+                        log("only a KiwiSDR input can be retuned".into(), &mut snap);
+                    }
+                }
             }
         }
 

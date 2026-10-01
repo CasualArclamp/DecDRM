@@ -20,6 +20,6 @@ pub mod mock;
 pub mod protocol;
 
 pub use address::{AddressError, DEFAULT_PORT, KiwiAddress, frequency_from_url};
-pub use client::{KiwiConfig, KiwiError, KiwiState, KiwiStatus, KiwiStream};
+pub use client::{KiwiConfig, KiwiError, KiwiState, KiwiStatus, KiwiStream, RETUNE_SETTLE};
 pub use directory::{DIRECTORY_URL, KiwiEntry, parse_directory};
 pub use protocol::Agc;

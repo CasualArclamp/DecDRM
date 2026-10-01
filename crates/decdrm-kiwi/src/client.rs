@@ -1,5 +1,6 @@
 //! The connection: a thread that holds the WebSocket to the KiwiSDR, sets up its
 //! receiver, and fills a FIFO with I/Q samples for [`KiwiStream::read_blocking`].
+//! [`KiwiStream::tune`] retunes the receiver without reconnecting.
 //!
 //! Reconnecting (with backoff, [`KiwiConfig::reconnect_delay`] doubling up to 30 s)
 //! only follows a connection that was lost after streaming: a Kiwi that refuses the
@@ -29,6 +30,10 @@ pub const MAX_BUFFER_S: f64 = 30.0;
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 /// A session that streamed this long resets the count of reconnections in a row.
 const STABLE_SESSION: Duration = Duration::from_secs(60);
+/// After a retune, blocks arriving for this long are dropped: they left the Kiwi before
+/// it retuned (its queue plus the network's round trip). On a Kiwi in Japan the
+/// S-meter followed 0.3–0.5 s after the command (measured 2026-10-01).
+pub const RETUNE_SETTLE: Duration = Duration::from_secs(1);
 /// WebSocket paths tried in turn (`{ts}`: the time stamp). First the Kiwi web client's
 /// sound-only connection type, `no_wf`, which takes a channel without a waterfall when
 /// one is free (leaving those to browser users); then kiwiclient's `<ts>/SND`, which
@@ -151,8 +156,13 @@ pub struct KiwiError(pub String);
 struct Inner {
     /// Interleaved I/Q at the Kiwi's sample rate.
     fifo: VecDeque<f32>,
+    /// `status.freq_khz` is what the Kiwi should be tuned to.
     status: KiwiStatus,
     log: Vec<String>,
+    /// A new frequency was asked for and not yet sent; blocks are dropped meanwhile.
+    retune: bool,
+    /// Blocks arriving before this are dropped (see [`RETUNE_SETTLE`]).
+    settle_until: Option<Instant>,
 }
 
 struct Shared {
@@ -196,6 +206,10 @@ impl Shared {
 
     fn push(&self, block: &SndBlock) {
         let mut i = self.lock();
+        i.status.rssi_dbm = Some(block.rssi_dbm);
+        if i.retune || i.settle_until.is_some_and(|t| Instant::now() < t) {
+            return;
+        }
         i.fifo.extend(block.samples.iter().copied());
         let cap = (2.0 * MAX_BUFFER_S * i.status.sample_rate.unwrap_or(12_000.0)) as usize;
         if i.fifo.len() > cap {
@@ -203,7 +217,6 @@ impl Shared {
             i.fifo.drain(..excess);
             i.status.dropped += (excess / 2) as u64;
         }
-        i.status.rssi_dbm = Some(block.rssi_dbm);
         i.status.adc_overflows += u64::from(block.adc_overflow());
         i.status.samples += (block.samples.len() / 2) as u64;
         drop(i);
@@ -222,7 +235,7 @@ impl KiwiStream {
     pub fn start(cfg: KiwiConfig) -> Self {
         let status = KiwiStatus { address: cfg.address.to_string(), freq_khz: cfg.freq_khz, ..KiwiStatus::default() };
         let shared = Arc::new(Shared {
-            inner: Mutex::new(Inner { fifo: VecDeque::new(), status, log: Vec::new() }),
+            inner: Mutex::new(Inner { fifo: VecDeque::new(), status, log: Vec::new(), retune: false, settle_until: None }),
             data: Condvar::new(),
             stop: AtomicBool::new(false),
             socket: Mutex::new(None),
@@ -271,6 +284,17 @@ impl KiwiStream {
             }
             i = self.shared.data.wait_timeout(i, deadline - now).unwrap_or_else(|p| p.into_inner()).0;
         }
+    }
+
+    /// Retune to `freq_khz` (the DRM frequency) on the open connection, and after a
+    /// reconnection. Samples of the old frequency still unread are discarded, and the
+    /// first [`RETUNE_SETTLE`] after the Kiwi is told are dropped, so a reader sees a gap,
+    /// then the new frequency.
+    pub fn tune(&self, freq_khz: f64) {
+        let mut i = self.shared.lock();
+        i.status.freq_khz = freq_khz;
+        i.retune = true;
+        i.fifo.clear();
     }
 
     /// Ask the connection to end: it closes the WebSocket and the thread exits soon
@@ -546,7 +570,7 @@ impl Connection {
     /// The message loop; it only returns how it ended (`Ok` is uninhabited).
     fn exchange(&mut self, cfg: &KiwiConfig, shared: &Shared) -> Result<std::convert::Infallible, Outcome> {
         self.send(shared, &protocol::auth(&cfg.password, &cfg.tlimit_password))?;
-        let tuning = cfg.tuning();
+        let mut tuning = cfg.tuning();
         let mut freq_offset = 0.0;
         let mut set_up = false;
         let mut first_block = true;
@@ -590,6 +614,12 @@ impl Connection {
                             KiwiMsg::SampleRate(rate) => {
                                 shared.lock().status.sample_rate = Some(rate);
                                 if !set_up {
+                                    // The latest frequency (it may have been retuned before).
+                                    tuning.freq_khz = {
+                                        let mut i = shared.lock();
+                                        i.retune = false;
+                                        i.status.freq_khz
+                                    };
                                     for command in protocol::setup(&tuning, freq_offset) {
                                         self.send(shared, &command)?;
                                     }
@@ -597,7 +627,7 @@ impl Connection {
                                     last_keepalive = Instant::now();
                                     tuned_line = Some(format!(
                                         "KiwiSDR: tuned to {:.3} kHz, I/Q {:+.1} … {:+.1} kHz at {rate:.3} Hz",
-                                        cfg.freq_khz,
+                                        tuning.freq_khz,
                                         f64::from(cfg.low_cut_hz) / 1e3,
                                         f64::from(cfg.high_cut_hz) / 1e3
                                     ));
@@ -676,6 +706,19 @@ impl Connection {
                     Err(protocol::SndError::Truncated) => {}
                 },
                 _ => {}
+            }
+            if set_up {
+                let retune = {
+                    let mut i = shared.lock();
+                    std::mem::take(&mut i.retune).then_some(i.status.freq_khz)
+                };
+                if let Some(freq_khz) = retune {
+                    tuning.freq_khz = freq_khz;
+                    self.send(shared, &protocol::tune(&tuning, freq_offset))?;
+                    let mut i = shared.lock();
+                    i.settle_until = Some(Instant::now() + RETUNE_SETTLE);
+                    i.log.push(format!("KiwiSDR: retuned to {freq_khz:.3} kHz"));
+                }
             }
             if set_up && last_keepalive.elapsed() >= Duration::from_secs(1) {
                 self.send(shared, protocol::KEEPALIVE)?;
