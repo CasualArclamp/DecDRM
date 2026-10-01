@@ -1,8 +1,10 @@
 //! `decdrm tx` — run the DRM transmitter described by a station configuration file.
 
 use anyhow::{Context, Result, bail};
-use decdrm_station::{Station, StationConfig, StationStatus};
+use decdrm_station::{Station, StationConfig, StationStatus, StopHandle};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 #[derive(clap::Args)]
@@ -67,7 +69,24 @@ pub fn run(a: TxArgs) -> Result<()> {
     for url in cfg.services.iter().filter_map(|s| s.audio.as_ref()?.input.url.as_ref()) {
         println!("web stream: connecting to {url}");
     }
-    let mut station = Station::new(cfg)?;
+    // Creating the station waits for a web stream's first audio: let Ctrl-C end that.
+    let stop = StopHandle::default();
+    let created = Arc::new(AtomicBool::new(false));
+    {
+        let (stop, created) = (stop.clone(), created.clone());
+        std::thread::spawn(move || {
+            while !created.load(Ordering::Relaxed) {
+                if crate::interrupted() {
+                    stop.stop();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
+    }
+    let station = Station::with_plan_and_stop(cfg, plan, stop);
+    created.store(true, Ordering::Relaxed);
+    let mut station = station?;
     if let Some(dev) = &station.status().device {
         println!("sound card: {dev}");
     }
