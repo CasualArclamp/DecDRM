@@ -12,7 +12,7 @@ use crate::fac::{Fac, Interleaving, MscMode, SdcMode};
 use crate::fec::crc::Crc;
 use crate::fec::mlc::{MlcDecoder, MlcParams, MscProtection};
 use crate::fec::qam::EqCell;
-use crate::interleave::CellDeinterleaver;
+use super::mscdec::MscDecoder;
 use crate::params::{FRAMES_PER_SUPERFRAME, RobustnessMode, SAMPLE_RATE, SpectrumOccupancy};
 use crate::tables::NUM_FAC_CELLS;
 use crate::{Cplx, Real};
@@ -88,6 +88,9 @@ pub(super) enum ChainEvent {
     FacError,
     Sdc(SdcBlock),
     Msc(MscFrame),
+    /// A diversity branch's multiplex frame of equalised cells, instead of `Msc`:
+    /// its position in the super frame and whether frames were lost before it.
+    MscCells { cells: Vec<EqCell>, index: usize, gap: bool },
 }
 
 pub(super) struct ChainOutput {
@@ -137,12 +140,13 @@ pub(super) struct SymbolChain {
     msc_collecting: bool,
     /// Frames were lost: restart the cell deinterleaver before the next frame.
     msc_gap: bool,
-    /// Frames pushed into the deinterleaver since it was (re)started.
-    msc_frames_since_reset: usize,
     /// SDC collection is aligned to a super-frame start.
     sf_synced: bool,
-    msc: Option<(MscConfig, CellDeinterleaver, MlcDecoder)>,
+    msc: Option<MscDecoder>,
     msc_iterations: usize,
+    /// A diversity branch: hand the MSC cells out per multiplex frame instead of
+    /// decoding them (`ReceiverConfig::diversity_branch`).
+    cells_out: bool,
     tracking: bool,
     timing_tracking: bool,
     vis: ChainVisuals,
@@ -183,10 +187,10 @@ impl SymbolChain {
             msc_offset: msc_offsets(&map),
             msc_collecting: false,
             msc_gap: true,
-            msc_frames_since_reset: 0,
             sf_synced: false,
             msc: None,
             msc_iterations: cfg.msc_iterations,
+            cells_out: cfg.diversity_branch,
             tracking: false,
             timing_tracking: false,
             vis: ChainVisuals::default(),
@@ -287,16 +291,13 @@ impl SymbolChain {
         // the decoder is sized from the current map.
         match (cfg, &self.msc) {
             (None, _) => self.msc = None,
-            (Some(c), Some((cur, _, _))) if *cur == c => {}
+            (Some(c), Some(cur)) if cur.config() == c && cur.cells() == self.map.msc_cells_per_frame => {}
             (Some(c), _) => {
-                let n_mux = self.map.msc_cells_per_frame;
-                let depth = if c.interleaving == Interleaving::Long { 5 } else { 1 };
-                let mut dec =
-                    MlcDecoder::new(MlcParams::msc(c.mode.mapping(), n_mux, c.protection, c.part_a_bytes), self.msc_iterations);
-                dec.metric = metric;
                 self.chanest.msc_mapping = Some(c.mode.mapping());
-                self.msc = Some((c, CellDeinterleaver::new(n_mux, depth), dec));
-                self.msc_frames_since_reset = 0;
+                // A diversity branch only needs the mapping (for its MER); the
+                // combiner decodes.
+                self.msc = (!self.cells_out)
+                    .then(|| MscDecoder::new(c, self.map.msc_cells_per_frame, self.msc_iterations, metric));
             }
         }
     }
@@ -520,7 +521,10 @@ impl SymbolChain {
                     self.msc_cells.push(cells[c as usize]);
                     if self.msc_cells.len() == n_mux {
                         let frame = std::mem::take(&mut self.msc_cells);
-                        if let Some(m) = self.decode_msc(frame) {
+                        if self.cells_out {
+                            let gap = std::mem::replace(&mut self.msc_gap, false);
+                            events.push(ChainEvent::MscCells { cells: frame, index: pos / n_mux, gap });
+                        } else if let Some(m) = self.decode_msc(frame) {
                             events.push(ChainEvent::Msc(m));
                         }
                     }
@@ -546,28 +550,7 @@ impl SymbolChain {
 
     fn decode_msc(&mut self, frame: Vec<EqCell>) -> Option<MscFrame> {
         let gap = std::mem::replace(&mut self.msc_gap, false);
-        let (_, deint, dec) = self.msc.as_mut()?;
-        if gap {
-            *deint = CellDeinterleaver::new(frame.len(), deint.depth());
-            self.msc_frames_since_reset = 0;
-        }
-        self.msc_frames_since_reset += 1;
-        let complete = self.msc_frames_since_reset >= deint.depth();
-        let deint_cells = deint.push(&frame)?;
-        let mut bits = Vec::new();
-        let info = dec.decode(&deint_cells, &mut bits);
-        let p = dec.params();
-        let vspp_len = p.bits_vspp;
-        let hpp_bits = p.bits_hpp;
-        let vspp = bits[..vspp_len].to_vec();
-        let rest = bits[vspp_len..].to_vec();
-        Some(MscFrame {
-            vspp,
-            bits: rest,
-            hpp_bits,
-            path_metric: info.path_metrics.last().copied().unwrap_or(0.0),
-            complete,
-        })
+        self.msc.as_mut()?.decode(&frame, gap)
     }
 }
 

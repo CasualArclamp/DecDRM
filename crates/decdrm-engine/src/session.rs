@@ -17,7 +17,7 @@ use decdrm_core::mux::sdc::{ApplicationInfo, StreamLengths};
 use decdrm_core::mux::service::{AudioCodec, AudioMode, AudioParams, Changes, Ensemble, ServiceInfo};
 use decdrm_core::mux::text::{TextEvent, TextMessageDecoder};
 use decdrm_core::mux::{demultiplex, msc::LogicalFrame};
-use decdrm_core::rx::{MscConfig, MscFrame, Receiver, ReceiverConfig, ReceiverEvent, RxStatus, Visuals};
+use decdrm_core::rx::{DiversityReceiver, DiversityStats, MscConfig, MscFrame, Receiver, ReceiverConfig, ReceiverEvent, RxState, RxStatus, Visuals};
 use decdrm_data::datagroup::DataGroup;
 use decdrm_data::{AppDomain, DataDecoder, DataEvent, DataServiceConfig, UserApplication};
 use decdrm_evs::signalling::Bandwidth as EvsBandwidth;
@@ -104,9 +104,65 @@ impl EvsChannel {
     }
 }
 
+/// The receiver of a session: one, or two combined (diversity reception, see
+/// `decdrm_core::rx::diversity`).
+enum Rx {
+    Single(Box<Receiver>),
+    Diversity(Box<DiversityReceiver>),
+}
+
+impl Rx {
+    fn push(&mut self, branch: usize, frames: &[f32]) -> Vec<ReceiverEvent> {
+        match self {
+            Rx::Single(r) => r.push(frames),
+            Rx::Diversity(d) => d.push(branch, frames),
+        }
+    }
+
+    fn restart(&mut self) {
+        match self {
+            Rx::Single(r) => r.restart(),
+            Rx::Diversity(d) => d.restart(),
+        }
+    }
+
+    fn set_msc_config(&mut self, cfg: Option<MscConfig>) {
+        match self {
+            Rx::Single(r) => r.set_msc_config(cfg),
+            Rx::Diversity(d) => d.set_msc_config(cfg),
+        }
+    }
+
+    fn receiver(&self, branch: usize) -> &Receiver {
+        match self {
+            Rx::Single(r) => r,
+            Rx::Diversity(d) => d.branch(branch),
+        }
+    }
+
+    /// The branch the status and plots show: the one with the better SNR.
+    fn shown(&self) -> usize {
+        match self {
+            Rx::Single(_) => 0,
+            Rx::Diversity(d) => {
+                let snr = |b: usize| d.branch(b).status().snr_db.unwrap_or(f64::NEG_INFINITY);
+                usize::from(snr(1) > snr(0))
+            }
+        }
+    }
+
+    /// Whether no branch but `branch` (which just lost it) is synchronised.
+    fn all_lost(&self, branch: usize) -> bool {
+        match self {
+            Rx::Single(_) => true,
+            Rx::Diversity(d) => d.branch(1 - branch.min(1)).status().state == RxState::Acquisition,
+        }
+    }
+}
+
 /// Receiver plus the service decoding pipelines.
 pub struct Session {
-    rx: Receiver,
+    rx: Rx,
     ens: Ensemble,
     msc_config: Option<MscConfig>,
     selected: Option<u8>,
@@ -123,8 +179,18 @@ pub struct Session {
 
 impl Session {
     pub fn new(cfg: ReceiverConfig) -> Self {
+        Self::with(Rx::Single(Box::new(Receiver::new(cfg))))
+    }
+
+    /// Diversity reception from two inputs (branches 0 and 1, see
+    /// [`Self::push_branch`]).
+    pub fn new_diversity(cfg: [ReceiverConfig; 2]) -> Self {
+        Self::with(Rx::Diversity(Box::new(DiversityReceiver::new(cfg))))
+    }
+
+    fn with(rx: Rx) -> Self {
         Self {
-            rx: Receiver::new(cfg),
+            rx,
             ens: Ensemble::new(),
             msc_config: None,
             selected: None,
@@ -139,12 +205,34 @@ impl Session {
         }
     }
 
+    /// The receiver's status; in diversity reception the branch with the better SNR.
     pub fn status(&self) -> &RxStatus {
-        self.rx.status()
+        self.rx.receiver(self.rx.shown()).status()
     }
 
+    /// Plot data; in diversity reception the branch with the better SNR, with the MSC
+    /// constellation of the combined cells.
     pub fn visuals(&mut self) -> Visuals {
-        self.rx.visuals()
+        let shown = self.rx.shown();
+        match &mut self.rx {
+            Rx::Single(r) => r.visuals(),
+            Rx::Diversity(d) => {
+                let mut v = d.branch_mut(shown).visuals();
+                let cells = d.last_cells();
+                if !cells.is_empty() {
+                    v.chain.msc = cells.to_vec();
+                }
+                v
+            }
+        }
+    }
+
+    /// Diversity reception: the combiner's counts and each branch's status.
+    pub fn diversity(&self) -> Option<(DiversityStats, [RxStatus; 2])> {
+        match &self.rx {
+            Rx::Single(_) => None,
+            Rx::Diversity(d) => Some((d.stats(), [d.branch(0).status().clone(), d.branch(1).status().clone()])),
+        }
     }
 
     pub fn ensemble(&self) -> &Ensemble {
@@ -207,27 +295,56 @@ impl Session {
         self.samples_in as f64 / 48_000.0
     }
 
-    /// Feed interleaved 48 kHz frames.
+    /// Feed interleaved 48 kHz frames (diversity reception: of branch 0).
     pub fn push(&mut self, frames: &[f32]) -> Vec<SessionEvent> {
-        let ch = self.rx.config().channels.max(1);
-        self.samples_in += (frames.len() / ch) as u64;
+        self.push_branch(0, frames)
+    }
+
+    /// Feed interleaved 48 kHz frames of input `branch` (0 or 1; one receiver: 0).
+    pub fn push_branch(&mut self, branch: usize, frames: &[f32]) -> Vec<SessionEvent> {
+        let ch = self.rx.receiver(branch).config().channels.max(1);
+        if branch == 0 {
+            self.samples_in += (frames.len() / ch) as u64;
+        }
+        let events = self.rx.push(branch, frames);
+        self.handle(branch, events)
+    }
+
+    /// The input ended: decode what diversity reception still holds back.
+    pub fn flush(&mut self) -> Vec<SessionEvent> {
+        let events = match &mut self.rx {
+            Rx::Diversity(d) => d.flush(),
+            Rx::Single(_) => Vec::new(),
+        };
+        self.handle(0, events)
+    }
+
+    fn handle(&mut self, branch: usize, events: Vec<ReceiverEvent>) -> Vec<SessionEvent> {
         let t = self.time_s();
+        // Diversity reception names the branch an event came from.
+        let who = match self.rx {
+            Rx::Diversity(_) => format!("branch {}: ", branch + 1),
+            Rx::Single(_) => String::new(),
+        };
         let mut out = Vec::new();
-        for ev in self.rx.push(frames) {
+        for ev in events {
             match ev {
                 ReceiverEvent::SignalFound { dc_hz, inverted } => out.push(SessionEvent::Log(format!(
-                    "{t:7.2}s signal found at {dc_hz:.1} Hz{}",
+                    "{t:7.2}s {who}signal found at {dc_hz:.1} Hz{}",
                     if inverted { " (inverted spectrum)" } else { "" }
                 ))),
-                ReceiverEvent::ModeDetected(m) => out.push(SessionEvent::Log(format!("{t:7.2}s robustness mode {m}"))),
+                ReceiverEvent::ModeDetected(m) => out.push(SessionEvent::Log(format!("{t:7.2}s {who}robustness mode {m}"))),
                 ReceiverEvent::Restarted => {
-                    self.reset_multiplex();
-                    out.push(SessionEvent::Log(format!("{t:7.2}s synchronisation lost, restarting")));
-                    out.push(SessionEvent::ServicesChanged);
+                    out.push(SessionEvent::Log(format!("{t:7.2}s {who}synchronisation lost, restarting")));
+                    // In diversity reception the other branch may carry on.
+                    if self.rx.all_lost(branch) {
+                        self.reset_multiplex();
+                        out.push(SessionEvent::ServicesChanged);
+                    }
                 }
                 // The multiplex is unchanged: keep the services and pipelines.
                 ReceiverEvent::Resynchronising => {
-                    out.push(SessionEvent::Log(format!("{t:7.2}s timing jump, resynchronising")));
+                    out.push(SessionEvent::Log(format!("{t:7.2}s {who}timing jump, resynchronising")));
                 }
                 ReceiverEvent::Fac(fac) => {
                     self.log_channel_change(&fac, t, &mut out);
@@ -242,6 +359,8 @@ impl Session {
                     }
                 }
                 ReceiverEvent::Msc(frame) => self.on_msc(&frame, &mut out),
+                // Diversity branches' cells: their receiver combines them.
+                ReceiverEvent::MscCells(_) => {}
             }
         }
         out

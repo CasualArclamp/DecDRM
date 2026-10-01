@@ -15,6 +15,7 @@
 //! resampler), mirroring Dream's `CDRMReceiver`.
 
 pub mod chanest;
+pub mod diversity;
 pub mod framesync;
 pub mod freqacq;
 pub mod input;
@@ -22,9 +23,11 @@ pub mod ofdm;
 pub mod scatter;
 pub mod timesync;
 mod chain;
+mod mscdec;
 
 pub use chain::{CHAN_ROWS, ChainVisuals, MscConfig, MscFrame, SdcBlock};
 pub use chanest::PdsAxis;
+pub use diversity::{DiversityReceiver, DiversityStats, MscCells};
 pub use scatter::DelayDoppler;
 pub use input::{InputFormat, RealChannel};
 
@@ -97,6 +100,9 @@ pub struct ReceiverConfig {
     /// Soft metric of the MSC decoder (FAC and SDC keep `MetricKind::default()`,
     /// Dream's). Default: [`MSC_METRIC`].
     pub metric: MetricKind,
+    /// A branch of diversity reception: hand the equalised MSC cells out per multiplex
+    /// frame ([`ReceiverEvent::MscCells`]) for the combiner instead of decoding them.
+    pub diversity_branch: bool,
 }
 
 /// The default MSC soft metric: the Huber shape with Dream's amplitude weighting and a
@@ -118,6 +124,7 @@ impl Default for ReceiverConfig {
             auto_flip: true,
             msc_iterations: 2,
             metric: MSC_METRIC,
+            diversity_branch: false,
         }
     }
 }
@@ -172,6 +179,9 @@ pub enum ReceiverEvent {
     Sdc(SdcBlock),
     /// One decoded MSC multiplex frame (400 ms).
     Msc(MscFrame),
+    /// A diversity branch's multiplex frame of equalised cells, instead of `Msc`
+    /// (see [`ReceiverConfig::diversity_branch`]).
+    MscCells(MscCells),
     /// Synchronisation was lost; acquisition restarted.
     Restarted,
     /// The symbol timing jumped (e.g. samples lost or inserted by a network stream);
@@ -310,6 +320,8 @@ pub struct Receiver {
     spectrum: InputSpectrum,
     status: RxStatus,
     events: Vec<ReceiverEvent>,
+    /// Input frames pushed so far (the time of `MscCells`).
+    samples_in: u64,
 }
 
 impl Receiver {
@@ -348,6 +360,7 @@ impl Receiver {
             spectrum: InputSpectrum::new(),
             status: RxStatus::default(),
             events: Vec::new(),
+            samples_in: 0,
             cfg,
         }
     }
@@ -447,6 +460,7 @@ impl Receiver {
     }
 
     fn push_chunk(&mut self, chunk: &[f32]) {
+        self.samples_in += (chunk.len() / self.cfg.channels.max(1)) as u64;
         self.conv.clear();
         self.input.process(chunk, &mut self.conv);
         self.spectrum.push(&self.conv);
@@ -627,6 +641,10 @@ impl Receiver {
                     self.events.push(ReceiverEvent::Sdc(b));
                 }
                 chain::ChainEvent::Msc(m) => self.events.push(ReceiverEvent::Msc(m)),
+                chain::ChainEvent::MscCells { cells, index, gap } => {
+                    let time_s = self.samples_in as Real / Real::from(SAMPLE_RATE);
+                    self.events.push(ReceiverEvent::MscCells(MscCells { cells, index, gap, time_s }));
+                }
             }
         }
         if let Some(fac) = need_rebuild

@@ -123,6 +123,29 @@ impl Mapping {
         }
     }
 
+    /// Points of the constellation.
+    pub fn points(self) -> usize {
+        self.pam(0).len() * self.pam(1).len()
+    }
+
+    /// The constellation point nearest to `z` (each axis decided on its own): its index
+    /// (in-phase PAM index × points per axis + quadrature PAM index) and its value.
+    pub fn nearest(self, z: Cplx) -> (usize, Cplx) {
+        let pick = |a: f64, table: &[f64]| {
+            let mut best = (0, table[0]);
+            for (i, &v) in table.iter().enumerate() {
+                if (a - v).abs() < (a - best.1).abs() {
+                    best = (i, v);
+                }
+            }
+            best
+        };
+        let (re, im) = (self.pam(0), self.pam(1));
+        let (i, vi) = pick(z.re, re);
+        let (q, vq) = pick(z.im, im);
+        (i * im.len() + q, Cplx::new(vi, vq))
+    }
+
     /// Map the coded bit streams of all levels onto cells. `levels[j]` must hold
     /// [`Self::coded_bits_per_level`] bits.
     pub fn map(self, levels: &[Vec<u8>], out: &mut [Cplx]) {
@@ -242,6 +265,26 @@ mod tests {
 
     fn all() -> [Mapping; 5] {
         [Mapping::Qam4, Mapping::Qam16, Mapping::Qam64Sm, Mapping::Qam64HmSym, Mapping::Qam64HmMix]
+    }
+
+    #[test]
+    fn nearest_point() {
+        for m in all() {
+            // Every point is its own nearest point, and a small offset keeps it.
+            let n = m.points();
+            let mut seen = vec![false; n];
+            for i in 0..m.pam(0).len() {
+                for q in 0..m.pam(1).len() {
+                    let p = Cplx::new(m.pam(0)[i], m.pam(1)[q]);
+                    let (idx, v) = m.nearest(p + Cplx::new(0.01, -0.01));
+                    assert_eq!(v, p, "{m:?}");
+                    assert!(!seen[idx], "{m:?}: index {idx} twice");
+                    seen[idx] = true;
+                }
+            }
+            assert!(seen.iter().all(|&s| s), "{m:?}: every index used");
+        }
+        assert_eq!((Mapping::Qam4.points(), Mapping::Qam16.points(), Mapping::Qam64Sm.points()), (4, 16, 64));
     }
 
     /// Huber: identical to the Euclidean metric for small distances (and everywhere
