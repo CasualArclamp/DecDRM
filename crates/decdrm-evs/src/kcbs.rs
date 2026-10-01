@@ -55,6 +55,22 @@ pub fn detect(field: &[u8]) -> Option<Bandwidth> {
     frames.iter().all(|f| signalling_13k2(f[0]).bandwidth == bandwidth).then_some(bandwidth)
 }
 
+/// Whether a frame is of a type KCBS's encoder writes in a form the 3GPP decoder
+/// cannot read: INACTIVE, TRANSITION and low-rate MDCT frames. Found with recordings
+/// of 2026-09-30: the reference decoder's bit-error checks fire on 34 % of its
+/// INACTIVE and 42 % of its MDCT frames (0 % for frames of the 3GPP encoder), and its
+/// TRANSITION frames decode as clipping bursts; decoders of EVS 12.0–12.2 fare no
+/// better, so the encoder itself departs from the standard there. GENERIC and VOICED
+/// frames, most of the speech, decode cleanly. Decoding these frames as lost (EVS
+/// concealment) removes most of the glitches: clipped frames in 32 s went from 40–49
+/// to 5–9.
+pub fn unreliable(frame: &[u8]) -> bool {
+    use crate::signalling::CoderType;
+    frame.first().is_some_and(|&b| {
+        matches!(signalling_13k2(b).coder_type, CoderType::Inactive | CoderType::Transition | CoderType::LowRateMdct)
+    })
+}
+
 /// The inverse of [`frames`] (the first 660 bytes of a data field), for tests and
 /// transmitters.
 pub fn pack(frames: &[[u8; FRAME_BYTES]; FRAMES]) -> Vec<u8> {
@@ -98,6 +114,20 @@ mod tests {
         field.extend_from_slice(&[0u8; 52]); // the side data
         assert_eq!(frames(&field), Some(f));
         assert_eq!(detect(&field), Some(Bandwidth::Swb));
+    }
+
+    #[test]
+    fn unreliable_frame_types() {
+        let frame = |first: u8| {
+            let mut f = [0u8; FRAME_BYTES];
+            f[0] = first;
+            f
+        };
+        // Inactive, transition and low-rate MDCT: concealed.
+        assert!(unreliable(&frame(0x76)) && unreliable(&frame(0x61)) && unreliable(&frame(0xf8)));
+        // Generic and voiced: decoded.
+        assert!(!unreliable(&frame(0x53)) && !unreliable(&frame(0x58)) && !unreliable(&frame(0x9b)));
+        assert!(!unreliable(&[]));
     }
 
     #[test]

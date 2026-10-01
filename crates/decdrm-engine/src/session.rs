@@ -505,7 +505,10 @@ impl Session {
             p.started = true;
             *good += 1;
             for f in &frames {
-                match evs_decode(p, Some(f)) {
+                // The frame types KCBS's encoder gets wrong are decoded as lost (EVS
+                // concealment); they still count as received.
+                let frame = (!decdrm_evs::kcbs::unreliable(f)).then_some(&f[..]);
+                match evs_decode(p, frame) {
                     Some(pcm) => {
                         self.audio_stats.frames_ok += 1;
                         out.push(SessionEvent::Audio(pcm));
@@ -531,7 +534,7 @@ impl Session {
         let channel = self.evs.iter().find(|c| c.short_id == short_id)?;
         match decdrm_evs::EvsDecoder::new(48_000) {
             Ok(decoder) => {
-                self.audio_stats = AudioStats { codec: format!("{} (KCBS framing)", channel.describe()), ..AudioStats::default() };
+                self.audio_stats = AudioStats { codec: format!("{} (KCBS framing, its faulty frame types concealed)", channel.describe()), ..AudioStats::default() };
                 out.push(SessionEvent::Log(format!(
                     "audio service {short_id}: {}, carried in data application {:#05X}",
                     self.audio_stats.codec,
