@@ -722,7 +722,7 @@ impl Worker {
             let on_demand = resp.header("content-length").is_some();
             let url = resp.url.clone();
             let mut input = icy::StreamInput::new(resp.body, metaint);
-            let class = match input.peek(16 * 1024, |h| decode::sniff(h).is_some()) {
+            let class = match sniff_head(&mut input) {
                 Ok(head) => decode::classify(content_type.as_deref(), &url.path, head),
                 Err(e) if http::is_stopped(&e) => return Outcome::Stopped,
                 Err(e) => return Outcome::Failed(format!("{url}: {}", http::describe_io(&e))),
@@ -875,6 +875,18 @@ impl Worker {
         self.shared.changed.notify_all();
         true
     }
+}
+
+/// Read the first bytes of a response until they show the format: 16 kB, or past an
+/// ID3v2 tag at the start (MP3 files carry cover art in them) up to 2 MB.
+fn sniff_head(input: &mut icy::StreamInput) -> std::io::Result<&[u8]> {
+    const HEAD: usize = 16 * 1024;
+    let tag = input.peek(HEAD, |h| decode::sniff(h).is_some())?;
+    let max = match framing::id3v2_len(tag) {
+        Some(len) if decode::sniff(tag).is_none() => (len + HEAD).min(2 << 20),
+        _ => HEAD,
+    };
+    input.peek(max, |h| decode::sniff(h).is_some())
 }
 
 /// The bit rate the server declares: `icy-br` (kbit/s, sometimes "128,128") or

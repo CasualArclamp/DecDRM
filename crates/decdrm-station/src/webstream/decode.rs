@@ -576,7 +576,7 @@ impl StreamDecoder for OggDecoder {
                 if self.stream.is_none() && self.pages_without_audio > 64 {
                     return Err(DecodeError::Fatal(match self.others.first() {
                         Some(what) => format!("{what}, which is not supported (Vorbis, Opus and FLAC are)"),
-                        None => "Ogg stream without a Vorbis, Opus or FLAC stream".into(),
+                        None => "Ogg stream without the headers of a Vorbis, Opus or FLAC stream".into(),
                     }));
                 }
                 continue;

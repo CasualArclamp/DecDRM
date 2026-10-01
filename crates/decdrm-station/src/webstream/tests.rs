@@ -125,6 +125,23 @@ fn mp3_from_a_shoutcast_server() {
     assert_eq!(st.decode_errors, 0);
 }
 
+/// An MP3 file behind a 40 kB ID3v2 tag (cover art), served with a generic type and a
+/// length: recognised past the tag, played as a file.
+#[test]
+fn mp3_file_behind_a_large_id3_tag() {
+    let mut data = b"ID3\x03\x00\x00".to_vec();
+    let size = 40_000usize;
+    data.extend((0..4).map(|i| ((size >> (21 - 7 * i)) & 0x7F) as u8));
+    data.extend(std::iter::repeat_n(0xFFu8, size)); // nothing like an MPEG header
+    data.extend(mp3(44, 202, 120));
+    let server = Server::start(vec![("/song.mp3", body("200 OK", "application/octet-stream", data))]);
+    let mut src = WebStreamSource::open(options(&server.url("/song.mp3"), 48_000, 1)).unwrap();
+    let out = read(&mut src, 4);
+    let (f, _, _) = dominant_tone(&out, 1, 0, 48_000, 1500.0, 2200.0);
+    assert!((f - mp3_line_hz(44, 48_000)).abs() < 25.0, "{f} Hz");
+    assert!(logged(&src.take_log(), "is a file"));
+}
+
 /// Ogg Opus as Icecast chains it: a new logical stream with new comments at a track
 /// change; the title and the tone follow.
 #[test]
