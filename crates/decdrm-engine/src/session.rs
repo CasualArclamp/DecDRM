@@ -8,7 +8,7 @@
 //! codec (FDK-AAC / Opus / EnCodec with the `encodec` feature), its text message through
 //! the text decoder, and every data application's stream through a `decdrm-data`
 //! decoder. EVS audio sent in a data application (KCBS, see `decdrm_evs::kcbs`) is
-//! recognised there and, with the `evs` feature, decoded like an audio service.
+//! recognised there and shown as audio, but not decoded.
 
 use decdrm_codecs::{DrmAudioCoding, DrmAudioDecoder, PcmFrame, open_decoder};
 use decdrm_core::fac::{Fac, LANGUAGES, PROGRAMME_TYPES};
@@ -75,10 +75,8 @@ struct DataPipeline {
 }
 
 /// The service-bar caveat for EVS audio in the KCBS framing: its frames follow EVS in
-/// structure, but part of them is nonstandard, most likely selectively encrypted (frame
-/// types with rigidly structured fields fail the decoder's bit-error checks, the
-/// speech decodes garbled, and the side data carries a counter like a cipher's), so it
-/// plays only when the service is selected.
+/// structure, but part of them is nonstandard, most likely selectively encrypted (see
+/// [`decdrm_evs::kcbs`]). DecDRM does not decode EVS either way.
 const EVS_WARNING: &str = "likely encrypted";
 
 /// A data channel whose data groups carry EVS audio in the KCBS framing
@@ -106,18 +104,6 @@ impl EvsChannel {
     }
 }
 
-/// Decoding the EVS audio of one service (the `evs` feature).
-#[cfg_attr(not(feature = "evs"), allow(dead_code))]
-struct EvsPlayer {
-    short_id: u8,
-    /// A data group was decoded (so there is something to conceal from).
-    started: bool,
-    /// Bursts the guard has replaced so far (to count new ones).
-    bursts: u64,
-    #[cfg(feature = "evs")]
-    decoder: decdrm_evs::KcbsDecoder,
-}
-
 /// Receiver plus the service decoding pipelines.
 pub struct Session {
     rx: Receiver,
@@ -128,7 +114,6 @@ pub struct Session {
     data: Vec<DataPipeline>,
     /// Data channels recognised as carrying EVS audio (or on the way to it).
     evs: Vec<EvsChannel>,
-    evs_player: Option<EvsPlayer>,
     pub audio_stats: AudioStats,
     pub msc_stats: MscStats,
     text: Option<String>,
@@ -146,7 +131,6 @@ impl Session {
             audio: None,
             data: Vec::new(),
             evs: Vec::new(),
-            evs_player: None,
             audio_stats: AudioStats::default(),
             msc_stats: MscStats::default(),
             text: None,
@@ -174,7 +158,7 @@ impl Session {
     /// Short id of the audio service being decoded (EVS audio of a data service
     /// counts).
     pub fn current_audio_service(&self) -> Option<u8> {
-        self.audio.as_ref().map(|a| a.short_id).or_else(|| self.evs_player.as_ref().map(|p| p.short_id))
+        self.audio.as_ref().map(|a| a.short_id)
     }
 
     /// The service a UI shows as selected: the audio service being decoded, else the
@@ -214,7 +198,6 @@ impl Session {
         self.audio = None;
         self.data.clear();
         self.evs.clear();
-        self.evs_player = None;
         self.text = None;
         self.last_channel = None;
     }
@@ -454,10 +437,8 @@ impl Session {
             }
         }
 
-        // Data groups of data channels carrying EVS audio, by service; the service whose
-        // EVS audio is being played (its data groups are not captured as well).
-        let mut evs_fields: Vec<(u8, Vec<u8>)> = Vec::new();
-        let evs_playing = self.evs_target().filter(|_| decdrm_evs::BUILT_IN);
+        // Data groups are also checked for EVS audio in the KCBS framing (recognised,
+        // not decoded: they are captured like any other data).
         for d in &mut self.data {
             if let Some(Some(lf)) = logical.get(d.app.stream_id as usize) {
                 for event in d.decoder.push_frame_with_hint(&lf.data, frame.complete) {
@@ -471,19 +452,13 @@ impl Session {
                     // borrowing one mutably while iterating the other is allowed.
                     if let DataEvent::Raw { data_group, .. } = &event
                         && let Ok(group) = DataGroup::parse(data_group)
-                        && observe_evs(&mut self.evs, d.short_id, &d.app, &group.data, out)
                     {
-                        evs_fields.push((d.short_id, group.data));
-                        // Decoded as audio rather than captured while it plays.
-                        if evs_playing == Some(d.short_id) {
-                            continue;
-                        }
+                        observe_evs(&mut self.evs, d.short_id, &d.app, &group.data, out);
                     }
                     out.push(SessionEvent::Data { short_id: d.short_id, event });
                 }
             }
         }
-        self.play_evs(&evs_fields, frame.complete, &mut good, &mut bad, out);
 
         let m = &mut self.msc_stats;
         m.frames += 1;
@@ -494,84 +469,8 @@ impl Session {
         }
     }
 
-    /// The service whose EVS audio to decode: only one the user selected (it decodes
-    /// garbled, see [`EVS_WARNING`], so it never plays by itself), and none while an
-    /// ordinary audio service plays.
-    fn evs_target(&self) -> Option<u8> {
-        if self.audio.is_some() {
-            return None;
-        }
-        self.selected.filter(|&id| self.evs.iter().any(|c| c.short_id == id && c.locked()))
-    }
-
-    /// Decode the EVS audio of [`Self::evs_target`] from this multiplex frame's data
-    /// groups (`fields`: data fields by service), 20 frames each; a complete multiplex
-    /// frame without one is concealed.
-    fn play_evs(&mut self, fields: &[(u8, Vec<u8>)], complete: bool, good: &mut u64, bad: &mut u64, out: &mut Vec<SessionEvent>) {
-        let target = self.evs_target();
-        if target != self.evs_player.as_ref().map(|p| p.short_id) {
-            self.evs_player = target.and_then(|id| self.open_evs_player(id, out));
-        }
-        let Some(p) = self.evs_player.as_mut() else { return };
-        let mut any = false;
-        let short_id = p.short_id;
-        for (_, field) in fields.iter().filter(|(id, _)| *id == short_id) {
-            let Some(frames) = decdrm_evs::kcbs::frames(field) else { continue };
-            any = true;
-            p.started = true;
-            *good += 1;
-            for f in &frames {
-                // The KCBS decoder conceals the frame types the station's encoder gets
-                // wrong (with comfort noise in pauses); they still count as received.
-                self.audio_stats.frames_ok += 1;
-                if let Some(pcm) = evs_decode(p, Some(f)) {
-                    out.push(SessionEvent::Audio(pcm));
-                }
-            }
-        }
-        if !any && complete && p.started {
-            *bad += 1;
-            self.audio_stats.super_frame_errors += 1;
-            for _ in 0..decdrm_evs::kcbs::FRAMES {
-                self.audio_stats.frames_concealed += 1;
-                if let Some(pcm) = evs_decode(p, None) {
-                    out.push(SessionEvent::Audio(pcm));
-                }
-            }
-        }
-        // Each burst the guard caught replaced two frames.
-        self.audio_stats.frames_concealed += 2 * evs_new_bursts(p);
-    }
-
-    #[cfg(feature = "evs")]
-    fn open_evs_player(&mut self, short_id: u8, out: &mut Vec<SessionEvent>) -> Option<EvsPlayer> {
-        let channel = self.evs.iter().find(|c| c.short_id == short_id)?;
-        match decdrm_evs::KcbsDecoder::new() {
-            Ok(decoder) => {
-                self.audio_stats = AudioStats { codec: format!("{} (KCBS framing; nonstandard, likely encrypted)", channel.describe()), ..AudioStats::default() };
-                out.push(SessionEvent::Log(format!(
-                    "audio service {short_id}: {}, carried in data application {:#05X}",
-                    self.audio_stats.codec,
-                    channel.app.user_app_id().unwrap_or(0)
-                )));
-                self.text = None;
-                Some(EvsPlayer { short_id, started: false, bursts: 0, decoder })
-            }
-            Err(e) => {
-                out.push(SessionEvent::Log(format!("audio service {short_id}: {e}")));
-                None
-            }
-        }
-    }
-
-    /// Without the `evs` feature EVS audio is only reported.
-    #[cfg(not(feature = "evs"))]
-    fn open_evs_player(&mut self, _short_id: u8, _out: &mut Vec<SessionEvent>) -> Option<EvsPlayer> {
-        None
-    }
-
     /// Every service, described for status displays. A data service carrying EVS audio
-    /// is described as that audio.
+    /// is described as that audio (not decodable).
     pub fn service_views(&self) -> Vec<crate::snapshot::ServiceView> {
         let lengths = self.ens.stream_lengths();
         self.ens
@@ -583,7 +482,7 @@ impl Session {
                 {
                     v.audio = Some(evs_view(c));
                     v.audio_bitrate = stream_bitrate(&lengths, c.app.stream_id);
-                    v.decodable = decdrm_evs::BUILT_IN;
+                    v.decodable = false;
                     v.warning = Some(EVS_WARNING.into());
                 }
                 v
@@ -593,9 +492,8 @@ impl Session {
 }
 
 /// Track the data field `field` of data channel `app` of service `short_id` against the
-/// KCBS EVS framing: whether it is EVS audio to decode (the channel locked). Logs when a
-/// channel locks.
-fn observe_evs(channels: &mut Vec<EvsChannel>, short_id: u8, app: &ApplicationInfo, field: &[u8], out: &mut Vec<SessionEvent>) -> bool {
+/// KCBS EVS framing; log when a channel locks (is recognised as EVS audio).
+fn observe_evs(channels: &mut Vec<EvsChannel>, short_id: u8, app: &ApplicationInfo, field: &[u8], out: &mut Vec<SessionEvent>) {
     let pos = channels.iter().position(|c| c.short_id == short_id && same_data_channel(&c.app, app));
     match (decdrm_evs::kcbs::detect(field), pos) {
         (Some(bandwidth), Some(i)) => {
@@ -606,59 +504,24 @@ fn observe_evs(channels: &mut Vec<EvsChannel>, short_id: u8, app: &ApplicationIn
             if !was && c.locked() {
                 out.push(SessionEvent::Log(format!(
                     "service {short_id}: data application {:#05X} carries {} audio (KCBS framing), in a nonstandard \
-                     form ({EVS_WARNING}): it decodes garbled, so it plays only when the service is selected{}",
+                     form ({EVS_WARNING}); DecDRM recognises EVS but does not decode it",
                     app.user_app_id().unwrap_or(0),
                     c.describe(),
-                    if decdrm_evs::BUILT_IN { "" } else { "; this build has no EVS decoder (feature `evs`)" }
                 )));
                 out.push(SessionEvent::ServicesChanged);
             }
-            c.locked()
         }
-        (Some(bandwidth), None) => {
-            channels.push(EvsChannel { short_id, app: app.clone(), matches: 1, bandwidth });
-            false
-        }
+        (Some(bandwidth), None) => channels.push(EvsChannel { short_id, app: app.clone(), matches: 1, bandwidth }),
         // A locked channel stays EVS through data groups whose frames do not all signal
-        // one bandwidth (the encoder may switch), as long as the frames can be cut out.
-        (None, Some(i)) if channels[i].locked() => decdrm_evs::kcbs::frames(field).is_some(),
-        (None, Some(i)) => {
-            channels[i].matches = 0;
-            false
-        }
-        (None, None) => false,
+        // one bandwidth (the encoder may switch).
+        (None, Some(i)) if channels[i].locked() => {}
+        (None, Some(i)) => channels[i].matches = 0,
+        (None, None) => {}
     }
 }
 
-/// Decode the next frame (`None`: lost) and return 20 ms of EVS audio: the frame before
-/// it (the KCBS decoder runs one frame behind), `None` at the very start.
-#[cfg(feature = "evs")]
-fn evs_decode(p: &mut EvsPlayer, frame: Option<&[u8]>) -> Option<PcmFrame> {
-    let rate = p.decoder.rate();
-    let samples = p.decoder.push(frame).ok().filter(|s| !s.is_empty())?;
-    Some(PcmFrame { sample_rate: rate, channels: 1, samples, concealed: frame.is_none() })
-}
-
-#[cfg(not(feature = "evs"))]
-fn evs_decode(_p: &mut EvsPlayer, _frame: Option<&[u8]>) -> Option<PcmFrame> {
-    None
-}
-
-/// Bursts the guard replaced since the last call.
-#[cfg(feature = "evs")]
-fn evs_new_bursts(p: &mut EvsPlayer) -> u64 {
-    let new = p.decoder.bursts() - p.bursts;
-    p.bursts = p.decoder.bursts();
-    new
-}
-
-#[cfg(not(feature = "evs"))]
-fn evs_new_bursts(_p: &mut EvsPlayer) -> u64 {
-    0
-}
-
-/// The service-bar description of EVS audio: mono at the codec's internal rate,
-/// decoded to 48 kHz, the bandwidth as detail.
+/// The service-bar description of EVS audio: mono at the codec's internal rate (not
+/// decoded), the bandwidth as detail.
 fn evs_view(c: &EvsChannel) -> crate::snapshot::AudioCodingView {
     crate::snapshot::AudioCodingView {
         codec: "EVS".into(),
@@ -666,7 +529,7 @@ fn evs_view(c: &EvsChannel) -> crate::snapshot::AudioCodingView {
         parametric_stereo: false,
         stereo: false,
         sample_rate_hz: c.bandwidth.sample_rate_hz(),
-        output_rate_hz: 48_000,
+        output_rate_hz: c.bandwidth.sample_rate_hz(),
         text: false,
         surround_mode: 0,
         detail: Some(c.bandwidth.name().into()),

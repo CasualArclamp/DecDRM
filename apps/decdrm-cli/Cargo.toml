@@ -16,9 +16,6 @@ path = "src/main.rs"
 # candle): `cargo build --release -p decdrm-cli --features encodec`. The weights are
 # fetched with `decdrm models download encodec` (available in every build).
 encodec = ["decdrm-engine/encodec", "decdrm-station/encodec"]
-# EVS audio sent as data (KCBS on 6140 kHz), decoded with the 3GPP reference decoder
-# built from the zip in `reference/evs/` (see crates/decdrm-evs; private use).
-evs = ["decdrm-engine/evs"]
 # EnCodec with its weights built in (a single-file executable, 93 MB more; see
 # `scripts/build-portable.ps1`).
 embed-weights = ["encodec", "decdrm-encodec/embed-weights"]

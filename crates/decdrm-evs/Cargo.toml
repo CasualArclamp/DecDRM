@@ -1,33 +1,8 @@
 [package]
 name = "decdrm-evs"
-description = "3GPP EVS audio for DecDRM: signalling table, the KCBS framing of EVS frames in MSC data groups, and (feature `decoder`) the EVS reference decoder built from a user-supplied 3GPP/ETSI source archive"
+description = "3GPP EVS audio sent as DRM data, for DecDRM: the EVS signalling table and the KCBS framing of EVS frames in MSC data groups (recognition only; DecDRM has no EVS decoder)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-build = "build.rs"
-
-[features]
-default = []
-# Build the 3GPP EVS floating-point reference decoder (TS 26.443) into DecDRM. Its
-# source is not part of DecDRM (3GPP/ETSI copyright; EVS is patent-licensed, so for
-# private use): put the 3GPP or ETSI zip into `reference/evs/` (or point
-# $DECDRM_EVS_SRC at it). Without the feature EVS audio is recognised but not decoded.
-decoder = ["dep:cc", "dep:zip", "dep:flate2"]
-
-[dependencies]
-thiserror.workspace = true
-# Comfort noise: measuring the pause spectrum and designing its shaping filter.
-rustfft.workspace = true
-
-[build-dependencies]
-cc = { version = "1.2", features = ["parallel"], optional = true }
-# The ETSI archive holds the 3GPP archive, which holds the C code.
-zip = { version = "7.2", default-features = false, features = ["deflate-flate2"], optional = true }
-# zip's deflate goes through flate2; this picks its pure-Rust backend.
-flate2 = { version = "1.1", optional = true }
-
-[[example]]
-name = "g192dec"
-required-features = ["decoder"]

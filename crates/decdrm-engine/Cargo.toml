@@ -11,10 +11,6 @@ rust-version.workspace = true
 # Decode DecDRM's experimental EnCodec services (neural codec; pulls in candle). Without
 # it they are recognised and reported as "EnCodec (not built in)".
 encodec = ["decdrm-encodec/encodec"]
-# Decode EVS audio sent in a data application (KCBS on 6140 kHz) with the 3GPP
-# reference decoder, built from the source zip in `reference/evs/` (see decdrm-evs).
-# Without it such audio is recognised and reported as not decodable.
-evs = ["decdrm-evs/decoder"]
 
 [dependencies]
 decdrm-core = { path = "../decdrm-core" }

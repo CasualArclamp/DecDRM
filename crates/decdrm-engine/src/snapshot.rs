@@ -75,7 +75,7 @@ pub struct ServiceView {
     /// Conditional access (scrambled audio or data, FAC CA flags).
     pub ca: bool,
     /// Whether this receiver can decode the audio: false for a reserved coding (CELP,
-    /// HVXC) and for EnCodec in a build without it.
+    /// HVXC), for EnCodec in a build without it, and for EVS sent as data.
     pub decodable: bool,
     /// A caveat for the service bar, e.g. that EVS audio sent as data is nonstandard
     /// and likely encrypted.

@@ -19,10 +19,10 @@ milestone checklist (keep it current).
 - `crates/decdrm-schedule` — DRM broadcast schedules (Dream's DRMDX `DRMSchedule.ini`,
   EiBi CSV): what is on the air now; GUI Schedule tab, `decdrm schedule`. Downloads only
   on the user's request (curl/wget); `src/eibi_tables.rs` is generated from Dream.
-- `crates/decdrm-evs` — EVS (KCBS on 6140 kHz sends it as data): signalling table,
-  the KCBS framing (`kcbs`), and with feature `decoder` (engine/CLI/GUI: `evs`) the
-  3GPP TS 26.443 decoder built from the user's zip in `reference/evs/` — never commit
-  the EVS source (3GPP copyright, patent-licensed codec).
+- `crates/decdrm-evs` — EVS (KCBS on 6140 kHz sends it as data): the signalling table
+  and the KCBS framing (`kcbs`), for recognition only. The optional 3GPP decoder was
+  removed (2026-10-01) so the repo can be public: never add 3GPP/EVS reference code
+  (copyright, patent-licensed codec).
 - `crates/decdrm-kiwi` — KiwiSDR client (WebSocket protocol after kiwiclient, typed
   path `/no_wf/<ts>/SND`, own upgrade handshake for the proxy's HTTP/1.0 redirects,
   tungstenite framing), `KiwiStream` (thread + I/Q FIFO; `tune` retunes on the open

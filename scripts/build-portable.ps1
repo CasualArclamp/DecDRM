@@ -2,8 +2,6 @@
 # installed: the C runtime is linked statically (no Visual C++ redistributable) and the
 # experimental EnCodec codec comes with its weights built in. The results go to exe\
 # (git-ignored): decdrm-gui.exe (receiver + transmitter) and decdrm.exe (command line).
-# With the 3GPP EVS source zip in reference\evs (or $env:DECDRM_EVS_SRC) the EVS decoder
-# (KCBS on 6140 kHz) is built in too — private use only, see crates/decdrm-evs.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1
 #
@@ -22,15 +20,6 @@ $env:CARGO_TARGET_DIR = Join-Path $root "target\portable"
 if (-not $env:CARGO_BUILD_JOBS) { $env:CARGO_BUILD_JOBS = "6" }
 
 $features = "decdrm-gui/embed-weights,decdrm-cli/embed-weights"
-$evsSrc = if ($env:DECDRM_EVS_SRC) { $env:DECDRM_EVS_SRC } else { Join-Path $root "reference\evs" }
-if ((Test-Path $evsSrc) -and ((Get-Item $evsSrc).PSIsContainer -eq $false -or
-        (Get-ChildItem $evsSrc -Filter *.zip -ErrorAction SilentlyContinue) -or
-        (Test-Path (Join-Path $evsSrc "c-code")) -or (Test-Path (Join-Path $evsSrc "lib_dec")))) {
-    $features += ",decdrm-gui/evs,decdrm-cli/evs"
-    Write-Host "EVS decoder: included (source in $evsSrc)"
-} else {
-    Write-Host "EVS decoder: not included (no source in $evsSrc)"
-}
 
 Push-Location $root
 try {

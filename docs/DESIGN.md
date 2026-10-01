@@ -12,7 +12,7 @@ and the milestone plan. Keep the milestone checklist current.
 | Purpose | Personal / hobby. |
 | Relationship to Dream | Spec-first idiomatic Rust, freely translating Dream's proven algorithms (sync, Wiener channel estimation, MLC decoding). Licence therefore **GPL-2.0-or-later**. Reference: Dream `branches/dream-mjf` r1548. |
 | Receiver performance | Match or beat Dream on weak/fading signals (Wiener channel estimation, soft-decision Viterbi, iterative MLC, sample-rate-offset tracking). |
-| Audio decoding | Behind a Rust codec interface. AAC / HE-AAC v1/v2 and **xHE-AAC** via **FDK-AAC** (vendored, built from source, statically linked). **Opus** (Dream's extension) via libopus. CELP/HVXC: detected and reported as unsupported. **EVS** sent as data by KCBS (6140 kHz): recognised always; decoded with the 3GPP reference decoder (feature `evs`) built from a user-supplied source zip, never committed (3GPP/ETSI copyright, patent-licensed codec: private use). |
+| Audio decoding | Behind a Rust codec interface. AAC / HE-AAC v1/v2 and **xHE-AAC** via **FDK-AAC** (vendored, built from source, statically linked). **Opus** (Dream's extension) via libopus. CELP/HVXC: detected and reported as unsupported. **EVS** sent as data by KCBS (6140 kHz): recognised and shown, not decoded. An optional build of the 3GPP reference decoder (feature `evs`, from a user-supplied source zip) was removed on 2026-10-01 so the repository can be public; no 3GPP code goes into DecDRM. |
 | Data services | Text messages, Journaline, MOT Slideshow, EPG, Broadcast Website, TPEG/unknown (raw data saved). Broadcast clock and alternative-frequency (AFS) info from the SDC. |
 | Inputs | Recorded files (WAV/FLAC; real IF or I/Q; any sample rate), live sound card (including a virtual audio cable fed by any web SDR), and KiwiSDRs directly over the network (their I/Q, retunable while connected; added 2026-10-01 at the user's request). No direct SDR drivers. The network clients are the KiwiSDR client and the transmitter's web stream audio input. |
 | Outputs | Live audio (with clock-drift compensation) and logs/metrics (CSV/JSON). |
@@ -195,6 +195,11 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       comfort noise: spectrum and level measured from the pause frames a second decoder
       decodes normally (outliers rejected; −61 dBFS, hum-weighted), 129-tap FIR-shaped
       white noise 3 dB below it, 10 ms fades.
+      *Removed* (2026-10-01, at the user's request, so the repository can be public):
+      the decoder build (feature, shim, `KcbsDecoder`, burst guard, comfort noise) and
+      its playback in the engine. Recognition stays: the framing, the signalling
+      table, the service shown as EVS with "no decoder" and "likely encrypted", and the
+      findings above, recorded in `decdrm_evs::kcbs`.
 - [x] **Station schedule** (2026-10-01) — which DRM stations are on the air now, like
       Dream's Stations dialog (`StationsDlg.cpp`, `Schedule.cpp`), to know what to
       tune a web SDR to.

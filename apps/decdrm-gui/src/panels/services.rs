@@ -232,13 +232,18 @@ fn details(s: &ServiceView) -> String {
         lines.push("Conditional access: scrambled".into());
     }
     if let Some(w) = &s.warning {
-        lines.push(format!("Caution: {w}; it decodes garbled and plays only when selected"));
+        lines.push(format!("Caution: {w}"));
     }
-    lines.push(match (s.is_audio || s.audio.is_some(), s.warning.is_some()) {
-        (true, false) => "Click to listen".into(),
-        (true, true) => "Click to listen anyway".into(),
-        (false, _) => "Click to show its data".into(),
-    });
+    // A known coding without a decoder (e.g. EVS sent as data, shown as audio) does not
+    // play; an audio service whose coding is not known yet does once it is.
+    let action = if s.audio.is_some() && !s.decodable {
+        if s.is_audio { "Click to select it (no decoder)" } else { "Click to show its data" }
+    } else if s.is_audio || s.audio.is_some() {
+        "Click to listen"
+    } else {
+        "Click to show its data"
+    };
+    lines.push(action.into());
     lines.join("\n")
 }
 
@@ -487,6 +492,29 @@ mod tests {
         t.audio = Some(AudioCodingView { codec: "reserved".into(), ..Default::default() });
         t.decodable = false;
         assert!(texts(&t).contains(&"no decoder".to_string()));
+    }
+
+    #[test]
+    fn evs_sent_as_data_is_shown_but_not_decoded() {
+        let s = ServiceView {
+            short_id: 0,
+            is_audio: false,
+            audio: Some(AudioCodingView {
+                codec: "EVS".into(),
+                sample_rate_hz: 32_000,
+                output_rate_hz: 32_000,
+                detail: Some("SWB".into()),
+                ..Default::default()
+            }),
+            decodable: false,
+            warning: Some("likely encrypted".into()),
+            ..Default::default()
+        };
+        assert_eq!(texts(&s), ["EVS 13.2", "SWB", "Mono", "32 kHz", "no decoder", "likely encrypted"]);
+        assert!(details(&s).ends_with("Click to show its data"), "{}", details(&s));
+        // An audio service whose coding is not known yet still offers to play.
+        let pending = ServiceView { short_id: 1, is_audio: true, ..Default::default() };
+        assert!(details(&pending).ends_with("Click to listen"));
     }
 
     #[test]

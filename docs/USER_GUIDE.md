@@ -302,25 +302,15 @@ services; lost audio frames are concealed.
 **EVS from Korean Central Broadcasting (6140 kHz).** KCBS signals its service as data
 (application 0x000), which is why Dream shows it as a data service, but it sends 3GPP
 EVS speech audio (13.2 kbit/s, 14 kHz audio bandwidth). DecDRM recognises it within
-a second and shows it as an **EVS 13.2** audio service. Decoding needs the 3GPP
-reference decoder, which DecDRM cannot include (3GPP/ETSI copyright, and EVS is a
-patent-licensed codec, so this is for private use). Download
-`26443-j00.zip` from https://www.3gpp.org/ftp/Specs/archive/26_series/26.443/ (or
-`ts_126443v190000p0.zip` from ETSI) in a browser, put it into `reference/evs/` and
-build with the `evs` feature:
+a second and shows it as an **EVS 13.2** audio service, marked "no decoder" and
+"likely encrypted":
+- DecDRM has no EVS decoder. The only one available, the 3GPP reference code, is
+  copyrighted, and EVS is a patent-licensed codec.
+- The station's frames depart from EVS in a way that points to selective encryption:
+  a standard decoder's error checks fire on many of them, and the speech comes out
+  garbled.
 
-```bash
-cargo build --release -p decdrm-cli -p decdrm-gui --features decdrm-cli/evs,decdrm-gui/evs
-```
-
-Without it the service is marked "no decoder" and its data groups are saved like any
-unknown data (`--data-dir`).
-
-The station's encoder writes some EVS frame types (pauses, speech onsets, music) in a
-form no standard decoder reads correctly. DecDRM conceals those frames, replaces the
-occasional remaining burst (output runs 20 ms behind for that), and fills pauses with
-comfort noise shaped like the station's own background. Speech sounds clean; onsets
-are a little soft, and the rare music passages stay silent.
+Its data groups are saved like any unknown data (`--data-dir`).
 
 ### Data services
 
