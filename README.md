@@ -44,6 +44,10 @@ encoding) and libopus.
   bars (codec, SBR/PS, bit rate, protection, data applications), text,
   slideshow, Journaline browser, broadcast website, EPG, broadcast clock, alternative
   frequencies, and a transmitter tab.
+- Station schedule, like Dream's *Stations* dialog: the DRM broadcasts on the air now
+  from EiBi's or Dream's schedule (downloaded on request), in the GUI's *Schedule* tab
+  and with `decdrm schedule`; a frequency in a recording's file name (KiwiSDR
+  `…_6140.00_iq.wav`) picks out the station.
 - Light on the CPU: the receiver decodes 10 kHz signals at 100–150× real time (20 kHz
   at ~45×) on one core; the GUI needs a few percent of a core while decoding live.
 - Experimental **EnCodec** (Meta's neural codec) as a DecDRM-only audio codec: 1.5–24
@@ -85,6 +89,9 @@ decdrm rx iq_recording.wav --format iq --out audio.wav --data-dir data --log rx.
 decdrm devices
 decdrm rx --device "CABLE-A Output" --play
 
+# which DRM stations are on the air now (--update first downloads EiBi's schedule)
+decdrm schedule --update
+
 # transmit: the station file describes services, codecs, data and the output
 decdrm tx crates/decdrm-station/examples/station.toml --check     # show the multiplex
 decdrm tx crates/decdrm-station/examples/station.toml --duration 30 --output drm.wav
@@ -122,6 +129,7 @@ messages, data objects and log lines as events.
 | `decdrm-engine` | Receiver threads, sources, decoding pipelines, status snapshots, logging |
 | `decdrm-station` | Transmitter station: TOML configuration → multiplex → signal |
 | `decdrm-encodec` | Experimental EnCodec codec (feature `encodec`) |
+| `decdrm-schedule` | Broadcast schedules (EiBi CSV, Dream's `DRMSchedule.ini`): what is on the air now |
 | `decdrm-cli` | The `decdrm` command-line tool |
 | `decdrm-gui` | The desktop GUI |
 

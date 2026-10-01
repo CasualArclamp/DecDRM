@@ -94,6 +94,63 @@ survives the gaps and jumps of a network stream: a timing jump is resynchronised
 about a second. Playback is clock-drift compensated, so it neither underruns nor
 drifts out of sync over hours.
 
+### Station schedule: what is on the air
+
+To know what to tune the SDR to, DecDRM lists the DRM broadcasts scheduled right now,
+like Dream's *Stations* dialog. It reads two kinds of schedule:
+- **EiBi** (eibispace.de): every shortwave broadcast, one file per season —
+  `sked-a26.csv` from the last Sunday of March, `sked-b26.csv` from the last Sunday of
+  October. DecDRM shows the entries with the word "DRM" in their station, remarks or
+  language field, or every broadcast on request. EiBi's codes are spelled out:
+  languages, target areas, countries and transmitter sites.
+- **Dream (DRMDX)**: the DRM-only `DRMSchedule.ini` that Dream's *Stations* dialog
+  downloads.
+
+Nothing is downloaded until you ask for it:
+
+```bash
+decdrm schedule --update                 # download EiBi's current file, then list what is on
+decdrm schedule                          # DRM broadcasts on the air now (or within 15 min)
+decdrm schedule --all                    # the whole DRM schedule, on-air entries marked *
+decdrm schedule --freq 6140              # what is scheduled within ±5 kHz of 6140 kHz
+decdrm schedule --at 2026-10-03T18:00Z   # at another time (UTC)
+decdrm schedule --source dream --update  # Dream's DRMDX list instead
+decdrm schedule --sources                # the sources, their URLs and local files
+```
+
+`--all-broadcasts` adds EiBi's analogue broadcasts, `--filter TEXT` keeps entries whose
+station, language, target, country or site contains the text, and `--dir DIR` uses
+another folder.
+
+In the GUI, the **Schedule** tab next to *History* shows the same:
+- the UTC clock, the source, *On air now* or *All*, and a filter;
+- *Update schedule*, which downloads in the background;
+- a coloured dot per entry: green on the air, orange ending within 10 minutes, yellow
+  starting within 15 minutes, grey off.
+
+The frequency you receive is highlighted. It comes from the *Frequency* box, or from a
+recording's file name: KiwiSDR names recordings like
+`…_2026-09-30T12_46_51Z_6140.00_iq.wav`, HDSDR and SDR# like `…_6140kHz_…`. The line
+above the table names the station on the air at the recording's time, and the log names
+it when you press *Start*. Clicking a row copies its frequency to the clipboard (to
+paste into the SDR) and highlights it.
+
+The files live in the `schedule` folder next to the GUI settings (*Folder* opens it).
+Downloads use `curl`, which comes with Windows 10/11, or `wget`; if neither works,
+download the file in a browser and save it there under the name shown. A file for an
+earlier season stays in use, with a warning, until you update. More sources go into
+`sources.toml` in that folder:
+
+```toml
+[[source]]
+name = "mylist"                                # decdrm schedule --source mylist
+title = "My DRM list"
+format = "eibi"                                # or "dream"
+url = "https://example.org/drm-{season}.csv"   # {season} becomes a26, b26, …
+```
+
+A `[[source]]` named `eibi` or `dream` changes that built-in source, for example its URL.
+
 ## Reading the displays
 
 The status LEDs, left to right:
@@ -136,6 +193,7 @@ GUI plot tabs:
 | Impulse response | power-delay profile, with the guard interval and delay spread |
 | SNR per carrier | where in the band the noise or interference sits |
 | History | SNR/MER/WMER, Doppler, delay, SRO over the last five minutes of signal, and FAC/SDC/MSC/audio error rates per 10 s |
+| Schedule | the DRM broadcasts on the air now, from EiBi's or Dream's schedule (see [Station schedule](#station-schedule-what-is-on-the-air)) |
 
 The side panel shows the broadcast clock (with the station's local time when it sends
 one), alternative frequencies, the services, the text message, audio details and the
@@ -424,3 +482,4 @@ it records ALSA's `default` device; route that to the cable's monitor as describ
 | GUI's website copies (no data folder set) | `websites/<service id>/` next to the settings file |
 | Received objects | the data folder (`--data-dir`, GUI *Data info → Folder…*): `slides/`, `website/`, `epg/`, `raw/` |
 | EnCodec weights | `models/encodec_24khz/model.safetensors` (see `decdrm models list`) |
+| Broadcast schedules | `schedule/` next to the GUI settings (`%APPDATA%\decdrm\schedule` on Windows): `sked-a26.csv` (EiBi), `DRMSchedule.ini` (Dream), optional `sources.toml`; `decdrm schedule --dir DIR` uses another folder |

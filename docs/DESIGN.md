@@ -57,6 +57,10 @@ and the milestone plan. Keep the milestone checklist current.
 * **decdrm-station**: the transmitter application layer: a TOML station config
   (services, codecs, data applications, output) → planned multiplex → frames from
   `decdrm-core::tx` → WAV/FLAC or sound card.
+* **decdrm-schedule** (pure Rust, no DSP): broadcast schedules for "what is on the
+  air now" — Dream's `DRMSchedule.ini` and EiBi's CSV, on-air logic, sources and
+  downloads (curl/wget, on request only); used by `decdrm schedule` and the GUI's
+  *Schedule* tab.
 
 ### Receiver data flow
 
@@ -188,6 +192,29 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       comfort noise: spectrum and level measured from the pause frames a second decoder
       decodes normally (outliers rejected; −61 dBFS, hum-weighted), 129-tap FIR-shaped
       white noise 3 dB below it, 10 ms fades.
+- [x] **Station schedule** (2026-10-01) — which DRM stations are on the air now, like
+      Dream's Stations dialog (`StationsDlg.cpp`, `Schedule.cpp`), to know what to
+      tune a web SDR to.
+      *Done:* `decdrm-schedule` reads Dream's `DRMSchedule.ini` as `ReadINIFile` does
+      (Sunday-first day flags, `0000000` = irregular = every day; bad records skipped
+      instead of ending the file) and EiBi's seasonal CSV as `ReadCSVFile` does, with
+      Dream's code tables (`TableStations.cpp`, generated into `eibi_tables.rs`) for
+      languages, targets, countries and sites; columns found by header name, lenient
+      days (`Mo-Fr`, `Sa,Su`, `SaSu`, `1245`, `Fr-Mo`, keywords) and validity dates
+      (format unverified: `mmdd`, full dates); DRM = the word "DRM" in station,
+      remarks or language. On air: the start day decides (Dream misses Friday's
+      2300-0100 on Saturday at 00:30), `start == stop` is all day, annual validity
+      dates are taken within the broadcast season, Dream's ending-soon (10 min) and
+      starting-soon (15 min) states. UTC calendar from `SystemTime` (civil-from-days),
+      seasons A/B from the last Sundays of March/October (`sked-a26.csv`). Sources
+      (EiBi's current season file, Dream's DRMDX URL on baseportal.com) configurable
+      in `sources.toml` in the per-user `schedule` folder; downloads only on request,
+      via curl/wget into a `.part` file that replaces the old copy only if it parses.
+      CLI `decdrm schedule` (`--update --all --at --freq --source --all-broadcasts
+      --filter --sources --dir`); GUI *Schedule* tab (background load/update, rows
+      cached per minute and painted with `show_rows`, the received frequency from the
+      *Frequency* box or the recording's file name — KiwiSDR, HDSDR, SDR# naming —
+      highlighted and named in the log at Start; a click copies the frequency).
 
 ## Conventions
 
