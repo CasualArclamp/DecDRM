@@ -17,6 +17,7 @@
 
 mod app;
 mod data;
+mod diversity;
 mod epg;
 mod fading;
 mod fonts;

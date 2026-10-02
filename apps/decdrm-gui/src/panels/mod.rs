@@ -4,6 +4,7 @@
 
 pub mod broadcast;
 pub mod data_info;
+pub mod diversity;
 pub mod epg;
 pub mod history;
 pub mod journaline;

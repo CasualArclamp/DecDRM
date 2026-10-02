@@ -29,6 +29,11 @@
 //! branch can still give it: one went past n, or lags the other by more than
 //! [`MAX_LAG`] frames (lost or stalled). So a frame without a partner is decoded alone,
 //! and the result is never worse than the better branch alone.
+//!
+//! Displays. Every frame decoded (or lost) leaves a [`MixRecord`]: the branches it
+//! came from, each one's SNR (its mean combining weight) and the share of the weight;
+//! the last combined frame also leaves its weights per carrier ([`CarrierMix`]), which
+//! show how frequency-selective fades in one branch are filled by the other.
 
 use super::chain::{MscConfig, MscFrame};
 use super::mscdec::MscDecoder;
@@ -37,6 +42,7 @@ use crate::fec::qam::{EqCell, Mapping, MetricKind};
 use crate::params::{SAMPLE_RATE, SAMPLES_PER_FRAME};
 use crate::{Cplx, Real};
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 /// A diversity branch's multiplex frame of equalised MSC cells (see
 /// [`ReceiverConfig::diversity_branch`]).
@@ -49,7 +55,41 @@ pub struct MscCells {
     pub gap: bool,
     /// The branch's input time when the frame was complete, seconds.
     pub time_s: Real,
+    /// The carrier of each cell, as its offset from `kmin`.
+    pub carriers: Arc<[u16]>,
+    /// Carrier index of offset 0.
+    pub kmin: i32,
 }
+
+/// How one multiplex frame was mixed (see [`DiversityReceiver::recent_mix`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MixRecord {
+    /// Counts the records from 0: one per multiplex frame decoded or lost, so it
+    /// advances by one every 400 ms of signal.
+    pub seq: u64,
+    /// The branches the frame came from; neither: it was lost.
+    pub from: [bool; 2],
+    /// Each branch's SNR over the frame: its mean combining weight |H|²/σ², dB.
+    pub snr_db: [Option<Real>; 2],
+    /// SNR of the cells decoded, dB: for a combined frame the sum of the branches'.
+    pub combined_db: Option<Real>,
+    /// Branch 0's share of the combining weight (combined frames), 0–1.
+    pub share: Option<Real>,
+}
+
+/// The combining weights of the last combined frame per carrier: each branch's mean
+/// |H|²/σ² over the frame's MSC cells on the carrier (a linear SNR). Maximum-ratio
+/// combining adds them; each branch's share of the sum is its share of the cell.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CarrierMix {
+    /// Carrier index of entry 0.
+    pub kmin: i32,
+    /// Per branch and carrier; NaN for a carrier without MSC cells in the frame.
+    pub snr: [Vec<f32>; 2],
+}
+
+/// Records kept by [`DiversityReceiver::recent_mix`]: 102 s.
+pub const RECENT_MIX: usize = 256;
 
 /// What the combiner did.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -92,6 +132,8 @@ struct Frame {
     index: usize,
     /// Input time of the branch, seconds.
     time_s: Real,
+    carriers: Arc<[u16]>,
+    kmin: i32,
 }
 
 /// A frame to decode: its cells, which branches gave it (both, or one), whether
@@ -134,6 +176,11 @@ pub(crate) struct Combiner {
     stats: DiversityStats,
     /// Cells of the last decoded frame (for the constellation).
     last: Vec<Cplx>,
+    /// How the last frames were mixed, oldest first, and the next record's number.
+    mix: VecDeque<MixRecord>,
+    mix_seq: u64,
+    /// The last combined frame's weights per carrier.
+    carrier_mix: Option<CarrierMix>,
 }
 
 impl Combiner {
@@ -155,6 +202,9 @@ impl Combiner {
             flushing: false,
             stats: DiversityStats::default(),
             last: Vec::new(),
+            mix: VecDeque::new(),
+            mix_seq: 0,
+            carrier_mix: None,
         }
     }
 
@@ -165,12 +215,14 @@ impl Combiner {
         }
     }
 
-    /// Forget the pairing and the frames waiting (the counts stay).
+    /// Forget the pairing and the frames waiting (the counts and records stay).
     pub fn reset(&mut self) {
         let (config, iterations, metric, stats) = (self.config, self.iterations, self.metric, self.stats);
+        let (mix, mix_seq) = (std::mem::take(&mut self.mix), self.mix_seq);
         *self = Self::new(iterations, metric);
         self.config = config;
         self.stats = DiversityStats { lead_frames: None, agreement: None, share: None, ..stats };
+        (self.mix, self.mix_seq) = (mix, mix_seq);
     }
 
     pub fn stats(&self) -> DiversityStats {
@@ -179,6 +231,28 @@ impl Combiner {
 
     pub fn last_cells(&self) -> &[Cplx] {
         &self.last
+    }
+
+    pub fn recent_mix(&self) -> &VecDeque<MixRecord> {
+        &self.mix
+    }
+
+    pub fn carrier_mix(&self) -> Option<&CarrierMix> {
+        self.carrier_mix.as_ref()
+    }
+
+    /// Note how a frame was mixed (SNRs linear).
+    fn record(&mut self, from: [bool; 2], snr: [Option<Real>; 2], combined: Option<Real>, share: Option<Real>) {
+        let db = |x: Real| 10.0 * x.max(1e-12).log10();
+        self.mix.push_back(MixRecord {
+            seq: self.mix_seq,
+            from,
+            snr_db: snr.map(|s| s.map(db)),
+            combined_db: combined.map(db),
+            share,
+        });
+        self.mix_seq += 1;
+        keep_last(&mut self.mix, RECENT_MIX);
     }
 
     /// A frame of branch `b`; the multiplex frames now decodable.
@@ -348,6 +422,7 @@ impl Combiner {
                     break;
                 }
                 self.stats.lost += 1;
+                self.record([false; 2], [None; 2], None, None);
                 self.gap = true;
                 self.next = Some(n + 1);
                 continue;
@@ -368,11 +443,24 @@ impl Combiner {
             let mapping = self.config.map_or(Mapping::Qam16, |c| c.mode.mapping());
             out.push(match slot {
                 [Some(x), Some(y)] => {
-                    let (cells, share) = combine(&x.cells, &y.cells, mapping);
-                    Ready { cells, from: [true, true], gap, share: Some(share) }
+                    let m = combine(&x.cells, &y.cells, mapping);
+                    let snr = [mean_weight(&x.cells) * m.ka, mean_weight(&y.cells) * m.kb];
+                    self.record([true, true], snr.map(Some), Some(snr[0] + snr[1]), Some(m.share));
+                    if let Some(c) = carrier_mix(&x, &y, m.ka, m.kb) {
+                        self.carrier_mix = Some(c);
+                    }
+                    Ready { cells: m.cells, from: [true, true], gap, share: Some(m.share) }
                 }
-                [Some(x), None] => Ready { cells: x.cells, from: [true, false], gap, share: None },
-                [None, Some(y)] => Ready { cells: y.cells, from: [false, true], gap, share: None },
+                [Some(x), None] => {
+                    let snr = mean_weight(&x.cells);
+                    self.record([true, false], [Some(snr), None], Some(snr), None);
+                    Ready { cells: x.cells, from: [true, false], gap, share: None }
+                }
+                [None, Some(y)] => {
+                    let snr = mean_weight(&y.cells);
+                    self.record([false, true], [None, Some(snr)], Some(snr), None);
+                    Ready { cells: y.cells, from: [false, true], gap, share: None }
+                }
                 [None, None] => continue,
             });
         }
@@ -410,15 +498,50 @@ fn prepare(f: MscCells, mapping: Mapping) -> Frame {
     // A floor keeps a noiseless signal finite.
     let sigma2 = (noise / n).max(1e-6 * power / n).max(1e-30);
     let cells = f.cells.iter().map(|c| EqCell { sig: c.sig, chan: c.chan / sigma2 }).collect();
-    Frame { cells, hard, index: f.index, time_s: f.time_s }
+    Frame { cells, hard, index: f.index, time_s: f.time_s, carriers: f.carriers, kmin: f.kmin }
+}
+
+/// The mean channel power of cells in units of their noise: their SNR (linear).
+fn mean_weight(cells: &[EqCell]) -> Real {
+    cells.iter().map(|c| c.chan).sum::<Real>() / cells.len().max(1) as Real
+}
+
+/// The two frames' weights per carrier (with the branches' noise corrections `ka`,
+/// `kb`); `None` if their layouts differ.
+fn carrier_mix(x: &Frame, y: &Frame, ka: Real, kb: Real) -> Option<CarrierMix> {
+    if x.carriers.len() != x.cells.len() || x.cells.len() != y.cells.len() || x.carriers != y.carriers || x.kmin != y.kmin {
+        return None;
+    }
+    let width = usize::from(*x.carriers.iter().max()?) + 1;
+    let mut sum = [vec![0.0; width], vec![0.0; width]];
+    let mut count = vec![0u32; width];
+    for ((cx, cy), &k) in x.cells.iter().zip(&y.cells).zip(x.carriers.iter()) {
+        let k = usize::from(k);
+        sum[0][k] += cx.chan * ka;
+        sum[1][k] += cy.chan * kb;
+        count[k] += 1;
+    }
+    let mean = |s: Vec<Real>| -> Vec<f32> {
+        s.iter().zip(&count).map(|(&v, &n)| if n > 0 { (v / Real::from(n)) as f32 } else { f32::NAN }).collect()
+    };
+    Some(CarrierMix { kmin: x.kmin, snr: sum.map(mean) })
+}
+
+/// The combination of two frames.
+struct Mixed {
+    cells: Vec<EqCell>,
+    /// Corrections of each branch's weights (its noise measured again).
+    ka: Real,
+    kb: Real,
+    /// Branch `a`'s share of the total weight.
+    share: Real,
 }
 
 /// Maximum-ratio combining of two frames' cells (channel powers in units of each
 /// branch's noise, as measured against its own decisions), in two passes: each
 /// branch's noise is measured again against the decisions of the first combination
-/// (right more often than either branch's own), which corrects the weights. Also branch
-/// `a`'s share of the total weight.
-fn combine(a: &[EqCell], b: &[EqCell], mapping: Mapping) -> (Vec<EqCell>, Real) {
+/// (right more often than either branch's own), which corrects the weights.
+fn combine(a: &[EqCell], b: &[EqCell], mapping: Mapping) -> Mixed {
     let first = mrc(a, b, 1.0, 1.0);
     // The noise against the combined decisions, in units of each branch's own estimate.
     let (mut na, mut nb) = (0.0, 0.0);
@@ -433,7 +556,7 @@ fn combine(a: &[EqCell], b: &[EqCell], mapping: Mapping) -> (Vec<EqCell>, Real) 
     let cells = mrc(a, b, ka, kb);
     let (wa, wb) = (a.iter().map(|c| c.chan).sum::<Real>() * ka, b.iter().map(|c| c.chan).sum::<Real>() * kb);
     let share = if wa + wb > 0.0 { wa / (wa + wb) } else { 0.5 };
-    (cells, share)
+    Mixed { cells, ka, kb, share }
 }
 
 /// Maximum-ratio combining with the branches' channel powers scaled by `ka` and `kb`.
@@ -560,6 +683,16 @@ impl DiversityReceiver {
     pub fn last_cells(&self) -> &[Cplx] {
         self.combiner.last_cells()
     }
+
+    /// How the last [`RECENT_MIX`] frames were mixed, oldest first.
+    pub fn recent_mix(&self) -> &VecDeque<MixRecord> {
+        self.combiner.recent_mix()
+    }
+
+    /// The last combined frame's weights per carrier.
+    pub fn carrier_mix(&self) -> Option<&CarrierMix> {
+        self.combiner.carrier_mix()
+    }
 }
 
 #[cfg(test)]
@@ -587,7 +720,9 @@ mod tests {
     }
 
     fn cells(cells: Vec<EqCell>, k: usize, time_s: Real) -> MscCells {
-        MscCells { cells, index: k % 3, gap: false, time_s }
+        // Cells spread over 8 carriers in turn.
+        let carriers = (0..cells.len()).map(|i| (i % 8) as u16).collect();
+        MscCells { cells, index: k % 3, gap: false, time_s, carriers, kmin: -4 }
     }
 
     fn combiner() -> Combiner {
@@ -639,7 +774,7 @@ mod tests {
         // Equal SNRs: the combined noise is half of each.
         let a = prepare(cells(received(&tx[0], 0.2, 1.0, &mut rng), 0, 0.0), Mapping::Qam16);
         let b = prepare(cells(received(&tx[0], 0.2, 1.0, &mut rng), 0, 0.0), Mapping::Qam16);
-        let (comb, share) = combine(&a.cells, &b.cells, Mapping::Qam16);
+        let Mixed { cells: comb, share, .. } = combine(&a.cells, &b.cells, Mapping::Qam16);
         let mse = |cells: &[EqCell]| cells.iter().zip(&tx[0]).map(|(c, s)| (c.sig - s).norm_sqr()).sum::<Real>() / CELLS as Real;
         let (ma, mc) = (mse(&a.cells), mse(&comb));
         assert!((mc / ma - 0.5).abs() < 0.08, "combined noise {mc} vs {ma}");
@@ -655,8 +790,57 @@ mod tests {
         // although against its own decisions its noise reads far too low; the result is
         // better than the good branch alone.
         let bad = prepare(cells(received(&tx[0], 0.6, 1.0, &mut rng), 0, 0.0), Mapping::Qam16);
-        let (comb, share) = combine(&a.cells, &bad.cells, Mapping::Qam16);
+        let Mixed { cells: comb, share, .. } = combine(&a.cells, &bad.cells, Mapping::Qam16);
         assert!(share > 0.86 && mse(&comb) < ma, "share {share}, {} vs {ma}", mse(&comb));
+    }
+
+    /// A branch whose channel power on carrier `k` (of the 8 the test cells use) is
+    /// `gain(k)`: the equalised noise grows as the power falls.
+    fn faded(sent: &[Cplx], sigma: Real, gain: impl Fn(usize) -> Real, rng: &mut Rng) -> Vec<EqCell> {
+        sent.iter()
+            .enumerate()
+            .map(|(i, &s)| {
+                let g = gain(i % 8);
+                EqCell { sig: s + Cplx::new(rng.gaussian(), rng.gaussian()) * (sigma / g.sqrt()), chan: g }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn records_and_weights_per_carrier() {
+        let tx = sent(6, 9);
+        let mut rng = Rng::new(10);
+        let mut c = combiner();
+        // Branch 0 fades on carriers 4-7, branch 1 on carriers 0-3.
+        let gain = |b: usize, k: usize| if (k < 4) == (b == 0) { 1.0 } else { 0.05 };
+        for (k, f) in tx.iter().enumerate() {
+            for b in 0..2 {
+                let received = faded(f, 0.1, |k| gain(b, k), &mut rng);
+                feed(&mut c, b, cells(received, k, k as Real * FRAME_S));
+            }
+        }
+        let r = c.recent_mix();
+        assert!(r.len() >= 5, "{r:?}");
+        assert!(r.iter().zip(r.iter().skip(1)).all(|(x, y)| y.seq == x.seq + 1));
+        let last = r.back().unwrap();
+        assert_eq!(last.from, [true, true]);
+        let (a, b) = (last.snr_db[0].unwrap(), last.snr_db[1].unwrap());
+        assert!((a - b).abs() < 1.5, "{a} vs {b} dB");
+        // Maximum-ratio combining adds the SNRs.
+        let sum = 10.0 * (10f64.powf(a / 10.0) + 10f64.powf(b / 10.0)).log10();
+        assert!((last.combined_db.unwrap() - sum).abs() < 1e-9);
+        assert!((last.share.unwrap() - 0.5).abs() < 0.1, "{last:?}");
+        // Per carrier, the branch that did not fade carries the cell.
+        let m = c.carrier_mix().unwrap();
+        assert_eq!((m.kmin, m.snr[0].len(), m.snr[1].len()), (-4, 8, 8));
+        for k in 0..8 {
+            let share = m.snr[0][k] / (m.snr[0][k] + m.snr[1][k]);
+            assert!(if k < 4 { share > 0.85 } else { share < 0.15 }, "carrier {k}: share {share}");
+        }
+        // A lost frame leaves a record too.
+        let before = c.recent_mix().len();
+        c.record([false; 2], [None; 2], None, None);
+        assert_eq!(c.recent_mix().len(), before + 1);
     }
 
     #[test]

@@ -3,7 +3,8 @@
 use crate::session::MscStats;
 use crate::source::SourceInfo;
 use decdrm_core::fac::ChannelParams;
-use decdrm_core::rx::{RxState, RxStatus, Visuals};
+use decdrm_core::Cplx;
+use decdrm_core::rx::{CarrierMix, MixRecord, RxState, RxStatus, Visuals};
 use std::collections::VecDeque;
 
 /// Maximum number of log lines kept in the snapshot.
@@ -84,11 +85,23 @@ pub struct MdiStatus {
     pub progress: Option<f64>,
 }
 
-/// Diversity reception: the combiner's counts and each branch's receiver status.
+/// Diversity reception: the combiner's counts, how it mixes the branches, and each
+/// branch's receiver status and constellation.
 #[derive(Debug, Clone, Default)]
 pub struct DiversityView {
     pub stats: decdrm_core::rx::DiversityStats,
     pub branches: [RxStatus; 2],
+    /// How the last frames were mixed, oldest first (at most
+    /// [`decdrm_core::rx::RECENT_MIX`]). A UI keeping a longer history appends the
+    /// records newer than its last one (by `seq`).
+    pub recent: VecDeque<MixRecord>,
+    /// The last combined frame's combining weights per carrier.
+    pub carriers: Option<CarrierMix>,
+    /// Carrier spacing, Hz (0 before the robustness mode is known).
+    pub spacing_hz: f64,
+    /// Each branch's latest equalised MSC cells: its constellation before combining
+    /// (the combined one is [`Visuals`]' MSC constellation).
+    pub msc: [Vec<Cplx>; 2],
 }
 
 /// One service of the multiplex as the UI lists it.

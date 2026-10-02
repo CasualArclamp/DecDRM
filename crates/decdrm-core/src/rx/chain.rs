@@ -89,8 +89,9 @@ pub(super) enum ChainEvent {
     Sdc(SdcBlock),
     Msc(MscFrame),
     /// A diversity branch's multiplex frame of equalised cells, instead of `Msc`:
-    /// its position in the super frame and whether frames were lost before it.
-    MscCells { cells: Vec<EqCell>, index: usize, gap: bool },
+    /// its position in the super frame, whether frames were lost before it, and the
+    /// carrier of each cell (offset from `kmin`).
+    MscCells { cells: Vec<EqCell>, index: usize, gap: bool, carriers: Arc<[u16]>, kmin: i32 },
 }
 
 pub(super) struct ChainOutput {
@@ -136,6 +137,9 @@ pub(super) struct SymbolChain {
     msc_cells: Vec<EqCell>,
     /// MSC cells before each super-frame symbol (position of its first MSC cell).
     msc_offset: Vec<usize>,
+    /// Carrier offset (`k − kmin`) of each MSC cell of the multiplex frames at
+    /// positions 0, 1, 2 of the super frame (diversity branches hand them out).
+    frame_carriers: [Arc<[u16]>; FRAMES_PER_SUPERFRAME],
     /// Collecting a multiplex frame that started at a frame boundary.
     msc_collecting: bool,
     /// Frames were lost: restart the cell deinterleaver before the next frame.
@@ -185,6 +189,7 @@ impl SymbolChain {
             sdc_dec,
             msc_cells: Vec::new(),
             msc_offset: msc_offsets(&map),
+            frame_carriers: msc_frame_carriers(&map),
             msc_collecting: false,
             msc_gap: true,
             sf_synced: false,
@@ -268,6 +273,7 @@ impl SymbolChain {
                 self.chanest.start_timing_tracking();
             }
             self.msc_offset = msc_offsets(&map);
+            self.frame_carriers = msc_frame_carriers(&map);
             self.map = map;
             self.sdc_cells.clear();
             self.msc_cells.clear();
@@ -420,6 +426,12 @@ impl SymbolChain {
         self.vis.chan.extend_from_slice(chan);
     }
 
+    /// The latest multiplex frame's worth of equalised MSC cells (as in
+    /// [`ChainVisuals::msc`], without making the other plot data).
+    pub(super) fn msc_cells(&self) -> Vec<Cplx> {
+        self.vis_msc.iter().copied().collect()
+    }
+
     /// Snapshot of the plot data (it makes the delay–Doppler map when new symbols came,
     /// hence `&mut`).
     pub fn visuals(&mut self) -> ChainVisuals {
@@ -523,7 +535,9 @@ impl SymbolChain {
                         let frame = std::mem::take(&mut self.msc_cells);
                         if self.cells_out {
                             let gap = std::mem::replace(&mut self.msc_gap, false);
-                            events.push(ChainEvent::MscCells { cells: frame, index: pos / n_mux, gap });
+                            let index = pos / n_mux;
+                            let carriers = Arc::clone(&self.frame_carriers[index]);
+                            events.push(ChainEvent::MscCells { cells: frame, index, gap, carriers, kmin: map.kmin });
                         } else if let Some(m) = self.decode_msc(frame) {
                             events.push(ChainEvent::Msc(m));
                         }
@@ -564,6 +578,18 @@ fn msc_offsets(map: &CellMap) -> Vec<usize> {
             here
         })
         .collect()
+}
+
+/// The carrier offsets of the MSC cells of each multiplex frame of a super frame, in
+/// transmission order (the frames' cells follow `msc_carriers` symbol by symbol).
+fn msc_frame_carriers(map: &CellMap) -> [Arc<[u16]>; FRAMES_PER_SUPERFRAME] {
+    let n = map.msc_cells_per_frame.max(1);
+    let mut frames: [Vec<u16>; FRAMES_PER_SUPERFRAME] = Default::default();
+    let carriers = (0..map.symbols_per_superframe).flat_map(|sym| map.msc_carriers(sym).iter().copied());
+    for (pos, c) in carriers.take(FRAMES_PER_SUPERFRAME * n).enumerate() {
+        frames[pos / n].push(c);
+    }
+    frames.map(Arc::from)
 }
 
 fn track_reset(chanest: &mut ChannelEstimator) {

@@ -354,6 +354,19 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       through the engine. Live: CNR1 6030 kHz via Mishima and Osaka, 133 frames
       combined, 140 of 145 multiplex frames correct, no audio concealed (Mishima alone a
       minute before: 110 of 132, 20 concealed).
+      *Diversity tab* (2026-10-02, the user's request: show how the signals are mixed):
+      the combiner records every frame decoded or lost (`MixRecord`: branches, each
+      one's SNR = mean |H|²/σ² with the re-estimated noise, the combined SNR, the
+      weight share; the last `RECENT_MIX` = 256 in the snapshot, the GUI keeps 10 min)
+      and the last combined frame's weights per carrier (`CarrierMix`, from the cell
+      map's carrier of each MSC cell, which the chain now hands out with the cells);
+      `Receiver::msc_cells` gives each branch's constellation cheaply. GUI tab
+      *Diversity* (shown while diversity reception runs): weight-share bar, SNRs and
+      gain, counts, pairing; per carrier the SNRs and the share (stacked areas); frame
+      by frame the SNRs and share with marks for single-branch and lost frames; the
+      constellations of both branches and the combination. Live check on CNR1 via
+      Mishima and Osaka: 9.2 + 10.4 dB → 12.9 dB combined, fades of the two Kiwis on
+      different carriers (one at −11 dB where the other held 10 dB).
 - [x] **Plots at 60 Hz** (2026-10-01) — the plots follow the signal as fast as it
       changes, at the user's request (they updated at 10 Hz).
       *Done:* `EngineConfig::publish_interval` (100 ms by default, so the CLI is

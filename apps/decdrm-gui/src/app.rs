@@ -356,6 +356,7 @@ impl DecDrmApp {
                 &mut self.textures,
                 &mut self.settings.waterfall_fit,
                 &self.rx.history,
+                self.rx.snap.diversity.as_ref().map(|d| (d, &self.rx.diversity)),
             );
             // The Schedule tab shares the plot area's tab bar.
             if self.settings.plot_tab == PlotTab::Schedule {

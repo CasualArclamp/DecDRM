@@ -125,6 +125,8 @@ pub struct RxSession {
     pub fading: crate::fading::FadingMap,
     /// Reception figures and error rates of the last minutes.
     pub history: History,
+    /// Diversity reception: how the frames of the last minutes were combined.
+    pub diversity: crate::diversity::DiversityHistory,
     pub indicators: Indicators,
     pub data: DataServices,
     /// Non-ASCII characters of the texts received since the application last took
@@ -160,6 +162,7 @@ impl Default for RxSession {
             waterfall: Waterfall::default(),
             fading: crate::fading::FadingMap::default(),
             history: History::default(),
+            diversity: Default::default(),
             indicators: Indicators::default(),
             data: DataServices::default(),
             text_seen: String::new(),
@@ -217,6 +220,7 @@ impl RxSession {
         self.waterfall.clear();
         self.fading.clear();
         self.history.clear();
+        self.diversity.clear();
         self.indicators.clear();
         self.data.clear();
         self.sites = SiteFiles::new(self.sites.store().clone());
@@ -393,6 +397,7 @@ impl RxSession {
             let chain = &v.chain;
             self.fading.push_rows(&chain.chan_rows, chain.chan_seq, chain.kmin, chain.spacing_hz, chain.symbol_s);
             self.history.push(&snap);
+            self.diversity.push(&snap);
             self.snap = snap;
             changed = true;
         }

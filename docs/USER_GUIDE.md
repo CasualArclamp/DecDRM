@@ -88,6 +88,21 @@ decdrm rx --kiwi "http://kiwi.example:8073/?f=6140iqz10" --duration 600 --out kc
   ahead on hover), and the MSC constellation shows the combined cells. Command line:
   `decdrm rx --kiwi A --kiwi2 B --freq KHZ`. Retuning tunes both.
 
+  The **Diversity** tab (among the plots, while two Kiwis are combined) shows how the
+  two signals are mixed. Every MSC cell arrives through both Kiwis; each copy is
+  weighted by its SNR in that Kiwi (|H|²/σ²) and the two are added (maximum-ratio
+  combining), so the SNRs add up. The tab has:
+  - a bar with each Kiwi's share of the weight in the last combined frame, each Kiwi's
+    SNR, the combined SNR and its gain over the better Kiwi;
+  - the frame counts (combined, from one Kiwi alone, lost, late) and how far apart the
+    Kiwis' signals arrive;
+  - **per carrier**, each Kiwi's SNR and their sum, and each Kiwi's share of the
+    weight: the fades of a Kiwi sit on different carriers than the other's, and there
+    the other one carries the cell;
+  - **frame by frame** over the last two minutes, the SNRs and the share of the weight,
+    with marks for frames decoded from one Kiwi alone or lost;
+  - the MSC constellations of both Kiwis and of the combination.
+
   On the simulated DRM channels (`cargo test --release -p decdrm-core --test diversity
   -- --ignored --nocapture`, frames decoded of 150): AWGN at 8 dB 124 against 0 for
   either Kiwi alone; channel 4 (CCIR poor) at 10 dB 97 against 6 and 1; channel 3 (US

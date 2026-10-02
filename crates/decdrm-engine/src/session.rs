@@ -24,7 +24,7 @@ use decdrm_core::mux::text::{TextEvent, TextMessageDecoder};
 use decdrm_core::mux::msc::{LogicalFrame, stream_positions};
 use decdrm_core::mux::demultiplex;
 use decdrm_core::rx::{
-    DiversityReceiver, DiversityStats, MscConfig, MscFrame, PdsAxis, Receiver, ReceiverConfig, ReceiverEvent, RxState, RxStatus,
+    DiversityReceiver, MscConfig, MscFrame, PdsAxis, Receiver, ReceiverConfig, ReceiverEvent, RxState, RxStatus,
     SdcBlock, Visuals,
 };
 use decdrm_mdi::MdiFrame;
@@ -340,11 +340,23 @@ impl Session {
         }
     }
 
-    /// Diversity reception: the combiner's counts and each branch's status.
-    pub fn diversity(&self) -> Option<(DiversityStats, [RxStatus; 2])> {
+    /// Diversity reception: the combiner's counts and how it mixes the branches, each
+    /// branch's status and constellation.
+    pub fn diversity(&self) -> Option<crate::snapshot::DiversityView> {
         match &self.rx {
             Rx::Single(_) | Rx::Mdi(_) => None,
-            Rx::Diversity(d) => Some((d.stats(), [d.branch(0).status().clone(), d.branch(1).status().clone()])),
+            Rx::Diversity(d) => {
+                let (a, b) = (d.branch(0), d.branch(1));
+                let mode = a.status().mode.or(b.status().mode);
+                Some(crate::snapshot::DiversityView {
+                    stats: d.stats(),
+                    branches: [a.status().clone(), b.status().clone()],
+                    recent: d.recent_mix().clone(),
+                    carriers: d.carrier_mix().cloned(),
+                    spacing_hz: mode.map_or(0.0, |m| m.carrier_spacing()),
+                    msc: [a.msc_cells(), b.msc_cells()],
+                })
+            }
         }
     }
 

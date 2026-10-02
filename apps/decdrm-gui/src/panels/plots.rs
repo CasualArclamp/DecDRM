@@ -1,11 +1,12 @@
 //! Plot tabs: input spectrum and its waterfall, constellations, decoded audio, channel
-//! and its fading over time, impulse response, delay–Doppler map, SNR and the reception
-//! history.
+//! and its fading over time, impulse response, delay–Doppler map, SNR, diversity
+//! combining (`panels::diversity`) and the reception history.
 //!
 //! The plots are monitoring displays: their axes are set from the data every frame and
 //! zooming/dragging is disabled; hovering shows the value under the cursor.
 
 use super::{Palette, placeholder};
+use crate::diversity::DiversityHistory;
 use crate::history::History;
 use crate::plots::{AUDIO_FLOOR_DB, AudioPlot, DB_FLOOR, PlotData, Points, SpectrumPlot};
 use crate::settings::PlotTab;
@@ -39,9 +40,14 @@ pub fn show(
     textures: &mut PlotTextures,
     waterfall_fit: &mut bool,
     history: &History,
+    diversity: Option<(&decdrm_engine::DiversityView, &DiversityHistory)>,
 ) {
     ui.horizontal_wrapped(|ui| {
         for t in PlotTab::ALL {
+            // The Diversity tab only while diversity reception runs (or is selected).
+            if t == PlotTab::Diversity && diversity.is_none() && *tab != t {
+                continue;
+            }
             ui.selectable_value(tab, t, t.label());
         }
     });
@@ -69,6 +75,7 @@ pub fn show(
         PlotTab::Channel => channel(ui, data, &pal),
         PlotTab::Impulse => impulse(ui, data, &pal, avail.y),
         PlotTab::Snr => snr(ui, data, &pal, avail.y),
+        PlotTab::Diversity => super::diversity::show(ui, diversity, &data.msc, &data.msc_ideal, &pal),
         PlotTab::History => super::history::show(ui, history, &pal),
         // Not a plot: the application draws it below the tab bar (`panels::schedule`).
         PlotTab::Schedule => {}
@@ -140,7 +147,7 @@ fn overview(ui: &mut Ui, data: &PlotData, pal: &Palette) {
 }
 
 /// Common settings of all plots.
-fn base_plot<'a>(id: &str) -> Plot<'a> {
+pub(super) fn base_plot<'a>(id: &str) -> Plot<'a> {
     Plot::new(id)
         .allow_zoom(false)
         .allow_drag(false)
@@ -151,7 +158,7 @@ fn base_plot<'a>(id: &str) -> Plot<'a> {
 }
 
 /// Hover label `x unit_x, y unit_y` with the given decimals.
-fn hover_label(
+pub(super) fn hover_label(
     ux: &'static str,
     dx: usize,
     uy: &'static str,
@@ -417,7 +424,7 @@ fn constellation_row(ui: &mut Ui, data: &PlotData, pal: &Palette, side: f32) {
 /// One constellation: fixed ±1.5 axes on a square plot without axis labels, so the
 /// data area itself is square. The ideal points of the signalled modulation are drawn
 /// as small crosses on top of the received cells.
-fn constellation(
+pub(super) fn constellation(
     ui: &mut Ui,
     name: &str,
     points: &Points,

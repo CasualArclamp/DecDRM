@@ -261,6 +261,9 @@ pub enum PlotTab {
     /// The channel's scattering function: propagation paths by delay and Doppler.
     DelayDoppler,
     Snr,
+    /// Diversity reception: how the two KiwiSDRs' signals are combined (shown while
+    /// diversity reception runs).
+    Diversity,
     /// Reception figures and error rates of the last minutes.
     History,
     /// Broadcast schedule: the DRM stations on the air (not a plot; see
@@ -269,7 +272,7 @@ pub enum PlotTab {
 }
 
 impl PlotTab {
-    pub const ALL: [PlotTab; 12] = [
+    pub const ALL: [PlotTab; 13] = [
         Self::Overview,
         Self::Spectrum,
         Self::Waterfall,
@@ -280,6 +283,7 @@ impl PlotTab {
         Self::Impulse,
         Self::DelayDoppler,
         Self::Snr,
+        Self::Diversity,
         Self::History,
         Self::Schedule,
     ];
@@ -296,6 +300,7 @@ impl PlotTab {
             Self::Impulse => "Impulse response",
             Self::DelayDoppler => "Delay–Doppler",
             Self::Snr => "SNR per carrier",
+            Self::Diversity => "Diversity",
             Self::History => "History",
             Self::Schedule => "Schedule",
         }

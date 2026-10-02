@@ -524,7 +524,7 @@ fn publish(
     snap.input.kiwi = source.kiwi_status();
     snap.input.kiwi2 = source.kiwi_status_of(1);
     snap.input.mdi = source.mdi_status();
-    snap.diversity = session.diversity().map(|(stats, branches)| DiversityView { stats, branches });
+    snap.diversity = session.diversity();
     let st = &session.audio_stats;
     snap.audio.codec = st.codec.clone();
     snap.audio.frames_ok = st.frames_ok;

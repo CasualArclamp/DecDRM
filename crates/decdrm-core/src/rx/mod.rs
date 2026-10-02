@@ -27,7 +27,7 @@ mod mscdec;
 
 pub use chain::{CHAN_ROWS, ChainVisuals, MscConfig, MscFrame, SdcBlock};
 pub use chanest::PdsAxis;
-pub use diversity::{DiversityReceiver, DiversityStats, MscCells};
+pub use diversity::{CarrierMix, DiversityReceiver, DiversityStats, MixRecord, MscCells, RECENT_MIX};
 pub use scatter::DelayDoppler;
 pub use input::{InputFormat, RealChannel};
 
@@ -409,6 +409,12 @@ impl Receiver {
         }
     }
 
+    /// The latest multiplex frame's worth of equalised MSC cells (the MSC constellation
+    /// of [`Self::visuals`], without making the other plot data).
+    pub fn msc_cells(&self) -> Vec<Cplx> {
+        self.chain.as_ref().map(|c| c.msc_cells()).unwrap_or_default()
+    }
+
     /// Latest robustness-mode detection scores (A, B, C, D), for diagnostics.
     pub fn mode_scores(&self) -> [Real; 4] {
         self.timesync.last_mode_scores
@@ -641,9 +647,9 @@ impl Receiver {
                     self.events.push(ReceiverEvent::Sdc(b));
                 }
                 chain::ChainEvent::Msc(m) => self.events.push(ReceiverEvent::Msc(m)),
-                chain::ChainEvent::MscCells { cells, index, gap } => {
+                chain::ChainEvent::MscCells { cells, index, gap, carriers, kmin } => {
                     let time_s = self.samples_in as Real / Real::from(SAMPLE_RATE);
-                    self.events.push(ReceiverEvent::MscCells(MscCells { cells, index, gap, time_s }));
+                    self.events.push(ReceiverEvent::MscCells(MscCells { cells, index, gap, time_s, carriers, kmin }));
                 }
             }
         }
