@@ -5,7 +5,7 @@
 //! `Instant`s for the same reason.
 
 use decdrm_core::fac::{Interleaving, MscMode, SdcMode};
-use decdrm_core::rx::RxStatus;
+use decdrm_core::rx::{RxState, RxStatus};
 use decdrm_core::rx::framesync::FrameSyncState;
 use decdrm_engine::{AudioStatus, InputStatus, MscStats, Snapshot};
 use std::collections::VecDeque;
@@ -196,10 +196,23 @@ impl Indicators {
         self.msc.push(t, snap.msc.ok, snap.msc.bad);
 
         let gate = |led: Led| if running { led } else { Led::Off };
+        // MDI/RSCI input has no signal: the input light shows whether frames come, the
+        // sync lights what the RSCI receiver reports (or the FAC CRCs of plain MDI).
+        let (input, time_sync, frame_sync) = match snap.input.mdi.as_ref().filter(|_| running) {
+            Some(m) => {
+                let sync = match rx.state {
+                    RxState::Locked => Led::Green,
+                    RxState::Tracking => Led::Yellow,
+                    RxState::Acquisition => Led::Red,
+                };
+                (if m.stats.frames > 0 { Led::Green } else { Led::Yellow }, sync, sync)
+            }
+            None => (input_led(running, &snap.input), time_sync_led(running, rx), frame_sync_led(running, rx)),
+        };
         self.leds = Leds {
-            input: input_led(running, &snap.input),
-            time_sync: time_sync_led(running, rx),
-            frame_sync: frame_sync_led(running, rx),
+            input,
+            time_sync,
+            frame_sync,
             fac: gate(self.fac.led()),
             sdc: gate(self.sdc.led()),
             msc: msc_led(running, &snap.msc, &self.msc),

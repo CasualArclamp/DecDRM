@@ -99,6 +99,24 @@ pub fn show(ui: &mut Ui, rx: &RxSession) {
     });
 
     // Row 2: measurements and the input.
+    if let Some(m) = &snap.input.mdi {
+        // MDI/RSCI: what the RSCI receiver measured, and the link.
+        ui.horizontal_wrapped(|ui| {
+            value(ui, "SNR", fmt_db(r.snr_db));
+            value(ui, "MER", fmt_db(r.mer_db)).on_hover_text("MER of the MSC cells, as the RSCI receiver reports it");
+            value(ui, "WMER", fmt_db(r.wmer_db)).on_hover_text("Weighted MER of the MSC cells (RSCI receiver)");
+            value(ui, "Doppler", format!("{:.2} Hz", r.doppler_hz));
+            value(ui, "Delay", format!("{:.2} ms", r.delay_ms));
+            ui.separator();
+            value(ui, "Elapsed", fmt_time(snap.input.position_s));
+            mdi_status(ui, m);
+        });
+        if let Some(err) = &snap.error {
+            let pal = Palette::for_ui(ui);
+            ui.colored_label(pal.error, format!("Engine error: {err}"));
+        }
+        return;
+    }
     ui.horizontal_wrapped(|ui| {
         let dc = r
             .dc_frequency_hz
@@ -153,6 +171,70 @@ fn kiwi_status(ui: &mut Ui, label: &str, k: &KiwiStatus) {
     }
     let name = k.name.clone().unwrap_or_else(|| k.address.clone());
     ui.add(egui::Label::new(RichText::new(name).weak()).truncate()).on_hover_text(details.join("\n"));
+}
+
+/// An MDI/RSCI input: the link (frames, losses), the protocol and the RSCI receiver's
+/// level, frequency and name; the details on hover.
+fn mdi_status(ui: &mut Ui, m: &decdrm_engine::MdiStatus) {
+    let s = &m.stats;
+    let r = &m.rsci;
+    let light = if s.frames == 0 { Led::Yellow } else { Led::Green };
+    let name = m.protocol.as_deref().unwrap_or("MDI/RSCI");
+    led(ui, light, name, "MDI/RSCI frames arriving (yellow: none yet)");
+    let lost = if s.lost > 0 { format!(" ({} lost)", s.lost) } else { String::new() };
+    value(ui, "Frames", format!("{}{lost}", s.frames)).on_hover_text("Multiplex frames received (and missing, by their frame count)");
+    if let Some(dbuv) = r.signal_dbuv {
+        value(ui, "Signal", format!("{dbuv:.1} dBµV")).on_hover_text("Signal strength at the RSCI receiver");
+    }
+    if let Some(f) = r.frequency_hz {
+        value(ui, "Freq", format!("{:.1} kHz", f64::from(f) / 1000.0)).on_hover_text("Frequency the RSCI receiver is tuned to");
+    }
+    let mut details = vec![format!("From {}", m.origin)];
+    if let Some(l) = &m.local {
+        details.push(format!("Listening on {l}"));
+    }
+    if let Some(sender) = &m.sender {
+        details.push(format!("Sender {sender}"));
+    }
+    if let Some(p) = r.profile {
+        details.push(format!("RSCI profile {p}"));
+    }
+    if let Some(d) = &r.demodulation {
+        details.push(format!("Demodulation {}", d.trim_end_matches('_')));
+    }
+    if let Some(b) = r.bandwidth_khz {
+        details.push(format!("Filter {b:.1} kHz"));
+    }
+    if let Some(sv) = r.service {
+        details.push(format!("Service {sv} selected at the receiver"));
+    }
+    if let Some(e) = &r.audio_frame_errors {
+        details.push(format!("Audio frames at the receiver: {} of {} bad", e.iter().filter(|b| **b).count(), e.len()));
+    }
+    if let Some(g) = &r.gps
+        && let (Some(lat), Some(lon)) = (g.latitude, g.longitude)
+    {
+        details.push(format!("GPS {lat:.4}°, {lon:.4}°{}", g.satellites.map(|n| format!(", {n} satellites")).unwrap_or_default()));
+    }
+    details.push(format!(
+        "Packets {}, AF errors {}, repeats dropped {}, foreign {}",
+        s.packets, s.af_errors, s.repeats, s.foreign
+    ));
+    if s.pft.fragments > 0 {
+        details.push(format!(
+            "PFT: {} fragments, {} packets rebuilt by Reed–Solomon, {} lost",
+            s.pft.fragments, s.pft.recovered, s.pft.lost
+        ));
+    }
+    if let Some(rci) = &m.rci {
+        details.push(format!("RCI commands go to {rci}"));
+    }
+    if let Some(p) = m.progress {
+        details.push(format!("{:.0} % of the recording read", 100.0 * p));
+    }
+    let label = r.receiver_info.clone().unwrap_or_else(|| m.origin.clone());
+    ui.add(egui::Label::new(RichText::new(label).weak()).truncate()).on_hover_text(details.join("
+"));
 }
 
 /// Diversity reception: the share of frames combined from both KiwiSDRs (counts, SNRs,

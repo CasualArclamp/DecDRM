@@ -156,6 +156,52 @@ survives the gaps and jumps of a network stream: a timing jump is resynchronised
 about a second. Playback is clock-drift compensated, so it neither underruns nor
 drifts out of sync over hours.
 
+### From MDI or RSCI: a multiplex decoded elsewhere
+
+DRM's distribution interfaces carry the multiplex itself over IP: **MDI** (ETSI TS
+102 820) from a content server to a transmitter, **RSCI** (TS 102 349) from a
+receiver, with its status, to a monitoring station. Both travel in DCP packets (TS
+102 821), optionally split into fragments and protected by Reed–Solomon. DecDRM
+decodes them directly: no radio part, the services are decoded straight away.
+
+- **Over the network:** in the GUI choose *MDI/RSCI* and enter where the packets come
+  to, in Dream's syntax:
+  - `8000`, a UDP port;
+  - `239.1.2.3:8000`, a multicast group (or, with a unicast address, a local
+    interface to listen on);
+  - `192.168.1.5:239.1.2.3:8000`, the group joined on the interface with that address;
+  - `10.0.0.9:192.168.1.5:239.1.2.3:8000`, as before, from that sender only (fields
+    may be left empty: `10.0.0.9::239.1.2.3:8000`).
+- **Recordings:** *Open…* takes them like a signal recording. Supported formats:
+  - Dream's `.rsA` … `.rsZ` and `.ff` files (DCP file framing);
+  - raw AF packets or PFT fragments;
+  - pcap and pcapng captures from Wireshark or tcpdump; in the *MDI/RSCI* field,
+    `capture.pcap#8000` picks the packets to one port.
+
+  *Real time* paces a recording at one frame per 400 ms.
+- **PFT** fragments are put back together. With Reed–Solomon protection, packets with
+  lost fragments are rebuilt (the hover text of the status counts them).
+- **What shows:** with plain MDI, the services, audio, text and data. With RSCI, also
+  the receiver's status: in the status strip the MER and WMER, Doppler, delay, signal
+  strength (dBµV), frequency and the receiver's name, with its profile, GPS fix and
+  link counters on hover. Its spectrum shows on the spectrum and waterfall plots (the
+  axis is relative to the DRM signal), its impulse response on the impulse response
+  plot. There are no constellations: MDI carries the decoded bits.
+- **Controlling an RSCI receiver:** enter its RCI address in *RCI to* (a port, or
+  `host:port`). The frequency box then retunes it, and choosing a service selects it
+  there too (RCI commands `cfre` and `cser`).
+
+### Remote control (RCI)
+
+The ⚙ menu at the end of the source bar sets a UDP port on which DecDRM accepts RCI
+commands (TS 102 349, as Dream sends them):
+- `cfre` retunes a KiwiSDR (or an RSCI receiver, by RCI);
+- `cser` selects a service;
+- other commands are logged as not supported.
+
+The status strip's hover text and the log show what arrived. The setting takes effect
+at the next *Start*.
+
 ### Station schedule: what is on the air
 
 To know what to tune the SDR to, DecDRM lists the DRM broadcasts scheduled right now,
@@ -515,6 +561,54 @@ The GUI's *Transmitter* page edits the station file:
   on an audio service or data application moves that stream into the more strongly
   protected part (*Protection, part A*), outlined in the multiplex bar. The part A row
   is greyed out while no stream uses it.
+
+### Modulator: MDI from a content server
+
+With an `[mdi]` section the station transmits the multiplex a content server sends
+(MDI, ETSI TS 102 820), instead of its own services. Content servers include Dream
+`--mdiout`, commercial ones, or a recording:
+
+```toml
+[mdi]
+input = "8000"            # a UDP port, group:port, interface:group:port, or a recording
+# buffer_frames = 3       # with a sound card: frames held against network jitter
+
+[output]
+device = "CABLE-A Input"  # or file = "modulated.wav"
+```
+
+How it works:
+- The channel comes from the MDI: the robustness mode, bandwidth, modulations,
+  interleaving and protection. The `[channel]`, services, `[time]` and `[afs]`
+  sections are not used.
+- The transmission starts with the first frame of a super frame.
+- Each frame's FAC goes out as sent, the SDC in the first frame of every super frame,
+  and the streams are multiplexed by the stream lengths the MDI gives.
+- A change of channel rebuilds the transmitter at the next super frame.
+- A lost, late or damaged frame is replaced by a filler: the previous FAC, an empty
+  MSC (receivers conceal the audio), the previous SDC. The signal never stops.
+- With a sound card:
+  - silence is sent while waiting for the MDI;
+  - `buffer_frames` frames are held as a reserve;
+  - whole super frames are dropped when the content server's clock runs ahead of
+    the sound card's.
+
+The GUI's Transmitter tab has a *Modulator* card in the form and a status card:
+- waiting or transmitting, and the channel;
+- frames sent, fillers, drops, the queue;
+- the link counters.
+
+`decdrm tx` prints the same in its status lines.
+
+To try the receiver's MDI/RSCI input or the modulator without a content server, the
+example program `mdi_source` turns a station file into MDI. It writes a recording,
+or sends over UDP in real time, optionally in PFT fragments and with made-up RSCI
+status:
+
+```bash
+cargo run --release -p decdrm-station --example mdi_source -- station.toml test.rsA 60 rsci
+cargo run --release -p decdrm-station --example mdi_source -- station.toml udp:127.0.0.1:8000 600 pft
+```
 
 ### Live transmission through a sound card
 

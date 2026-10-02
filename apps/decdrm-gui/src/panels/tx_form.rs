@@ -80,11 +80,18 @@ pub fn show(ui: &mut Ui, doc: &mut DocumentMut, ctx: &mut FormCtx) -> bool {
         capacity_bar(ui, bar);
         ui.add_space(6.0);
     }
-    card(ui, "Channel", "how the signal is built", |ui| changed |= channel(ui, doc));
-    changed |= services(ui, doc, ctx);
+    let mdi = doc.get("mdi").is_some_and(Item::is_table_like);
+    card(ui, "Modulator", "MDI from a content server", |ui| changed |= modulator(ui, doc, ctx));
+    // A modulator takes the channel, the services and the clock from the MDI.
+    if !mdi {
+        card(ui, "Channel", "how the signal is built", |ui| changed |= channel(ui, doc));
+        changed |= services(ui, doc, ctx);
+    }
     card(ui, "Output", "level and format of the signal (the toolbar picks file or sound card)", |ui| changed |= output(ui, doc, ctx));
     card(ui, "Channel simulator", "impair the signal to test receivers", |ui| changed |= simulator(ui, doc));
-    card(ui, "Clock", "SDC time and date", |ui| changed |= clock(ui, doc));
+    if !mdi {
+        card(ui, "Clock", "SDC time and date", |ui| changed |= clock(ui, doc));
+    }
     ui.label(
         RichText::new("Alternative frequencies, EPG programmes and other details: TOML view.")
             .weak()
@@ -1232,6 +1239,76 @@ fn simulator(ui: &mut Ui, doc: &mut DocumentMut) -> bool {
         }
         ui.end_row();
     });
+    changed
+}
+
+/// `[mdi]`: transmit MDI from a content server instead of the services.
+fn modulator(ui: &mut Ui, doc: &mut DocumentMut, ctx: &mut FormCtx) -> bool {
+    let mut changed = false;
+    let mut on = doc.get("mdi").is_some_and(Item::is_table_like);
+    if ui
+        .checkbox(&mut on, "Transmit MDI from a content server instead of the services")
+        .on_hover_text(
+            "DecDRM as a modulator: the multiplex comes over UDP (MDI, ETSI TS 102 820) from a content server \
+             (Dream, a commercial one) or from a recording, and is transmitted as it is.",
+        )
+        .changed()
+    {
+        if on {
+            let t = section(doc, "mdi");
+            if get_str(t, "input").is_none() {
+                set(t, "input", "8000");
+            }
+        } else {
+            doc.remove("mdi");
+        }
+        changed = true;
+    }
+    if !on {
+        return changed;
+    }
+    let t = section(doc, "mdi");
+    grid(ui, "tx_form_mdi", |ui| {
+        row_label(ui, "Input");
+        ui.horizontal(|ui| {
+            let mut input = get_str(t, "input").unwrap_or_default();
+            if ui
+                .add(egui::TextEdit::singleline(&mut input).desired_width(220.0).hint_text("UDP port, group:port or a recording"))
+                .on_hover_text(
+                    "A UDP port (8000), a multicast group (239.1.2.3:8000), interface and group \
+                     (192.168.1.5:239.1.2.3:8000), a sender too (10.0.0.9:192.168.1.5:239.1.2.3:8000), or a recording \
+                     (.pcap, .rsM, …)",
+                )
+                .changed()
+            {
+                set(t, "input", input.as_str());
+                changed = true;
+            }
+            if ui.small_button("…").on_hover_text("Choose an MDI recording").clicked()
+                && let Some(p) = pick_file(ctx.base_dir, "MDI recordings", super::source::MDI_EXTENSIONS)
+            {
+                set(t, "input", p.as_str());
+                changed = true;
+            }
+        });
+        ui.end_row();
+        row_label(ui, "Reserve");
+        let mut n = get_int(t, "buffer_frames").unwrap_or(3);
+        if ui
+            .add(egui::DragValue::new(&mut n).range(1..=50).suffix(" frames"))
+            .on_hover_text("With a sound card: frames (400 ms each) held before transmitting, a reserve against network jitter")
+            .changed()
+        {
+            set(t, "buffer_frames", n);
+            changed = true;
+        }
+        ui.end_row();
+    });
+    ui.label(
+        RichText::new("The channel, the services, the clock and the alternative frequencies come from the MDI.")
+            .weak()
+            .small(),
+    );
     changed
 }
 

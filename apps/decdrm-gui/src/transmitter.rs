@@ -228,6 +228,11 @@ fn run(
             return Err(e.to_string());
         }
         if due {
+            // A modulator's channel comes with the MDI: the band marks follow it.
+            let plan = station.plan();
+            let (dc, band) = signal_band(plan.layout, plan.output.format);
+            snap.dc_hz = Some(dc);
+            snap.band_hz = Some(band);
             publish(shared, &mut snap, station.status(), &spectrum);
             last_publish = Some(Instant::now());
         }

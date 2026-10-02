@@ -250,6 +250,38 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       *Delay–Doppler*. Checked against channel model 3 (four paths, spreads
       0.1–2 Hz, in place) and on KCBS (separate ionospheric paths). The waterfall also
       fits the DRM signal now, at the spectrum's full 2048-bin resolution.
+- [x] **MDI / RSCI / DCP** (2026-10-02) — the user's choice of next feature: both
+      input roles (the receiver ← MDI/RSCI, the transmitter ← MDI as a modulator),
+      full RSCI status (Dream parity), GUI and RCI control (no CLI flags), the ETSI
+      specs to be cross-checked once downloaded (TS 102 820, 821, 349).
+      *Done:* new crate `decdrm-mdi`: AF packets, PFT (fragmentation, addressing,
+      RS(255,207) shortened, GF poly 11D, roots α⁰…α⁴⁷; byte j of fragment i is byte
+      j·F + i of the RS block; Karn's errors-and-erasures decoder, lost fragments as
+      erasures), TAG items, MDI frames (`*ptr dlfc fac_ sdc_ sdci robm str0-3 info`),
+      RSCI status (every item Dream reads or writes, `rpil` included), RCI commands
+      (`cact cfre cdmo crec cpro cser`), recordings (TS 102 821 annex B file framing,
+      raw AF/PFT, pcap and pcapng with IPv4 reassembly), UDP in Dream's origin syntax
+      (multicast join on an interface, source filter in software; std only), dlfc
+      repeat/loss logic as Dream's. Engine: `InputSpec::Mdi`, `Session::new_mdi`/
+      `push_mdi` (FAC/SDC into the ensemble, the streams to the decoders via the
+      demultiplexer-free `on_logical`), RSCI items as the receiver status (MER, WMER,
+      FAC WMER, Doppler, delay, sync) and plots (`rpsd` at −7.875 kHz + 0.1875 kHz per
+      value relative to the DC carrier, a waterfall row per frame; `rpir` as the PDS),
+      tune and service selection to the RSCI receiver by RCI, `EngineConfig::
+      rci_listen` (RCI commands → engine commands), snapshot `input.mdi`, `remote`.
+      Station: the modulator (`[mdi]`: input, buffer_frames; alignment by the FAC frame
+      identity, fillers for lost/late/damaged frames, dlfc for late ones, transmitter
+      and output stage rebuilt on a channel change at a super frame start, a reserve
+      and super-frame trimming with a sound card, services from the MDI's FAC/SDC in
+      the status), `capture_mdi` (a frame as MDI) and the `mdi_source` example. GUI:
+      *MDI/RSCI* source (address, recording picker, RCI address, frequency → RCI),
+      MDI recordings via *Open…*, status strip (link, profile, signal, frequency,
+      receiver name, details), ⚙ remote control; Transmitter tab *Modulator* form card
+      and status card. Tests: crate units (RS limits, PFT with losses, recordings,
+      UDP), end to end a station's MDI recording through the engine, RSCI over UDP
+      with PFT/FEC and a lost fragment per packet plus RCI back, RCI remote control,
+      the modulator from a recording (receiver decodes it with no audio lost) and from
+      UDP with a lost frame filled.
 - [x] **Live Journaline updates** (2026-10-02) — GitHub issue #1: the page file
       edited while transmitting reaches the air without a restart.
       *Done:* `JournalineEncoder::replace_all` (decdrm-data) makes the carousel carry

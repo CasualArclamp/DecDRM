@@ -169,3 +169,10 @@ duration_min = 60
 # latitude_extent = 15        # degrees to the north
 # longitude_extent = 30       # degrees to the east
 # ciraf = [27, 28]            # CIRAF zones (optional)
+
+# --- Modulator: transmit MDI from a content server instead of the services above -----
+# With this section the channel, services, clock and AFS come from the MDI (ETSI TS
+# 102 820) and the sections above are not used; [output] and [simulate] still are.
+# [mdi]
+# input = "8000"              # UDP port, group:port, interface:group:port, or a recording
+# buffer_frames = 3           # with a sound card: frames held against network jitter

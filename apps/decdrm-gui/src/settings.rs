@@ -25,6 +25,38 @@ pub enum SourceKind {
     Device,
     /// A KiwiSDR on the internet, tuned by DecDRM (its I/Q).
     Kiwi,
+    /// MDI or RSCI over UDP (or a recording): a multiplex decoded elsewhere.
+    Mdi,
+}
+
+/// The MDI/RSCI source (an `[mdi]` table in the file).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MdiSourceSettings {
+    /// Where it comes from: a UDP port, `group:port`, `interface:group:port` or
+    /// `source:interface:group:port` (Dream's syntax), or a recording.
+    pub origin: String,
+    /// Send RCI commands (tune, select a service) to the RSCI receiver here
+    /// (`port`, `host:port`); empty: none.
+    pub rci: String,
+    /// Frequency to tune the RSCI receiver to by RCI, kHz (0: not set).
+    pub freq_khz: f64,
+}
+
+impl MdiSourceSettings {
+    /// The engine input, or what is wrong.
+    pub fn input(&self, realtime: bool) -> Result<decdrm_engine::InputSpec, String> {
+        use decdrm_engine::decdrm_mdi::source::MdiOrigin;
+        if self.origin.trim().is_empty() {
+            return Err("enter the UDP port the MDI/RSCI comes to (or group:port), or a recording".into());
+        }
+        let origin = MdiOrigin::parse(&self.origin).map_err(|e| format!("MDI/RSCI: {e}"))?;
+        let rci = match self.rci.trim() {
+            "" => None,
+            r => Some(r.parse().map_err(|e| format!("RCI address: {e}"))?),
+        };
+        Ok(decdrm_engine::InputSpec::Mdi(decdrm_engine::MdiSpec { origin, realtime, rci }))
+    }
 }
 
 /// The KiwiSDR source.
@@ -387,6 +419,11 @@ pub struct Settings {
     pub schedule: crate::schedule::ScheduleSettings,
     /// The KiwiSDR source (a `[kiwi]` table in the file).
     pub kiwi: KiwiSettings,
+    /// The MDI/RSCI source.
+    pub mdi: MdiSourceSettings,
+    /// Remote control: listen for RCI commands here (a UDP port, or `address:port`);
+    /// empty: off.
+    pub rci_listen: String,
 }
 
 pub use decdrm_engine::volume_gain;
@@ -421,6 +458,8 @@ impl Default for Settings {
             tx_duration_s: 60.0,
             schedule: crate::schedule::ScheduleSettings::default(),
             kiwi: KiwiSettings::default(),
+            mdi: MdiSourceSettings::default(),
+            rci_listen: String::new(),
         }
     }
 }
@@ -443,9 +482,15 @@ impl Settings {
                     .file
                     .clone()
                     .ok_or("no recording selected — use \"Open…\" first")?;
-                InputSpec::File {
-                    path,
-                    realtime: self.realtime,
+                // A recording of MDI/RSCI packets rather than of a signal.
+                if decdrm_engine::decdrm_mdi::file::has_recording_extension(&path) {
+                    let origin = decdrm_engine::decdrm_mdi::source::MdiOrigin::File { path, port: None };
+                    InputSpec::Mdi(decdrm_engine::MdiSpec { origin, realtime: self.realtime, rci: None })
+                } else {
+                    InputSpec::File {
+                        path,
+                        realtime: self.realtime,
+                    }
                 }
             }
             SourceKind::Device => InputSpec::Device {
@@ -455,6 +500,11 @@ impl Settings {
             },
             // Always I/Q: the engine sets the receiver's format itself.
             SourceKind::Kiwi => self.kiwi.input()?,
+            SourceKind::Mdi => self.mdi.input(self.realtime)?,
+        };
+        let rci_listen = match self.rci_listen.trim() {
+            "" => None,
+            r => Some(r.parse().map_err(|e| format!("remote control (RCI) address: {e}"))?),
         };
         // `..EngineConfig::default()` ("struct update syntax") takes every field not
         // named here from the engine's defaults, so this keeps compiling when the
@@ -472,6 +522,7 @@ impl Settings {
             volume: volume_gain(self.volume),
             data_dir: self.data_dir.clone(),
             publish_interval: crate::receiver::PUBLISH_INTERVAL,
+            rci_listen,
             ..EngineConfig::default()
         })
     }
@@ -508,6 +559,10 @@ impl Settings {
                 self.kiwi.freq_khz
             ),
             SourceKind::Kiwi => format!("KiwiSDR {} at {:.1} kHz (I/Q)", self.kiwi.address.trim(), self.kiwi.freq_khz),
+            SourceKind::Mdi => {
+                let rci = if self.mdi.rci.trim().is_empty() { String::new() } else { format!(", RCI to {}", self.mdi.rci.trim()) };
+                format!("MDI/RSCI {}{rci}", self.mdi.origin.trim())
+            }
         }
     }
 
@@ -686,6 +741,8 @@ mod tests {
                 // Not saved.
                 password: String::new(),
             },
+            mdi: MdiSourceSettings { origin: "239.1.2.3:8000".into(), rci: "192.168.1.9:8001".into(), freq_khz: 6030.0 },
+            rci_listen: "8002".into(),
         };
         let text = to_toml(&s).unwrap();
         assert!(text.contains("format = \"iq-swapped\""), "{text}");

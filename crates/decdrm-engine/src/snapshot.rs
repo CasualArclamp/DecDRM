@@ -53,6 +53,17 @@ pub struct InputStatus {
     pub mdi: Option<MdiStatus>,
 }
 
+/// The remote control (RCI commands, see `EngineConfig::rci_listen`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RemoteControlStatus {
+    /// The address listened on.
+    pub listen: String,
+    /// Commands carried out.
+    pub commands: u64,
+    /// The last of them.
+    pub last: Option<String>,
+}
+
 /// An MDI/RSCI input (see `InputSpec::Mdi`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MdiStatus {
@@ -266,6 +277,8 @@ pub struct Snapshot {
     pub afs: Vec<String>,
     /// Diversity reception: the combiner's counts and both branches' status.
     pub diversity: Option<DiversityView>,
+    /// The remote control (RCI), when listening.
+    pub remote: Option<RemoteControlStatus>,
     /// The figures every [`METRICS_INTERVAL_S`] of input, the last [`RECENT_METRICS`]
     /// of them, oldest first. A UI keeping a longer history appends the samples newer
     /// than the last one it has, so it gets every sample whatever the decoding speed.

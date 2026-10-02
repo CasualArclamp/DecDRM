@@ -295,3 +295,36 @@ fn modulator_fills_lost_frames() {
     assert!(ok >= 100, "{ok} audio frames ok");
     assert!(texts.iter().any(|t| t == "Hello MDI"), "{texts:?}");
 }
+
+/// Remote control: RCI commands sent to the engine select a service and ask for a
+/// retune (which an MDI recording cannot follow: the log says so).
+#[test]
+fn remote_control_by_rci() {
+    use decdrm_engine::decdrm_mdi::rci::RciSender;
+    let frames = station_mdi(25);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("station.rsM");
+    let mut w = DcpFileWriter::create(&path, FileKind::FileIo, 0).unwrap();
+    for (i, f) in frames.iter().enumerate() {
+        w.write_packet(&f.to_af(i as u16).to_bytes(), None).unwrap();
+    }
+    w.finish().unwrap();
+    let origin = MdiOrigin::parse(path.to_str().unwrap()).unwrap();
+    let input = InputSpec::Mdi(MdiSpec { origin, realtime: true, rci: None });
+    let rci_listen = Some(UdpOrigin { port: 0, group: Some(Ipv4Addr::LOCALHOST), interface: None, source: None });
+    let engine = Engine::start(EngineConfig { input, rci_listen, ..EngineConfig::default() });
+    let mut log = Vec::new();
+    assert!(run_until(&engine, &mut log, Duration::from_secs(10), |s| s.remote.is_some()), "{log:#?}");
+    let listen = engine.snapshot().remote.unwrap().listen;
+    let port: u16 = listen.rsplit(':').next().unwrap().parse().unwrap();
+    let mut rci = RciSender::new(&format!("127.0.0.1:{port}").parse().unwrap()).unwrap();
+    rci.send(&[RciCommand::Service(0), RciCommand::Frequency(9_710_000), RciCommand::Recording { kind: *b"iq", profile: b'A', on: true }]).unwrap();
+    assert!(run_until(&engine, &mut log, Duration::from_secs(10), |s| s.remote.as_ref().is_some_and(|r| r.commands >= 2)), "{log:#?}");
+    let remote = engine.snapshot().remote.unwrap();
+    drop(engine);
+    assert_eq!(remote.last.as_deref(), Some("tune to 9710.000 kHz"));
+    let has = |text: &str| log.iter().any(|l| l.contains(text));
+    assert!(has("select service 0"), "{log:#?}");
+    assert!(has("can be retuned"), "{log:#?}");
+    assert!(has("start iq recording (profile A): not supported"), "{log:#?}");
+}

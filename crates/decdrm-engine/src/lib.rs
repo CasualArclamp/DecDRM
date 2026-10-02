@@ -23,7 +23,7 @@ pub use logger::{LogConfig, LogFormat};
 pub use session::{MscStats, Session, SessionEvent};
 pub use snapshot::{
     AppView, AudioCodingView, AudioSpectrum, AudioStatus, BroadcastTime, DiversityView, InputStatus, METRICS_INTERVAL_S,
-    MdiStatus, MetricsSample, RECENT_METRICS, RecordingStatus, ServiceView, Snapshot,
+    MdiStatus, MetricsSample, RECENT_METRICS, RecordingStatus, RemoteControlStatus, ServiceView, Snapshot,
 };
 pub use source::{Input, InputSpec, MdiSpec, Source, SourceInfo};
 
@@ -67,6 +67,8 @@ pub struct EngineConfig {
     /// status line), 1/60 s for the GUI's plots, which then follow the channel symbol
     /// by symbol. Live input is read in pieces no longer than this.
     pub publish_interval: Duration,
+    /// Remote control: accept RCI commands (TS 102 349) here — tune, select a service.
+    pub rci_listen: Option<decdrm_mdi::net::UdpOrigin>,
 }
 
 impl Default for EngineConfig {
@@ -82,6 +84,7 @@ impl Default for EngineConfig {
             data_dir: None,
             log: None,
             publish_interval: Duration::from_millis(100),
+            rci_listen: None,
         }
     }
 }
@@ -252,6 +255,24 @@ fn worker(
         log(format!("input: {} ({} Hz, {} ch)", info.name, info.sample_rate, info.channels), &mut snap);
     }
 
+    // Remote control: RCI commands become engine commands.
+    let mut remote = match &cfg.rci_listen {
+        Some(o) => match decdrm_mdi::rci::RciListener::bind(o) {
+            Ok(l) => {
+                let at = l.local_addr().map_or_else(|_| o.to_string(), |a| a.to_string());
+                log(format!("remote control (RCI): listening on {at}"), &mut snap);
+                snap.remote = Some(RemoteControlStatus { listen: at, ..RemoteControlStatus::default() });
+                Some(l)
+            }
+            Err(e) => {
+                log(format!("remote control (RCI): cannot listen on {o}: {e}"), &mut snap);
+                None
+            }
+        },
+        None => None,
+    };
+    let mut last_remote_poll = Instant::now();
+
     let started = Instant::now();
     let mut last_publish = Instant::now() - Duration::from_secs(1);
     // Input position of the latest decoded audio (for blanking a stale audio spectrum).
@@ -261,7 +282,33 @@ fn worker(
     let chunk_s = cfg.publish_interval.as_secs_f64().clamp(0.005, 0.05);
     let chunk_frames = ((f64::from(info.sample_rate) * chunk_s) as usize).max(64);
     loop {
-        for c in cmd_rx.try_iter() {
+        // Commands from the remote control, at most every 50 ms (a recording is decoded
+        // in many short steps).
+        let mut remote_commands = Vec::new();
+        if let Some(l) = remote.as_mut()
+            && last_remote_poll.elapsed() >= Duration::from_millis(50)
+        {
+            last_remote_poll = Instant::now();
+            for (rci, from) in l.poll(Duration::from_millis(1)).unwrap_or_default() {
+                let what = rci.describe();
+                let command = match rci {
+                    decdrm_mdi::RciCommand::Frequency(hz) => Some(Command::Tune(f64::from(hz) / 1000.0)),
+                    decdrm_mdi::RciCommand::Service(id) => Some(Command::SelectService(id)),
+                    decdrm_mdi::RciCommand::Demodulation(m) if m.starts_with("drm") => None,
+                    _ => {
+                        log(format!("remote control from {from}: {what}: not supported"), &mut snap);
+                        continue;
+                    }
+                };
+                log(format!("remote control from {from}: {what}"), &mut snap);
+                if let Some(r) = snap.remote.as_mut() {
+                    r.commands += 1;
+                    r.last = Some(what);
+                }
+                remote_commands.extend(command);
+            }
+        }
+        for c in cmd_rx.try_iter().chain(remote_commands) {
             match c {
                 Command::Stop => {
                     if let Some(line) = finish_audio(&mut audio)? {

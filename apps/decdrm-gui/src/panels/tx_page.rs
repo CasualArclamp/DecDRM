@@ -230,7 +230,8 @@ impl TxPage {
         let (checked, result) =
             match tx_config::check(&self.text, &base, &Self::overrides(settings)) {
                 Ok((cfg, plan)) => {
-                    self.bar = Some(PlanBar::of(&cfg, &plan));
+                    // A modulator's multiplex comes with the MDI.
+                    self.bar = plan.mdi.is_none().then(|| PlanBar::of(&cfg, &plan));
                     (
                         Checked::Ok {
                             plan: plan.describe(&cfg),
@@ -534,6 +535,7 @@ impl TxPage {
                 self.header_card(ui, settings, tx, allow_device, &pal);
                 self.problems_card(ui, &pal);
                 output_card(ui, tx, &pal);
+                modulator_card(ui, tx, &pal);
                 if !tx.spectrum.points.is_empty() {
                     card(ui, "Output spectrum", "", |ui| {
                         spectrum_plot(ui, "tx_spectrum", "output spectrum", &tx.spectrum, &pal, 160.0);
@@ -657,6 +659,11 @@ impl TxPage {
     fn multiplex_card(&self, ui: &mut Ui) {
         card(ui, "Multiplex", "", |ui| {
             match (&self.bar, &self.checked) {
+                (None, Some((Checked::Ok { plan, output }, _))) => {
+                    // A modulator: the multiplex comes with the MDI.
+                    ui.add(egui::Label::new(RichText::new(plan).weak()).wrap());
+                    ui.add(egui::Label::new(RichText::new(output).weak().small()).wrap());
+                }
                 (Some(bar), Some((Checked::Ok { plan, output }, text))) => {
                     capacity_bar(ui, bar);
                     if *text != self.text {
@@ -713,6 +720,10 @@ fn output_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
             ui.label(if s.clipped_samples > 0 { clipped.color(pal.error) } else { clipped })
                 .on_hover_text("Output samples limited to full scale so far.");
             ui.end_row();
+            if s.mdi.is_some() {
+                // A modulator sends the SDC that comes with the MDI.
+                return;
+            }
             ui.label(RichText::new("SDC").weak());
             let fill = if s.sdc_capacity > 0 { s.sdc_bytes_used as f32 / s.sdc_capacity as f32 } else { 0.0 };
             ui.add(
@@ -727,6 +738,64 @@ fn output_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
                 ui.end_row();
             }
         });
+    });
+}
+
+/// A modulator's MDI input: waiting or transmitting, the channel, frames, fillers,
+/// the queue and the link.
+fn modulator_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
+    let Some(m) = &tx.snap.status.mdi else { return };
+    card(ui, "Modulator", "MDI from a content server", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let (light, state) = if m.waiting {
+                (WARN, if m.frames == 0 && m.link.frames == 0 { "waiting for MDI" } else { "waiting for a super frame" })
+            } else {
+                (GOOD, "transmitting the MDI")
+            };
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+            ui.painter().circle_filled(rect.center(), 4.0, if tx.is_running() { light } else { ui.visuals().weak_text_color() });
+            ui.label(RichText::new(state).strong());
+            if let Some(c) = &m.channel {
+                ui.label(RichText::new(c).weak());
+            }
+        });
+        egui::Grid::new("tx_modulator").num_columns(2).spacing([12.0, 3.0]).show(ui, |ui| {
+            value(ui, "Input", m.input.as_str());
+            ui.end_row();
+            if let Some(s) = &m.sender {
+                value(ui, "Content server", s.as_str());
+                ui.end_row();
+            }
+            if let Some(p) = &m.protocol {
+                value(ui, "Protocol", p.as_str());
+                ui.end_row();
+            }
+            value(ui, "Frames sent", m.frames.to_string());
+            ui.end_row();
+            let fillers = RichText::new(m.fillers.to_string()).monospace();
+            ui.label(RichText::new("Fillers").weak());
+            ui.label(if m.fillers > 0 { fillers.color(pal.error) } else { fillers })
+                .on_hover_text("Frames sent without MDI in place of lost, late or damaged ones (receivers conceal them)");
+            ui.end_row();
+            value(ui, "Dropped", m.dropped.to_string())
+                .on_hover_text("MDI frames thrown away: late, damaged, or to keep the queue short when the content server's clock runs ahead");
+            ui.end_row();
+            value(ui, "Queued", format!("{} frames", m.queued));
+            ui.end_row();
+            let l = &m.link;
+            let mut link = format!("{} packets, {} frames, {} lost", l.packets, l.frames, l.lost);
+            if l.pft.fragments > 0 {
+                link.push_str(&format!(", {} rebuilt by Reed–Solomon", l.pft.recovered));
+            }
+            if l.af_errors > 0 {
+                link.push_str(&format!(", {} damaged", l.af_errors));
+            }
+            value(ui, "Link", link);
+            ui.end_row();
+        });
+        if m.ended {
+            ui.label(RichText::new("The recording has been read to the end.").weak().small());
+        }
     });
 }
 

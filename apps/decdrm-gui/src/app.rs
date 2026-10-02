@@ -242,8 +242,8 @@ impl DecDrmApp {
     /// Retune the running KiwiSDR to the frequency in the source bar (another station:
     /// the views start afresh, the connection stays).
     fn tune_kiwi(&mut self) {
-        let khz = self.settings.kiwi.freq_khz;
-        if !khz.is_finite() || khz <= 0.0 || self.rx.kiwi_freq_khz().is_some_and(|f| (f - khz).abs() < 1e-6) {
+        let khz = if self.settings.source == SourceKind::Mdi { self.settings.mdi.freq_khz } else { self.settings.kiwi.freq_khz };
+        if !khz.is_finite() || khz <= 0.0 || self.rx.tuned_freq_khz().is_some_and(|f| (f - khz).abs() < 1e-6) {
             return;
         }
         self.slideshow.clear();
@@ -305,7 +305,7 @@ impl DecDrmApp {
                 &mut self.devices,
                 self.rx.is_running(),
                 self.rx.is_stopping(),
-                self.rx.kiwi().is_some(),
+                self.rx.tunable(),
             );
             if let Some(n) = &self.notice {
                 ui.colored_label(ui.visuals().warn_fg_color, n);

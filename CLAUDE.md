@@ -24,6 +24,12 @@ milestone checklist (keep it current).
   and the KCBS framing (`kcbs`), for recognition only. The optional 3GPP decoder was
   removed (2026-10-01) so the repo can be public: never add 3GPP/EVS reference code
   (copyright, patent-licensed codec).
+- `crates/decdrm-mdi` — MDI (TS 102 820), RSCI/RCI (TS 102 349) over DCP (TS 102 821):
+  AF/PFT (Reed–Solomon `rs`), TAG items, `MdiFrame`, `RsciStatus`, `RciCommand`,
+  recordings (`.rsX`, pcap/pcapng, raw), UDP in Dream's address syntax, `MdiInput`.
+  Engine input `InputSpec::Mdi` (`Session::push_mdi`), `EngineConfig::rci_listen`;
+  the station's modulator (`[mdi]`, `modulator.rs`) and `Station::capture_mdi`
+  (`--example mdi_source` makes test MDI). No MDI output role (not asked for).
 - `crates/decdrm-kiwi` — KiwiSDR client (WebSocket protocol after kiwiclient, typed
   path `/no_wf/<ts>/SND`, own upgrade handshake for the proxy's HTTP/1.0 redirects,
   tungstenite framing), `KiwiStream` (thread + I/Q FIFO; `tune` retunes on the open

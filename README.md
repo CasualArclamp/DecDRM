@@ -68,6 +68,12 @@ encoding) and libopus.
   not matter). On simulated fading channels it decodes almost every frame where each
   KiwiSDR alone loses most of them (`decdrm rx --kiwi A --kiwi2 B --freq KHZ`; in the
   GUI a *2nd KiwiSDR* field).
+- MDI and RSCI (ETSI TS 102 820, 102 349 over DCP, TS 102 821), with Dream parity:
+  the receiver decodes MDI or RSCI from UDP (multicast too) or recordings
+  (Dream's `.rsX`, pcap, pcapng), with PFT fragments rebuilt by Reed–Solomon. It shows
+  an RSCI receiver's status, spectrum and impulse response, retunes it by RCI, and
+  accepts RCI itself. The transmitter works as a **modulator** for MDI from a content
+  server (`[mdi]` in the station file), filling lost frames so the signal never stops.
 - Station schedule, like Dream's *Stations* dialog: the DRM broadcasts on the air now
   from EiBi's or Dream's schedule (downloaded on request), in the GUI's *Schedule* tab
   and with `decdrm schedule`; a frequency in a recording's file name (KiwiSDR

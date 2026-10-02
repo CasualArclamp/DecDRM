@@ -1,5 +1,6 @@
-//! Source bar: recording, sound card or KiwiSDR, input format, spectrum options, audio
-//! output and the Start / Stop / Restart buttons.
+//! Source bar: recording, sound card, KiwiSDR or MDI/RSCI, input format, spectrum
+//! options, audio output and the Start / Stop / Restart buttons; the ⚙ menu holds the
+//! remote control (RCI).
 
 use crate::settings::{ChannelChoice, Settings, SignalFormat, SourceKind};
 use eframe::egui::{self, ComboBox, RichText, Ui};
@@ -13,9 +14,14 @@ pub enum SourceAction {
     Restart,
     /// Open the list of public KiwiSDRs.
     FindKiwi,
-    /// Retune the running KiwiSDR to the frequency in the bar.
+    /// Retune the running KiwiSDR (or RSCI receiver) to the frequency in the bar.
     Tune,
 }
+
+/// File name extensions of MDI/RSCI recordings for the Open dialog (Dream writes
+/// `.rsA`…`.rsZ`, the letter being the RSCI profile).
+pub const MDI_EXTENSIONS: &[&str] =
+    &["rsa", "rsb", "rsc", "rsd", "rsq", "rsm", "ff", "af", "pf", "pft", "mdi", "dcp", "rsci", "pcap", "pcapng"];
 
 /// Sound-card names, enumerated on first use (WASAPI/ALSA enumeration takes a moment,
 /// so it is not done every frame) and on "refresh".
@@ -91,24 +97,38 @@ pub fn show(
             ui.selectable_value(&mut settings.source, SourceKind::Device, "Sound card");
             ui.selectable_value(&mut settings.source, SourceKind::Kiwi, "KiwiSDR")
                 .on_hover_text("Receive from a KiwiSDR on the internet: DecDRM tunes it and takes its I/Q.");
+            ui.selectable_value(&mut settings.source, SourceKind::Mdi, "MDI/RSCI").on_hover_text(
+                "A DRM multiplex decoded elsewhere, over UDP: MDI from a content server, or RSCI from a receiver \
+                 (Dream, a monitoring receiver) with its status. No radio part: the services are decoded straight away.",
+            );
             ui.separator();
         });
         match settings.source {
             SourceKind::File => enabled(ui, free, |ui| file_picker(ui, settings)),
             SourceKind::Device => enabled(ui, free, |ui| device_picker(ui, settings, devices)),
             SourceKind::Kiwi => action = kiwi_picker(ui, settings, free, tunable),
+            SourceKind::Mdi => action = mdi_picker(ui, settings, free, tunable),
         }
+        let mdi_file = settings.source == SourceKind::File
+            && settings.file.as_deref().is_some_and(decdrm_engine::decdrm_mdi::file::has_recording_extension);
         enabled(ui, free, |ui| {
             ui.separator();
             if settings.source == SourceKind::Kiwi {
                 ui.label(RichText::new("I/Q").weak()).on_hover_text("A KiwiSDR delivers I/Q; the format setting does not apply.");
+            } else if settings.source == SourceKind::Mdi || mdi_file {
+                ui.label(RichText::new("multiplex").weak())
+                    .on_hover_text("MDI/RSCI carries the decoded multiplex: no signal format, no spectrum options.");
             } else {
                 format_picker(ui, settings);
             }
-            ui.checkbox(&mut settings.flip, "Flip").on_hover_text("Mirror the spectrum (e.g. LSB reception).");
-            ui.checkbox(&mut settings.auto_flip, "Auto-flip")
-                .on_hover_text("Also accept spectrally inverted signals during acquisition.");
-            if settings.source == SourceKind::File {
+            if settings.source != SourceKind::Mdi && !mdi_file {
+                ui.checkbox(&mut settings.flip, "Flip").on_hover_text("Mirror the spectrum (e.g. LSB reception).");
+                ui.checkbox(&mut settings.auto_flip, "Auto-flip")
+                    .on_hover_text("Also accept spectrally inverted signals during acquisition.");
+            }
+            let mdi_recording = settings.source == SourceKind::Mdi
+                && decdrm_engine::decdrm_mdi::file::has_recording_extension(Path::new(settings.mdi.origin.trim()));
+            if settings.source == SourceKind::File || mdi_recording {
                 ui.checkbox(&mut settings.realtime, "Real time")
                     .on_hover_text("Pace the recording to real time instead of decoding it as fast as possible.");
             }
@@ -130,6 +150,7 @@ pub fn show(
         } else if ui.button(RichText::new("▶ Start").strong()).clicked() {
             action = Some(SourceAction::Start);
         }
+        enabled(ui, free, |ui| receiver_options(ui, settings));
     });
     if let Some(e) = &devices.error {
         ui.colored_label(ui.visuals().warn_fg_color, e);
@@ -154,6 +175,7 @@ fn file_picker(ui: &mut Ui, settings: &mut Settings) {
         let mut dialog = rfd::FileDialog::new()
             .set_title("Open a DRM recording")
             .add_filter("Recordings (WAV, FLAC)", &["flac", "wav"])
+            .add_filter("Multiplex recordings (MDI/RSCI, pcap)", MDI_EXTENSIONS)
             .add_filter("All files", &["*"]);
         if let Some(dir) = settings
             .file
@@ -256,6 +278,76 @@ fn kiwi_options(ui: &mut Ui, settings: &mut Settings, action: &mut Option<Source
     if ui.button("Find…").on_hover_text("Choose from the public KiwiSDRs whose owners allow apps").clicked() {
         *action = Some(SourceAction::FindKiwi);
     }
+}
+
+/// The MDI/RSCI source: where it comes from (or a recording), where RCI commands go,
+/// and the frequency to tune an RSCI receiver to (typed while it runs: retune).
+fn mdi_picker(ui: &mut Ui, settings: &mut Settings, free: bool, tunable: bool) -> Option<SourceAction> {
+    let mut action = None;
+    let m = &mut settings.mdi;
+    enabled(ui, free, |ui| {
+        ui.add(egui::TextEdit::singleline(&mut m.origin).desired_width(170.0).hint_text("UDP port or group:port"))
+            .on_hover_text(
+                "Where the MDI/RSCI comes to: a UDP port (8000), a multicast group (239.1.2.3:8000), an interface \
+                 and group (192.168.1.5:239.1.2.3:8000), a sender too (10.0.0.9:192.168.1.5:239.1.2.3:8000) — or a \
+                 recording (.rsA, .pcap, …)",
+            );
+        if ui.small_button("…").on_hover_text("Choose an MDI/RSCI recording").clicked() {
+            let mut dialog = rfd::FileDialog::new()
+                .set_title("Open an MDI/RSCI recording")
+                .add_filter("Multiplex recordings (MDI/RSCI, pcap)", MDI_EXTENSIONS)
+                .add_filter("All files", &["*"]);
+            if let Some(dir) = Path::new(m.origin.trim()).parent().filter(|d| d.is_dir()) {
+                dialog = dialog.set_directory(dir);
+            }
+            if let Some(path) = dialog.pick_file() {
+                m.origin = path.display().to_string();
+            }
+        }
+        ui.add(egui::TextEdit::singleline(&mut m.rci).desired_width(130.0).hint_text("RCI to (optional)")).on_hover_text(
+            "Remote control of the RSCI receiver: its RCI address (port, or host:port). The frequency below \
+             retunes it, and choosing a service selects it there too.",
+        );
+    });
+    let can_tune = !m.rci.trim().is_empty();
+    let freq = ui
+        .add_enabled(
+            (free && can_tune) || tunable,
+            egui::DragValue::new(&mut m.freq_khz)
+                .range(0.0..=32_000.0)
+                .speed(1.0)
+                .max_decimals(1)
+                .suffix(" kHz")
+                .update_while_editing(!tunable),
+        )
+        .on_hover_text("Frequency to tune the RSCI receiver to (by RCI): type and press Enter while it runs")
+        .on_disabled_hover_text("Tuning needs the RSCI receiver's RCI address");
+    if tunable && ((freq.changed() && !freq.dragged()) || freq.drag_stopped()) {
+        action = Some(SourceAction::Tune);
+    }
+    action
+}
+
+/// The ⚙ menu: the remote control (RCI) of this receiver.
+fn receiver_options(ui: &mut Ui, settings: &mut Settings) {
+    let on = !settings.rci_listen.trim().is_empty();
+    ui.menu_button(if on { "⚙ RCI" } else { "⚙" }, |ui| {
+        ui.label(RichText::new("Remote control (RCI)").strong());
+        ui.horizontal(|ui| {
+            ui.label("Listen on");
+            ui.add(egui::TextEdit::singleline(&mut settings.rci_listen).desired_width(120.0).hint_text("UDP port"));
+        });
+        ui.label(
+            RichText::new(
+                "RCI commands (TS 102 349, as Dream sends them) to this port tune a KiwiSDR or an RSCI receiver \
+                 and select services. Empty: off. Takes effect at the next Start.",
+            )
+            .weak()
+            .small(),
+        );
+    })
+    .response
+    .on_hover_text(if on { "Remote control (RCI) is on" } else { "Receiver options: remote control (RCI)" });
 }
 
 fn device_picker(ui: &mut Ui, settings: &mut Settings, devices: &mut DeviceLists) {

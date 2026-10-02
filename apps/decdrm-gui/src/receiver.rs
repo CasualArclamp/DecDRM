@@ -142,6 +142,8 @@ pub struct RxSession {
     pub source_label: String,
     /// The KiwiSDR the running engine receives from (it can be retuned).
     kiwi: Option<KiwiAddress>,
+    /// The running engine shows an RSCI receiver it can retune by RCI.
+    rci_tunable: bool,
     /// Live sound-card input (slideshow trigger times use the wall clock).
     live: bool,
     epoch: Instant,
@@ -167,6 +169,7 @@ impl Default for RxSession {
             texts: VecDeque::new(),
             source_label: String::new(),
             kiwi: None,
+            rci_tunable: false,
             live: false,
             epoch: Instant::now(),
         }
@@ -196,6 +199,7 @@ impl RxSession {
             },
             _ => None,
         };
+        self.rci_tunable = matches!(&cfg.input, InputSpec::Mdi(m) if m.rci.is_some());
         self.clear_views();
         self.sites = SiteFiles::new(match &cfg.data_dir {
             Some(dir) => SiteStore::Engine(dir.clone()),
@@ -230,10 +234,26 @@ impl RxSession {
         self.snap.input.kiwi.as_ref().map(|k| k.freq_khz)
     }
 
-    /// Retune the running KiwiSDR to `freq_khz`: another station, so the views start
-    /// afresh (the engine keeps the connection and restarts the receiver).
+    /// The running engine can be retuned: a KiwiSDR, or an RSCI receiver by RCI.
+    pub fn tunable(&self) -> bool {
+        self.kiwi().is_some() || (self.rci_tunable && self.engine.is_some() && !self.stopping)
+    }
+
+    /// The frequency the running input is tuned to, kHz (an RSCI receiver's as it
+    /// reports it).
+    pub fn tuned_freq_khz(&self) -> Option<f64> {
+        if self.kiwi().is_some() {
+            return self.kiwi_freq_khz();
+        }
+        let f = self.snap.input.mdi.as_ref()?.rsci.frequency_hz?;
+        Some(f64::from(f) / 1000.0)
+    }
+
+    /// Retune the running KiwiSDR (or RSCI receiver) to `freq_khz`: another station, so
+    /// the views start afresh (the engine keeps the connection and restarts the
+    /// receiver).
     pub fn tune(&mut self, freq_khz: f64, label: String) {
-        let Some(engine) = self.engine.as_ref().filter(|_| self.kiwi().is_some()) else { return };
+        let Some(engine) = self.engine.as_ref().filter(|_| self.tunable()) else { return };
         engine.command(Command::Tune(freq_khz));
         // Keep the input status (the KiwiSDR's name, S-meter) until the next snapshot.
         let input = std::mem::take(&mut self.snap.input);
