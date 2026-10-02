@@ -133,6 +133,18 @@ fn print_status(s: &StationStatus) {
         s.time_sent.as_ref().map(|t| format!(", time {t}")).unwrap_or_default(),
         if s.device.is_some() { format!(", {} underruns", s.device_underruns) } else { String::new() }
     );
+    if let Some(m) = &s.mdi {
+        let state = if m.waiting { "waiting for MDI".to_string() } else { m.channel.clone().unwrap_or_default() };
+        println!(
+            "          modulator: {} frames, {} fillers, {} dropped, {} queued; {state}; MDI from {}{}",
+            m.frames,
+            m.fillers,
+            m.dropped,
+            m.queued,
+            m.input,
+            m.sender.as_ref().map(|s| format!(" ({s})")).unwrap_or_default()
+        );
+    }
     for sv in &s.services {
         let mut line = format!("          service {} {:06X} \"{}\" {:.2} kbit/s", sv.short_id, sv.service_id, sv.label, sv.bitrate / 1000.0);
         if let Some(a) = &sv.audio {

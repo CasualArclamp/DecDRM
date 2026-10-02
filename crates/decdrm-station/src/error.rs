@@ -55,6 +55,9 @@ pub enum StationError {
     /// An audio super frame could not be built (a bug if the plan was validated).
     #[error("audio super frame: {0}")]
     SuperFrame(#[from] decdrm_core::mux::audio::AudioError),
+    /// The modulator's MDI input failed.
+    #[error("MDI: {0}")]
+    Mdi(String),
 }
 
 impl StationError {

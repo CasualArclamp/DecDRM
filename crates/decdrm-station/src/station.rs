@@ -66,8 +66,10 @@ pub struct StationStatus {
     pub sdc_capacity: usize,
     /// The last time and date sent in the SDC.
     pub time_sent: Option<String>,
-    /// Per service, in Short Id order.
+    /// Per service, in Short Id order (a modulator: the services of the MDI).
     pub services: Vec<ServiceStatus>,
+    /// A modulator (`[mdi]`): the MDI input and what was transmitted of it.
+    pub mdi: Option<crate::modulator::ModulatorStatus>,
 }
 
 /// Status of one service.
@@ -218,6 +220,8 @@ pub struct Station {
     /// Keep each frame's content as MDI ([`Self::capture_mdi`]).
     capture_mdi: bool,
     last_mdi: Option<decdrm_mdi::MdiFrame>,
+    /// A modulator (`[mdi]`): the MDI input.
+    modulator: Option<Box<crate::modulator::Modulator>>,
 }
 
 // Compile-time check that a station can be moved to a worker thread (e.g. by a GUI).
@@ -305,6 +309,12 @@ impl Station {
             .and_then(crate::time::parse_iso8601)
             .map_or_else(crate::time::system_now, |t| t as f64);
 
+        // A modulator's MDI input (paced by the sound card if there is one).
+        let modulator = match &cfg.mdi {
+            Some(m) => Some(Box::new(crate::modulator::Modulator::new(m, cfg.base_dir.as_deref(), cfg.output.device.is_some())?)),
+            None => None,
+        };
+
         // The outputs last, so that a configuration error leaves no empty file behind.
         let channels = output.channels();
         let file = crate::output::open_file(&cfg, channels)?;
@@ -344,6 +354,7 @@ impl Station {
             stop,
             capture_mdi: false,
             last_mdi: None,
+            modulator,
         };
         station.update_status();
         Ok(station)
@@ -378,6 +389,9 @@ impl Station {
     /// loop and show the lines.
     pub fn take_log(&mut self) -> Vec<String> {
         let mut lines = std::mem::take(&mut self.log);
+        if let Some(m) = self.modulator.as_mut() {
+            lines.extend(m.take_log());
+        }
         for (service, chain) in &mut self.audio {
             lines.extend(chain.take_log().into_iter().map(|l| format!("{}: {l}", self.names[*service])));
         }
@@ -431,19 +445,30 @@ impl Station {
     }
 
     /// Whether every audio input is a non-looping file (so the programme ends by
-    /// itself); false for data-only stations.
+    /// itself); false for data-only stations. A modulator: whether the MDI comes from a
+    /// recording.
     pub fn inputs_finite(&self) -> bool {
+        if let Some(m) = &self.modulator {
+            return m.is_finite();
+        }
         !self.audio.is_empty() && self.audio.iter().all(|(_, a)| a.input_finite())
     }
 
-    /// Whether every audio input is a non-looping file that has ended.
+    /// Whether every audio input is a non-looping file that has ended (a modulator: the
+    /// MDI recording has been transmitted).
     pub fn inputs_finished(&self) -> bool {
+        if let Some(m) = &self.modulator {
+            return m.finished();
+        }
         self.inputs_finite() && self.audio.iter().all(|(_, a)| a.input_finished())
     }
 
     /// Produce the next 400 ms transmission frame, write it to the outputs and return
     /// the output samples (interleaved, 48 kHz; see [`Self::output_channels`]).
     pub fn transmit_frame(&mut self) -> Result<&[f32]> {
+        if self.modulator.is_some() {
+            return self.transmit_mdi_frame();
+        }
         self.watch_journaline();
         let mut frames: Vec<Vec<u8>> = vec![Vec::new(); self.plan.streams.len()];
         for (service, chain) in &mut self.audio {
@@ -470,6 +495,56 @@ impl Station {
         }
         self.baseband.clear();
         self.tx.transmit_frame_into(&fac, &msc, sdc.as_deref(), &mut self.baseband)?;
+        self.emit()
+    }
+
+    /// A modulator's frame: the MDI frame for this position, a filler, or — before the
+    /// MDI arrives — silence for a sound card or nothing at all (an empty slice).
+    fn transmit_mdi_frame(&mut self) -> Result<&[f32]> {
+        use crate::modulator::Job;
+        let job = self.modulator.as_mut().expect("a modulator").next(self.tx.frame_index())?;
+        match job {
+            Job::Frame { config, fac, msc, sdc } => {
+                if *self.tx.config() != config {
+                    // Another channel (only ever at a super frame start): a new
+                    // transmitter, and an output stage for its bandwidth.
+                    let layout = decdrm_core::params::ChannelLayout::new(config.mode, config.occupancy)
+                        .ok_or_else(|| StationError::Mdi("an undefined mode/bandwidth combination".into()))?;
+                    self.tx = Transmitter::new(config)?;
+                    self.output = OutputStage::new(layout, crate::plan::output_config(&self.cfg.output, Some(layout)))?;
+                    self.plan.tx = config;
+                    self.plan.layout = layout;
+                    self.plan.capacity = self.tx.msc_capacity();
+                    self.plan.sdc_capacity = self.tx.sdc_capacity_bytes();
+                    self.plan.output = crate::plan::output_config(&self.cfg.output, Some(layout));
+                }
+                let sdc = sdc.map(|mut d| {
+                    d.truncate(self.tx.sdc_capacity_bytes());
+                    d
+                });
+                self.baseband.clear();
+                self.tx.transmit_frame_into(&fac, &msc, sdc.as_deref(), &mut self.baseband)?;
+                self.emit()
+            }
+            Job::Silence => {
+                // 400 ms of nothing for the sound card while waiting for the MDI.
+                self.samples.clear();
+                self.samples.resize(19_200 * self.output.channels(), 0.0);
+                self.write_outputs()?;
+                self.update_status();
+                Ok(&self.samples)
+            }
+            Job::Nothing => {
+                self.samples.clear();
+                self.update_status();
+                Ok(&self.samples)
+            }
+        }
+    }
+
+    /// The baseband of the frame just made, through the channel simulator and the
+    /// output stage to the outputs.
+    fn emit(&mut self) -> Result<&[f32]> {
         // Rust note: `signal` borrows either buffer; the borrow checker accepts the
         // mutable use of the other fields below because they are distinct fields.
         let signal = match self.simulator.as_mut() {
@@ -502,6 +577,9 @@ impl Station {
     /// the file and play out the sound card's buffer (not after [`StopHandle::stop`]).
     /// Returns the final status.
     pub fn finish(mut self) -> Result<StationStatus> {
+        if let Some(m) = self.modulator.as_mut() {
+            m.stop();
+        }
         self.samples.clear();
         self.output.flush(&mut self.samples);
         self.apply_clock();
@@ -566,6 +644,12 @@ impl Station {
         st.sdc_blocks = self.sdc.blocks;
         st.sdc_bytes_used = self.sdc.last_used;
         st.time_sent = self.sdc.last_time.as_ref().map(crate::time::format_entity);
+        if let Some(m) = &self.modulator {
+            st.mdi = Some(m.status.clone());
+            st.sdc_capacity = self.tx.sdc_capacity_bytes();
+            st.services = modulator_services(m.ensemble());
+            return;
+        }
         st.services = self
             .plan
             .services
@@ -608,6 +692,44 @@ impl Station {
             })
             .collect();
     }
+}
+
+/// The services of a modulator's multiplex (from its FAC and SDC), for the status.
+fn modulator_services(ens: &decdrm_core::mux::service::Ensemble) -> Vec<ServiceStatus> {
+    let lengths = ens.stream_lengths();
+    let rate = |stream: u8| lengths.get(usize::from(stream)).map_or(0.0, |l| l.total() as f64 * 8.0 / FRAME_SECONDS);
+    ens.services()
+        .map(|s| {
+            let audio = s.audio.as_ref().map(|a| AudioStatus {
+                codec: crate::modulator::describe_audio(a),
+                stream_id: a.stream_id,
+                stream_bitrate: rate(a.stream_id),
+                input: "MDI".into(),
+                ..AudioStatus::default()
+            });
+            let apps: Vec<AppStatus> = s
+                .applications
+                .iter()
+                .map(|a| AppStatus {
+                    kind: AppKind::Raw,
+                    stream_id: a.stream_id,
+                    packet_id: a.packet_id,
+                    bitrate: rate(a.stream_id),
+                    journaline: None,
+                })
+                .collect();
+            let streams: std::collections::BTreeSet<u8> =
+                s.audio.iter().map(|a| a.stream_id).chain(s.applications.iter().map(|a| a.stream_id)).collect();
+            ServiceStatus {
+                short_id: s.short_id,
+                label: s.label.clone().unwrap_or_default(),
+                service_id: s.fac.map_or(0, |f| f.service_id),
+                bitrate: streams.iter().map(|&st| rate(st)).sum(),
+                audio,
+                apps,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

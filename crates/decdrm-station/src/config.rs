@@ -47,6 +47,10 @@ pub struct StationConfig {
     /// The services, in Short Id order (`[[service]]` tables in the file).
     #[serde(rename = "service", default)]
     pub services: Vec<ServiceSettings>,
+    /// Modulator: transmit MDI from a content server instead of the services (the
+    /// channel, services, time and alternative frequencies are then not used).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mdi: Option<MdiSettings>,
     /// Directory that relative paths are resolved against: the directory of the file
     /// the configuration was loaded from (set by [`StationConfig::load`]); `None` = the
     /// current directory.
@@ -60,6 +64,10 @@ impl StationConfig {
     /// rule as [`crate::Station::inputs_finite`], available before a station (and its
     /// output file) is created.
     pub fn inputs_finite(&self) -> bool {
+        if let Some(m) = &self.mdi {
+            // A recording ends; UDP goes on.
+            return matches!(crate::modulator::origin(m, self.base_dir.as_deref()), Ok(decdrm_mdi::source::MdiOrigin::File { .. }));
+        }
         let mut inputs = self.services.iter().filter_map(|s| s.audio.as_ref()).map(|a| &a.input).peekable();
         inputs.peek().is_some() && inputs.all(|i| i.file.is_some() && !i.looped)
     }
@@ -254,6 +262,31 @@ pub enum SampleFormat {
 
 /// The channel simulator (`[simulate]`): the signal passes through a DRM channel model
 /// of ES 201 980 annex B (multipath with Rayleigh fading) with a frequency offset, a
+/// The modulator (`[mdi]`): the station transmits MDI (TS 102 820) from a content
+/// server — a DRM multiplex made elsewhere — instead of its own services.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MdiSettings {
+    /// Where the MDI comes from: a UDP port, `group:port`, `interface:group:port` or
+    /// `source:interface:group:port` (Dream's syntax), or a recording (`.pcap`,
+    /// `.pcapng`, `.rsA`…, raw AF/PFT).
+    pub input: String,
+    /// Frames queued before a sound card transmission starts, a reserve against
+    /// network jitter (default 3 = 1.2 s).
+    #[serde(default = "default_buffer_frames")]
+    pub buffer_frames: usize,
+}
+
+fn default_buffer_frames() -> usize {
+    3
+}
+
+impl MdiSettings {
+    pub fn new(input: impl Into<String>) -> Self {
+        Self { input: input.into(), buffer_frames: default_buffer_frames() }
+    }
+}
+
 /// receiver clock error and white noise before it reaches the outputs — a test signal
 /// for receivers. See [`decdrm_core::channel`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

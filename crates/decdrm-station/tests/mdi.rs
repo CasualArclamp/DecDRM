@@ -184,3 +184,114 @@ fn rsci_over_udp_with_losses_and_rci() {
     drop(engine);
     assert_eq!(got, [RciCommand::Frequency(7_325_000), RciCommand::Service(0)]);
 }
+
+/// Decode a recording with the receiver session: (audio frames ok, texts, labels).
+fn decode(path: &std::path::Path) -> (u64, u64, Vec<String>, Vec<String>) {
+    use decdrm_engine::{InputFormat, RealChannel, ReceiverConfig, Session, SessionEvent};
+    let mut reader = decdrm_io::FileReader::open(path).unwrap();
+    let channels = reader.format().channels;
+    let mut session = Session::new(ReceiverConfig { input: InputFormat::Real(RealChannel::Mix), channels, ..Default::default() });
+    let mut texts = Vec::new();
+    while let Some(block) = reader.read(4800).unwrap() {
+        for ev in session.push(&block) {
+            if let SessionEvent::Text(Some(t)) = ev {
+                texts.push(t);
+            }
+        }
+    }
+    let labels = session.ensemble().services().filter_map(|s| s.label.clone()).collect();
+    (session.audio_stats.frames_ok, session.audio_stats.frames_concealed, texts, labels)
+}
+
+/// The modulator: a station with `[mdi]` transmits an MDI recording; the receiver
+/// decodes the signal as if the content server's own station had sent it.
+#[test]
+fn modulator_transmits_an_mdi_recording() {
+    let frames = station_mdi(30);
+    let dir = tempfile::tempdir().unwrap();
+    let rec = dir.path().join("studio.rsM");
+    let mut w = DcpFileWriter::create(&rec, FileKind::FileIo, 0).unwrap();
+    // Start mid-super frame: the modulator waits for the first frame of one.
+    for (i, f) in frames.iter().enumerate().skip(1) {
+        w.write_packet(&f.to_af(i as u16).to_bytes(), None).unwrap();
+    }
+    w.finish().unwrap();
+    let toml = r#"
+        [mdi]
+        input = "studio.rsM"
+        [output]
+        file = "modulated.wav"
+    "#;
+    let mut cfg = StationConfig::from_toml_str(toml).unwrap();
+    cfg.base_dir = Some(dir.path().to_path_buf());
+    let plan = cfg.validate().unwrap_or_else(|e| panic!("{e}"));
+    assert!(plan.describe(&cfg).starts_with("modulator: MDI from studio.rsM"), "{}", plan.describe(&cfg));
+    assert!(cfg.inputs_finite());
+    let mut station = Station::with_plan(cfg, plan).unwrap();
+    let mut log = Vec::new();
+    let t0 = Instant::now();
+    while !station.inputs_finished() && t0.elapsed() < Duration::from_secs(60) {
+        station.transmit_frame().unwrap();
+        log.extend(station.take_log());
+    }
+    let status = station.finish().unwrap();
+    for l in &log {
+        println!("{l}");
+    }
+    let m = status.mdi.clone().expect("modulator status");
+    // Frames 1 and 2 belong to a super frame begun before the recording: skipped.
+    assert_eq!((m.frames, m.fillers), (27, 0), "{m:?}");
+    assert_eq!(m.channel.as_deref(), Some("mode B, 10 kHz, 64-QAM, short interleaving"));
+    assert_eq!(status.frames, 27);
+    assert!(status.services.iter().any(|s| s.label == "MDI Test" && s.audio.is_some()), "{:?}", status.services);
+
+    let (ok, concealed, texts, labels) = decode(&dir.path().join("modulated.wav"));
+    assert!(ok >= 100, "{ok} audio frames ok");
+    assert_eq!(concealed, 0);
+    assert!(texts.iter().any(|t| t == "Hello MDI"), "{texts:?}");
+    assert_eq!(labels, ["MDI Test"]);
+}
+
+/// Live MDI over UDP with a frame lost: the modulator sends a filler in its place and
+/// carries on.
+#[test]
+fn modulator_fills_lost_frames() {
+    let frames = station_mdi(30);
+    let dir = tempfile::tempdir().unwrap();
+    let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let toml = format!(
+        r#"
+        [mdi]
+        input = "127.0.0.1:{port}"
+        [output]
+        file = "live.wav"
+    "#
+    );
+    let mut cfg = StationConfig::from_toml_str(&toml).unwrap();
+    cfg.base_dir = Some(dir.path().to_path_buf());
+    assert!(!cfg.inputs_finite());
+    let mut station = Station::new(cfg).unwrap_or_else(|e| panic!("{e}"));
+    let sender = std::thread::spawn(move || {
+        let tx = UdpSender::new(&format!("127.0.0.1:{port}").parse().unwrap()).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        for (n, f) in frames.iter().enumerate() {
+            if n != 10 {
+                tx.send(&f.to_af(n as u16).to_bytes()).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let t0 = Instant::now();
+    while station.status().frames < 30 && t0.elapsed() < Duration::from_secs(60) {
+        station.transmit_frame().unwrap();
+    }
+    sender.join().unwrap();
+    let log = station.take_log();
+    let status = station.finish().unwrap();
+    let m = status.mdi.clone().unwrap();
+    assert_eq!((m.frames, m.fillers), (29, 1), "{m:?} {log:#?}");
+    assert_eq!(m.link.lost, 1);
+    let (ok, _, texts, _) = decode(&dir.path().join("live.wav"));
+    assert!(ok >= 100, "{ok} audio frames ok");
+    assert!(texts.iter().any(|t| t == "Hello MDI"), "{texts:?}");
+}

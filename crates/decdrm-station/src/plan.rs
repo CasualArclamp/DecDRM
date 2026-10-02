@@ -112,6 +112,9 @@ pub struct MultiplexPlan {
     pub services: Vec<ServicePlan>,
     /// Output stage settings (real IF or I/Q, level, filter).
     pub output: OutputConfig,
+    /// A modulator (`[mdi]`): where the MDI comes from. The channel, streams and
+    /// services above are placeholders until the MDI arrives.
+    pub mdi: Option<String>,
 }
 
 /// One MSC stream.
@@ -262,6 +265,12 @@ impl MultiplexPlan {
 
     /// Human-readable summary (for the CLI).
     pub fn describe(&self, cfg: &StationConfig) -> String {
+        if let Some(input) = &self.mdi {
+            return format!(
+                "modulator: MDI from {input}; the channel and the services come from the MDI{}\n",
+                if cfg.services.is_empty() { "" } else { " (the file's services are not used)" }
+            );
+        }
         let t = &self.tx;
         let mut s = String::new();
         let prot = if self.streams.iter().any(|st| st.lengths.part_a > 0) {
@@ -504,7 +513,104 @@ impl StationConfig {
     }
 }
 
+/// The output stage settings for `layout` (the IF, unless set, follows the bandwidth).
+pub(crate) fn output_config(out: &crate::config::OutputSettings, layout: Option<ChannelLayout>) -> OutputConfig {
+    OutputConfig {
+        format: match out.format {
+            SignalFormat::Real => OutputFormat::Real { if_hz: out.if_hz.unwrap_or_else(|| layout.map_or(12_000.0, suggested_if_hz)) },
+            SignalFormat::Iq => OutputFormat::Iq { offset_hz: out.iq_offset_hz, swap: out.iq_swap },
+        },
+        level_dbfs: out.level_dbfs,
+        band_limit: out.band_limit,
+    }
+}
+
+/// Checks of `[output]`.
+fn check_output(cfg: &StationConfig, p: &mut Problems) {
+    let out = &cfg.output;
+    if out.file.is_none() && out.device.is_none() {
+        p.push("output: set `file` and/or `device`");
+    }
+    if let Some(f) = &out.file {
+        let path = cfg.resolve(f);
+        match Container::from_path(&path) {
+            None => p.push(format!("output: {} must end in .wav or .flac", path.display())),
+            Some(Container::Flac) if out.sample_format == crate::config::SampleFormat::Float32 => {
+                p.push("output: FLAC files hold int16 or int24 samples, not float32")
+            }
+            _ => {}
+        }
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty())
+            && !dir.is_dir()
+        {
+            p.push(format!("output: directory {} does not exist", dir.display()));
+        }
+    }
+    if !(-60.0..=0.0).contains(&out.level_dbfs) {
+        p.push(format!("output: level_dbfs {} is outside -60..0 dBFS", out.level_dbfs));
+    }
+}
+
+/// Checks of `[simulate]`.
+fn check_simulate(cfg: &StationConfig, p: &mut Problems) {
+    if let Some(sim) = &cfg.simulate {
+        if !(1..=6).contains(&sim.channel) {
+            p.push(format!("simulate: channel {} is not a DRM channel model (1-6)", sim.channel));
+        }
+        if let Some(snr) = sim.snr_db
+            && !(-20.0..=80.0).contains(&snr)
+        {
+            p.push(format!("simulate: snr_db {snr} is outside -20..80 dB"));
+        }
+        if !(-2000.0..=2000.0).contains(&sim.frequency_offset_hz) {
+            p.push(format!("simulate: frequency_offset_hz {} is outside ±2000 Hz", sim.frequency_offset_hz));
+        }
+        if !(-5000.0..=5000.0).contains(&sim.sample_rate_offset_ppm) {
+            p.push(format!("simulate: sample_rate_offset_ppm {} is outside ±5000 ppm", sim.sample_rate_offset_ppm));
+        }
+    }
+}
+
+/// A modulator's plan: the output, and placeholders for what the MDI brings.
+fn build_mdi(cfg: &StationConfig, m: &crate::config::MdiSettings) -> Result<MultiplexPlan> {
+    let mut p = Problems::default();
+    let origin = match crate::modulator::origin(m, cfg.base_dir.as_deref()) {
+        Ok(o) => Some(o),
+        Err(e) => {
+            p.push(e);
+            None
+        }
+    };
+    if !(1..=50).contains(&m.buffer_frames) {
+        p.push(format!("mdi: buffer_frames {} is outside 1-50", m.buffer_frames));
+    }
+    check_output(cfg, &mut p);
+    check_simulate(cfg, &mut p);
+    p.finish()?;
+    let tx = TxConfig::default();
+    let layout = ChannelLayout::new(tx.mode, tx.occupancy).expect("the default layout exists");
+    let transmitter = Transmitter::new(tx)?;
+    let capacity = transmitter.msc_capacity();
+    // One stream filling the frame: a valid description for the parts of the station
+    // built before the MDI arrives (the modulator does not use them).
+    let whole = StreamLengths { part_a: 0, part_b: capacity.main_bits() / 8 };
+    Ok(MultiplexPlan {
+        tx,
+        layout,
+        capacity,
+        sdc_capacity: transmitter.sdc_capacity_bytes(),
+        multiplex: MultiplexDescription::new(0, tx.protection.part_b as u8, &[whole]),
+        streams: Vec::new(),
+        services: Vec::new(),
+        output: output_config(&cfg.output, None),
+        mdi: origin.map(|o| o.describe()),
+    })
+}
+
 fn build(cfg: &StationConfig) -> Result<MultiplexPlan> {
+    if let Some(m) = &cfg.mdi {
+        return build_mdi(cfg, m);
+    }
     let mut p = Problems::default();
     let ch = &cfg.channel;
 
@@ -546,36 +652,8 @@ fn build(cfg: &StationConfig) -> Result<MultiplexPlan> {
     }
 
     // --- Output.
-    let out = &cfg.output;
-    if out.file.is_none() && out.device.is_none() {
-        p.push("output: set `file` and/or `device`");
-    }
-    if let Some(f) = &out.file {
-        let path = cfg.resolve(f);
-        match Container::from_path(&path) {
-            None => p.push(format!("output: {} must end in .wav or .flac", path.display())),
-            Some(Container::Flac) if out.sample_format == crate::config::SampleFormat::Float32 => {
-                p.push("output: FLAC files hold int16 or int24 samples, not float32")
-            }
-            _ => {}
-        }
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty())
-            && !dir.is_dir()
-        {
-            p.push(format!("output: directory {} does not exist", dir.display()));
-        }
-    }
-    if !(-60.0..=0.0).contains(&out.level_dbfs) {
-        p.push(format!("output: level_dbfs {} is outside -60..0 dBFS", out.level_dbfs));
-    }
-    let output = OutputConfig {
-        format: match out.format {
-            SignalFormat::Real => OutputFormat::Real { if_hz: out.if_hz.unwrap_or_else(|| layout.map_or(12_000.0, suggested_if_hz)) },
-            SignalFormat::Iq => OutputFormat::Iq { offset_hz: out.iq_offset_hz, swap: out.iq_swap },
-        },
-        level_dbfs: out.level_dbfs,
-        band_limit: out.band_limit,
-    };
+    check_output(cfg, &mut p);
+    let output = output_config(&cfg.output, layout);
     if let Some(l) = layout
         && let Err(e) = OutputStage::new(l, output)
     {
@@ -679,22 +757,7 @@ fn build(cfg: &StationConfig) -> Result<MultiplexPlan> {
     }
 
     // --- Channel simulator.
-    if let Some(sim) = &cfg.simulate {
-        if !(1..=6).contains(&sim.channel) {
-            p.push(format!("simulate: channel {} is not a DRM channel model (1-6)", sim.channel));
-        }
-        if let Some(snr) = sim.snr_db
-            && !(-20.0..=80.0).contains(&snr)
-        {
-            p.push(format!("simulate: snr_db {snr} is outside -20..80 dB"));
-        }
-        if !(-2000.0..=2000.0).contains(&sim.frequency_offset_hz) {
-            p.push(format!("simulate: frequency_offset_hz {} is outside ±2000 Hz", sim.frequency_offset_hz));
-        }
-        if !(-5000.0..=5000.0).contains(&sim.sample_rate_offset_ppm) {
-            p.push(format!("simulate: sample_rate_offset_ppm {} is outside ±5000 ppm", sim.sample_rate_offset_ppm));
-        }
-    }
+    check_simulate(cfg, &mut p);
     // Nothing below makes sense without a valid channel and services.
     p.finish()?;
     let layout = layout.expect("checked above");
@@ -891,6 +954,7 @@ fn build(cfg: &StationConfig) -> Result<MultiplexPlan> {
         streams,
         services,
         output,
+        mdi: None,
     };
 
     // --- SDC: every entity must fit next to the multiplex description.

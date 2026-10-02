@@ -43,6 +43,7 @@ mod data;
 mod error;
 mod fac;
 pub mod mdi;
+mod modulator;
 pub mod plan;
 mod output;
 mod sdc;
@@ -54,9 +55,10 @@ pub use afs::{AfsMultiplexSettings, AfsOtherSettings, AfsRegionSettings, AfsSche
 pub use audio::AudioCounters;
 pub use config::{
     AppKind, AppSettings, AudioInputSettings, AudioSettings, ChannelSettings, Codec, EpgProgramme, FacLanguage,
-    JournalineFile, JournalinePage, OutputSettings, Part, ProgrammeType, SampleFormat, ServiceSettings, SignalFormat,
-    SimulateSettings, StationConfig, TimeSettings,
+    JournalineFile, JournalinePage, MdiSettings, OutputSettings, Part, ProgrammeType, SampleFormat, ServiceSettings,
+    SignalFormat, SimulateSettings, StationConfig, TimeSettings,
 };
+pub use modulator::ModulatorStatus;
 pub use data::load_journaline;
 pub use error::{ConfigProblems, Result, StationError};
 pub use plan::{AppPlan, AudioPlan, MultiplexPlan, ServicePlan, StreamContent, StreamPlan};

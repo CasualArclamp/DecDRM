@@ -567,3 +567,31 @@ fn parse_errors_name_the_problem() {
     let cfg = parse(&base().replace("codec = \"he-aac\"", "codec = \"he-aac\"\npart = \"A\""));
     assert_eq!(cfg.services[0].audio.as_ref().unwrap().part, Part::A);
 }
+
+/// A modulator (`[mdi]`): the input is checked, the channel and services are not used;
+/// a TOML round trip keeps the section.
+#[test]
+fn modulator_section() {
+    let text = format!("{}\n[mdi]\ninput = \"239.1.2.3:8000\"\n", base());
+    let cfg = parse(&text);
+    assert_eq!(cfg.mdi.as_ref().map(|m| (m.input.as_str(), m.buffer_frames)), Some(("239.1.2.3:8000", 3)));
+    let plan = cfg.validate().unwrap();
+    assert_eq!(plan.mdi.as_deref(), Some("UDP multicast 239.1.2.3:8000"));
+    assert!(plan.describe(&cfg).contains("the file's services are not used"), "{}", plan.describe(&cfg));
+    assert!(plan.services.is_empty() && plan.streams.is_empty());
+    assert!(!cfg.inputs_finite(), "UDP has no end");
+    let back = parse(&cfg.to_toml_string().unwrap());
+    assert_eq!(back.mdi, cfg.mdi);
+
+    let bad = "[output]\nfile = \"out.wav\"\n[mdi]\ninput = \"missing.rsM\"\nbuffer_frames = 99\n";
+    let mut cfg = parse(bad);
+    cfg.base_dir = Some(Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf());
+    let p = match cfg.validate() {
+        Err(e) => e.problems().to_vec(),
+        Ok(_) => panic!("expected problems"),
+    };
+    assert!(p.iter().any(|x| x.contains("missing.rsM") && x.contains("does not exist")), "{p:?}");
+    assert!(p.iter().any(|x| x.contains("buffer_frames 99")), "{p:?}");
+    assert!(problems("[mdi]\ninput = \"8000\"\n").iter().any(|x| x.contains("output: set")));
+    assert!(problems("[output]\nfile = \"o.wav\"\n[mdi]\ninput = \"nonsense\"\n").iter().any(|x| x.starts_with("mdi: input")));
+}
