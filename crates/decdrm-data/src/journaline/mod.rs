@@ -15,5 +15,5 @@ mod nml;
 
 pub use browser::{DEFAULT_CAPACITY, JournalineBrowser, MenuEntry};
 pub use decoder::{JournalineDecoder, JournalineStats, JournalineUpdate, ObjectStatus};
-pub use encoder::JournalineEncoder;
+pub use encoder::{JournalineEncoder, PageChanges};
 pub use nml::{ListItem, MenuItem, NML_MAX_LEN, NmlBody, NmlObject, NmlObjectType, ROOT_OBJECT_ID};

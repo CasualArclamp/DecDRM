@@ -3,7 +3,8 @@
 //! The pattern is the receiver's (see `receiver.rs` for why the GUI works on published
 //! copies): the worker owns the station; about ten times per second it publishes a
 //! [`TxSnapshot`] into an `Arc<Mutex<_>>`, and the GUI clones it. The stop request
-//! goes to the worker through a channel — and through the station's [`StopHandle`],
+//! (and a request to load the Journaline page files again) goes to the worker through
+//! a channel — the stop request also through the station's [`StopHandle`],
 //! which also cuts short a wait for room on a slow or stalled sound card — and the
 //! worker's log lines and end (with the error, if any) come back through another. The receiver and the transmitter are
 //! independent, so both can run at once (e.g. a loopback through a virtual cable).
@@ -51,6 +52,8 @@ pub struct TxSnapshot {
 
 enum Cmd {
     Stop,
+    /// Load the Journaline page files again now ([`Station::reload_journaline`]).
+    ReloadJournaline,
 }
 
 enum TxEvent {
@@ -195,6 +198,10 @@ fn run(
     let reason = loop {
         match cmd.try_recv() {
             Ok(Cmd::Stop) | Err(TryRecvError::Disconnected) => break "stopped",
+            // What changed goes to the station's log, taken after the frame.
+            Ok(Cmd::ReloadJournaline) => {
+                station.reload_journaline();
+            }
             Err(TryRecvError::Empty) => {}
         }
         match frames {
@@ -312,6 +319,14 @@ impl TxSession {
         if let Some(w) = &self.worker {
             w.request_stop();
             self.stopping = true;
+        }
+    }
+
+    /// Load the Journaline page files again now (the station also does so by itself
+    /// when a page file changes); what changed appears in the messages.
+    pub fn reload_journaline(&self) {
+        if let Some(w) = &self.worker {
+            let _ = w.cmd.send(Cmd::ReloadJournaline);
         }
     }
 
@@ -471,6 +486,66 @@ mod tests {
         assert!(
             wav.exists(),
             "the file is completed, not left behind half-written"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Journaline page file edited while transmitting: the Update button's request
+    /// loads it, and the change shows in the messages and the status.
+    #[test]
+    fn journaline_update_while_transmitting() {
+        let dir = std::env::temp_dir().join(format!("decdrm-gui-tx-jl-{}", std::process::id()));
+        materialize_example(&dir).unwrap();
+        let ov = Overrides {
+            output: TxOutput::File,
+            file: Some(dir.join("jl.wav")),
+            device: None,
+        };
+        let (cfg, plan) = check(EXAMPLE_STATION, &dir, &ov).unwrap();
+        let mut tx = TxSession::default();
+        tx.start(cfg, plan, frames_for(3600.0), "journaline".into());
+        // Edited once the station has loaded the page file.
+        let t0 = Instant::now();
+        while !tx.snap.started && t0.elapsed() < Duration::from_secs(60) {
+            tx.poll(Instant::now());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(tx.snap.started, "{:?}", tx.messages);
+        let pages = dir.join("journaline.toml");
+        let text = std::fs::read_to_string(&pages).unwrap();
+        std::fs::write(&pages, text.replace("\"Headlines\"", "\"Top stories\"")).unwrap();
+        tx.reload_journaline();
+        let journaline = |tx: &TxSession| {
+            tx.snap
+                .status
+                .services
+                .iter()
+                .flat_map(|s| &s.apps)
+                .find_map(|a| a.journaline.clone())
+        };
+        let t0 = Instant::now();
+        while journaline(&tx).is_none_or(|j| j.updates == 0)
+            && t0.elapsed() < Duration::from_secs(60)
+        {
+            tx.poll(Instant::now());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        tx.stop();
+        wait_until_stopped(&mut tx);
+        assert_eq!(tx.error, None, "{:?}", tx.messages);
+        let j = journaline(&tx).expect("a Journaline application");
+        assert_eq!(
+            (j.updates, j.pages, j.error),
+            (1, 4, None),
+            "{:?}",
+            tx.messages
+        );
+        assert!(
+            tx.messages
+                .iter()
+                .any(|m| m.contains("Journaline page file reloaded: pages 0, 1 changed")),
+            "{:?}",
+            tx.messages
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

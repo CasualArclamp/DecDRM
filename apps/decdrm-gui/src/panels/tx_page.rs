@@ -17,7 +17,7 @@ use crate::indicators::fmt_time;
 use crate::settings::{Settings, TxOutput};
 use crate::transmitter::TxSession;
 use crate::tx_config::{self, EXAMPLE_STATION, Overrides};
-use decdrm_station::{MultiplexPlan, StationConfig, WebStreamState, WebStreamStatus};
+use decdrm_station::{JournalineStatus, MultiplexPlan, StationConfig, WebStreamState, WebStreamStatus};
 use eframe::egui::{self, Color32, RichText, Ui};
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use std::path::{Path, PathBuf};
@@ -846,10 +846,39 @@ fn services_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
                 }
             }
             for app in &sv.apps {
-                ui.label(RichText::new(format!("+ {} \u{b7} {:.2} kbit/s", app.kind, app.bitrate / 1000.0)).weak());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("+ {} \u{b7} {:.2} kbit/s", app.kind, app.bitrate / 1000.0)).weak());
+                    if let Some(j) = &app.journaline {
+                        journaline_status(ui, tx, j, live);
+                    }
+                });
+                if let Some(e) = app.journaline.as_ref().and_then(|j| j.error.as_ref()) {
+                    ui.add(egui::Label::new(RichText::new(format!("{e} (the pages before stay on the air)")).color(pal.error).small()).wrap());
+                }
             }
         }
     });
+}
+
+/// A Journaline application: its pages, the page file's updates, and the Update button.
+fn journaline_status(ui: &mut Ui, tx: &TxSession, j: &JournalineStatus, live: bool) {
+    let mut text = format!("\u{b7} {} page{}", j.pages, if j.pages == 1 { "" } else { "s" });
+    if let Some(t) = j.updated_at_s {
+        text.push_str(&format!(", updated {}\u{d7}, last at {}", j.updates, fmt_time(t)));
+    }
+    ui.label(RichText::new(text).weak()).on_hover_text(format!(
+        "Page file {}.\nSaved changes go on the air by themselves within about two seconds: new and changed \
+         pages are sent first, with the next revision, so receivers show them at once.",
+        j.path.display()
+    ));
+    if live
+        && ui
+            .small_button("Update")
+            .on_hover_text("Load the page file again now (the time on the air is the time of the update)")
+            .clicked()
+    {
+        tx.reload_journaline();
+    }
 }
 
 fn output_file_picker(ui: &mut Ui, settings: &mut Settings) {

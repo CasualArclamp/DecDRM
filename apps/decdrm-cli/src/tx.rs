@@ -156,6 +156,10 @@ fn print_status(s: &StationStatus) {
         }
         for app in &sv.apps {
             line.push_str(&format!("; {} {:.2} kbit/s", app.kind, app.bitrate / 1000.0));
+            if let Some(j) = &app.journaline {
+                let updates = if j.updates > 0 { format!(", page file loaded again {}x", j.updates) } else { String::new() };
+                line.push_str(&format!(" ({} pages{updates})", j.pages));
+            }
         }
         println!("{line}");
     }

@@ -11,9 +11,13 @@
 //! 5. the FAC carries the next service of the repetition pattern;
 //! 6. the [`Transmitter`] produces 19 200 baseband samples, the [`OutputStage`] turns
 //!    them into real IF or I/Q samples, and the file and sound card get them.
+//!
+//! Before a frame, Journaline page files that have changed are loaded again (see
+//! [`Station::reload_journaline`]).
 
 use crate::audio::{AudioChain, AudioCounters};
 use crate::config::{AppKind, StationConfig};
+use crate::data::JournalineWatch;
 use crate::error::{Result, StationError};
 use crate::fac::FacScheduler;
 use crate::output::DeviceSink;
@@ -32,6 +36,7 @@ use decdrm_io::FileWriter;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 /// Status of a running station, for user interfaces (see [`Station::status`]).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -107,12 +112,40 @@ pub struct AppStatus {
     pub packet_id: u8,
     /// Share of the stream's bit rate, bit/s.
     pub bitrate: f64,
+    /// A Journaline application's pages and page file.
+    pub journaline: Option<JournalineStatus>,
+}
+
+/// A Journaline application's pages. Its page file is loaded again when it changes
+/// while the station transmits, or on request ([`Station::reload_journaline`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct JournalineStatus {
+    /// The page file (resolved path).
+    pub path: PathBuf,
+    /// Pages on the air.
+    pub pages: usize,
+    /// Times the page file was loaded again with changes while transmitting.
+    pub updates: u32,
+    /// When the last of those was, seconds of signal.
+    pub updated_at_s: Option<f64>,
+    /// Why the page file did not load the last time it was tried (the pages before
+    /// stay on the air).
+    pub error: Option<String>,
 }
 
 struct DataStream {
     stream: usize,
     len: usize,
     encoder: DataEncoder,
+}
+
+/// A Journaline application: its service's name (for the log), where it is in the
+/// multiplex, and its page file.
+struct JournalineApp {
+    service: String,
+    stream: u8,
+    packet_id: u8,
+    watch: JournalineWatch,
 }
 
 /// Stops a station's sound-card waits from another thread (see [`Station::stop_handle`]).
@@ -163,6 +196,9 @@ pub struct Station {
     /// (Short Id, chain) of every audio service.
     audio: Vec<(usize, AudioChain)>,
     data: Vec<DataStream>,
+    journaline: Vec<JournalineApp>,
+    /// The station's own log lines (Journaline reloads) until [`Self::take_log`].
+    log: Vec<String>,
     sdc: SdcScheduler,
     fac: FacScheduler,
     /// UTC time of the first frame, seconds since the Unix epoch.
@@ -221,6 +257,7 @@ impl Station {
             }
         }
         let mut data = Vec::new();
+        let mut journaline = Vec::new();
         for st in &plan.streams {
             let StreamContent::Data { packet_len, apps } = &st.content else { continue };
             let mut list = Vec::new();
@@ -228,10 +265,13 @@ impl Station {
                 let service = &cfg.services[r.service];
                 let app = service.applications().nth(r.index).expect("valid application index");
                 let scope = if app.kind == AppKind::Epg { cfg.epg_scope(r.service) } else { service.id };
-                let source = crate::data::build_source(&cfg, app, scope).map_err(|message| StationError::Data {
+                let (source, watch) = crate::data::build_source(&cfg, app, scope).map_err(|message| StationError::Data {
                     what: format!("{} of {}", app.kind, names[r.service]),
                     message,
                 })?;
+                if let Some(watch) = watch {
+                    journaline.push(JournalineApp { service: names[r.service].clone(), stream: st.id, packet_id: r.packet_id, watch });
+                }
                 list.push((app, r.packet_id, source));
             }
             let encoder = crate::data::stream_encoder(*packet_len, list)
@@ -286,6 +326,8 @@ impl Station {
             device,
             audio,
             data,
+            journaline,
+            log: Vec::new(),
             sdc,
             fac,
             start_unix,
@@ -324,16 +366,44 @@ impl Station {
         self.stop.clone()
     }
 
-    /// Log lines of the audio inputs since the last call — a web stream's connections,
-    /// redirects, playlists, titles, reconnections, buffer underruns — each prefixed
-    /// with its service, e.g. `service 0 ("Radio"): web stream: title: Artist - Song`.
-    /// Call it in the frame loop and show the lines.
+    /// Log lines since the last call — a web stream's connections, redirects,
+    /// playlists, titles, reconnections, buffer underruns; Journaline page files loaded
+    /// again — each prefixed with its service, e.g.
+    /// `service 0 ("Radio"): web stream: title: Artist - Song`. Call it in the frame
+    /// loop and show the lines.
     pub fn take_log(&mut self) -> Vec<String> {
-        let mut lines = Vec::new();
+        let mut lines = std::mem::take(&mut self.log);
         for (service, chain) in &mut self.audio {
             lines.extend(chain.take_log().into_iter().map(|l| format!("{}: {l}", self.names[*service])));
         }
         lines
+    }
+
+    /// Load every Journaline page file again now. A page file that changes is loaded
+    /// by itself, one to two seconds after it is saved; this does it at once, e.g. for
+    /// a button. New and changed pages go out next, with the next revision index,
+    /// pages no longer in the file stop, and a page file that does not load changes
+    /// nothing on the air. What happened goes to the log ([`Self::take_log`]); the
+    /// return value is the number of Journaline applications.
+    pub fn reload_journaline(&mut self) -> usize {
+        let at_s = self.status.seconds;
+        for j in &mut self.journaline {
+            let line = j.watch.reload(at_s);
+            self.log.push(format!("{}: {line}", j.service));
+        }
+        self.update_status();
+        self.journaline.len()
+    }
+
+    /// Load the Journaline page files that have changed (each is checked at most once
+    /// a second).
+    fn watch_journaline(&mut self) {
+        let (now, at_s) = (Instant::now(), self.status.seconds);
+        for j in &mut self.journaline {
+            if let Some(line) = j.watch.poll(now, at_s) {
+                self.log.push(format!("{}: {line}", j.service));
+            }
+        }
     }
 
     /// Number of output channels (1 real, 2 I/Q) at 48 kHz.
@@ -355,6 +425,7 @@ impl Station {
     /// Produce the next 400 ms transmission frame, write it to the outputs and return
     /// the output samples (interleaved, 48 kHz; see [`Self::output_channels`]).
     pub fn transmit_frame(&mut self) -> Result<&[f32]> {
+        self.watch_journaline();
         let mut frames: Vec<Vec<u8>> = vec![Vec::new(); self.plan.streams.len()];
         for (service, chain) in &mut self.audio {
             frames[usize::from(chain.plan.stream)] = chain.next_logical_frame(&self.names[*service])?;
@@ -497,7 +568,17 @@ impl Station {
                 apps: sp
                     .apps
                     .iter()
-                    .map(|a| AppStatus { kind: a.kind, stream_id: a.stream, packet_id: a.packet_id, bitrate: a.bitrate })
+                    .map(|a| AppStatus {
+                        kind: a.kind,
+                        stream_id: a.stream,
+                        packet_id: a.packet_id,
+                        bitrate: a.bitrate,
+                        journaline: self
+                            .journaline
+                            .iter()
+                            .find(|j| (j.stream, j.packet_id) == (a.stream, a.packet_id))
+                            .map(|j| j.watch.status.clone()),
+                    })
                     .collect(),
             })
             .collect();

@@ -3,6 +3,9 @@
 # Page 0 is the root menu. A page has at most one of `menu` (links to other pages),
 # `text` (plain text; "\n" breaks lines) and `list` (rows: a string, or an array of
 # cells); with none of them it is a title-only page.
+#
+# Edit this file while the station transmits: a second or two after you save it, the
+# new and changed pages are on the air (a file with a mistake changes nothing).
 
 [[page]]
 id = 0

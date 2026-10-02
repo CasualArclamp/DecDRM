@@ -28,6 +28,8 @@
 //!   what is left, and the encoders' bit rates follow from the stream lengths.
 //! * [`Station`] — runs the chain frame by frame ([`Station::transmit_frame`]) and
 //!   reports a [`StationStatus`] (frames, per-service bit rates, levels, clipping).
+//!   Journaline page files are loaded again when they change while transmitting
+//!   ([`Station::reload_journaline`]).
 //!
 //! The CLI's `decdrm tx station.toml` runs a station; the GUI can hold a [`Station`] on
 //! a worker thread (it is `Send`).
@@ -57,5 +59,5 @@ pub use config::{
 pub use data::load_journaline;
 pub use error::{ConfigProblems, Result, StationError};
 pub use plan::{AppPlan, AudioPlan, MultiplexPlan, ServicePlan, StreamContent, StreamPlan};
-pub use station::{AppStatus, AudioStatus, ServiceStatus, Station, StationStatus, StopHandle};
+pub use station::{AppStatus, AudioStatus, JournalineStatus, ServiceStatus, Station, StationStatus, StopHandle};
 pub use webstream::{WebStreamState, WebStreamStatus};

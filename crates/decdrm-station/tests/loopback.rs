@@ -9,6 +9,7 @@
 //!   EPG in part A (unequal error protection), AAC with a 24 kHz core, FLAC output.
 //! * `tpeg_raw_*` — TPEG and raw data applications (captured byte for byte) and
 //!   alternative-frequency signalling.
+//! * `journaline_pages_update_*` — a Journaline page file edited while transmitting.
 //!
 //! Run with `--nocapture` to see the multiplex plans and what was decoded.
 
@@ -16,6 +17,7 @@ use decdrm_core::fac::{Interleaving, MscMode, SdcMode};
 use decdrm_core::mux::service::AudioParams;
 use decdrm_core::params::SpectrumOccupancy;
 use decdrm_data::DataEvent;
+use decdrm_data::journaline::{NmlBody, ObjectStatus};
 use decdrm_engine::{InputFormat, RealChannel, ReceiverConfig, Session, SessionEvent};
 use decdrm_io::{AudioFormat, Container, Encoding, FileReader, FileWriter};
 use decdrm_station::{Station, StationConfig, StationStatus};
@@ -416,6 +418,78 @@ fn aac_hmmix_hierarchical_journaline_and_uep_epg() {
     assert_eq!(ens.channel().unwrap().msc_mode, MscMode::Qam64HmMix);
     assert_eq!(ens.multiplex(), Some(&plan.multiplex));
     assert_eq!(ens.service(0).unwrap().applications.len(), 2);
+}
+
+/// Journaline pages edited while the station transmits: the page file is loaded again,
+/// and the receiver gets the changed pages (next revision) and the new one without a
+/// restart.
+#[test]
+fn journaline_pages_update_while_transmitting() {
+    let dir = tempfile::tempdir().unwrap();
+    let pages = dir.path().join("news.toml");
+    let page_file = |headline: &str, weather: bool| {
+        let link = if weather { r#", { link = 2, text = "Weather" }"# } else { "" };
+        let mut s = format!(
+            "[[page]]\nid = 0\ntitle = \"News\"\nmenu = [{{ link = 1, text = \"Headline\" }}{link}]\n\
+             [[page]]\nid = 1\ntitle = \"Headline\"\ntext = \"{headline}\"\n"
+        );
+        if weather {
+            s.push_str("[[page]]\nid = 2\ntitle = \"Weather\"\ntext = \"Sunny\"\n");
+        }
+        s
+    };
+    std::fs::write(&pages, page_file("Old news", false)).unwrap();
+    let toml = r#"
+        [channel]
+        mode = "B"
+        occupancy = 3
+        msc_mode = "16-QAM"
+        interleaving = "short"
+        [output]
+        file = "news.wav"
+        [[service]]
+        label = "News"
+        id = 0xD0D0C5
+        [service.data]
+        type = "journaline"
+        path = "news.toml"
+        bitrate = 1600
+    "#;
+    let mut cfg = StationConfig::from_toml_str(toml).unwrap();
+    cfg.base_dir = Some(dir.path().to_path_buf());
+    let mut station = Station::new(cfg).unwrap_or_else(|e| panic!("{e}"));
+    station.run_frames(15).unwrap();
+    std::fs::write(&pages, page_file("Fresh news", true)).unwrap();
+    assert_eq!(station.reload_journaline(), 1);
+    assert_eq!(station.take_log(), [r#"service 0 ("News"): Journaline page file reloaded: pages 0, 1 changed, page 2 added"#]);
+    let status = station.status().services[0].apps[0].journaline.clone().expect("Journaline status");
+    assert_eq!((status.pages, status.updates, status.error), (3, 1, None));
+    assert_eq!(status.path, pages);
+    station.run_frames(10).unwrap();
+    station.finish().unwrap();
+
+    let d = decode(&dir.path().join("news.wav"), false);
+    let updates: Vec<(u16, u8, ObjectStatus, String)> = d
+        .data
+        .iter()
+        .filter_map(|(_, e)| match e {
+            DataEvent::Journaline(u) => {
+                let text = match &u.object.body {
+                    NmlBody::PlainText(t) => t.clone(),
+                    other => format!("{other:?}"),
+                };
+                Some((u.object_id(), u.object.revision, u.status, text))
+            }
+            _ => None,
+        })
+        .collect();
+    println!("{updates:#?}");
+    let page = |id: u16| updates.iter().filter(|u| u.0 == id).collect::<Vec<_>>();
+    let headline = page(1);
+    assert_eq!(headline.first().map(|u| (u.1, u.2, u.3.as_str())), Some((0, ObjectStatus::New, "Old news")));
+    assert_eq!(headline.last().map(|u| (u.1, u.2, u.3.as_str())), Some((1, ObjectStatus::Updated, "Fresh news")));
+    assert_eq!(page(0).last().map(|u| (u.1, u.2)), Some((1, ObjectStatus::Updated)), "the menu with its new link");
+    assert_eq!(page(2).first().map(|u| (u.1, u.3.as_str())), Some((0, "Sunny")));
 }
 
 /// A music-like file: harmonics with vibrato, noise and bursts (hard for the encoder).

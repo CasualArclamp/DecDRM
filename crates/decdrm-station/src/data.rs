@@ -5,7 +5,9 @@
 //! * Slideshow — every JPEG/PNG of a folder, cycled in name order
 //!   ([`SlideShowFeeder`]: MOT header mode, TriggerTime "now").
 //! * Website — a directory tree in a MOT directory-mode carousel.
-//! * Journaline — pages from a TOML/JSON page file ([`JournalineFile`]).
+//! * Journaline — pages from a TOML/JSON page file ([`JournalineFile`]), loaded again
+//!   when it changes while the station transmits ([`JournalineWatch`]): new and changed
+//!   pages go out at once, with the next revision index.
 //! * EPG — a schedule (TS 102 818 `epg`/`schedule`/`programme`) from inline or file
 //!   programmes, binary encoded (TS 102 371) in a directory-mode MOT carousel with
 //!   ScopeStart/ScopeEnd/ScopeId (the described service, see
@@ -14,15 +16,18 @@
 //!   `segment_size` bytes, cycled ([`RawSource`]); receivers capture them as they are.
 
 use crate::config::{AppKind, AppSettings, EpgFile, EpgProgramme, JournalineFile, JournalinePage, JournalineRow, StationConfig};
+use crate::station::JournalineStatus;
 use decdrm_data::encoder::{DataUnitSource, RawSource};
 use decdrm_data::epg::{self, EpgElement, EpgValue};
-use decdrm_data::journaline::{JournalineEncoder, ListItem, MenuItem, NmlObject, ROOT_OBJECT_ID};
+use decdrm_data::journaline::{JournalineEncoder, ListItem, MenuItem, NmlObject, PageChanges, ROOT_OBJECT_ID};
 use decdrm_data::mot::{MotEncoder, content_type};
 use decdrm_data::slideshow::SlideShowFeeder;
 use decdrm_data::time::MotTime;
 use decdrm_data::{DataEncoder, DataServiceConfig, website};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Largest MOT segment size (13-bit field).
 const MAX_SEGMENT_SIZE: usize = decdrm_data::mot::MAX_SEGMENT_SIZE;
@@ -93,16 +98,17 @@ pub(crate) fn check_content(cfg: &StationConfig, app: &AppSettings) -> Result<()
     Ok(())
 }
 
-/// The carousel of one application. `epg_scope` is the id of the service an EPG
-/// describes (its ScopeId, [`StationConfig::epg_scope`]).
-pub(crate) fn build_source(cfg: &StationConfig, app: &AppSettings, epg_scope: u32) -> Result<Source, String> {
+/// The carousel of one application, and for Journaline the watch that loads its page
+/// file again when it changes. `epg_scope` is the id of the service an EPG describes
+/// (its ScopeId, [`StationConfig::epg_scope`]).
+pub(crate) fn build_source(cfg: &StationConfig, app: &AppSettings, epg_scope: u32) -> Result<(Source, Option<JournalineWatch>), String> {
     let segment = |mot: &mut MotEncoder| -> Result<(), String> {
         if let Some(s) = app.segment_size {
             mot.set_segment_size(s).map_err(|e| e.to_string())?;
         }
         Ok(())
     };
-    Ok(match app.kind {
+    let source: Source = match app.kind {
         AppKind::Slideshow => {
             let dir = required_path(cfg, app)?;
             let mut feeder =
@@ -126,8 +132,8 @@ pub(crate) fn build_source(cfg: &StationConfig, app: &AppSettings, epg_scope: u3
             Box::new(mot)
         }
         AppKind::Journaline => {
-            let file = load_journaline(&required_path(cfg, app)?)?;
-            Box::new(journaline_encoder(&file, app.compress)?)
+            let watch = JournalineWatch::open(cfg, app)?;
+            return Ok((Box::new(watch.carousel()), Some(watch)));
         }
         AppKind::Epg => {
             let programmes = epg_programmes(cfg, app)?;
@@ -150,7 +156,8 @@ pub(crate) fn build_source(cfg: &StationConfig, app: &AppSettings, epg_scope: u3
             }
             Box::new(raw)
         }
-    })
+    };
+    Ok((source, None))
 }
 
 /// The packet-mode encoder of a data stream carrying `apps` (application settings,
@@ -208,9 +215,20 @@ fn nml_page(p: &JournalinePage) -> Result<NmlObject, String> {
     })
 }
 
-/// A Journaline carousel with every page of `file`, after checking the page structure:
-/// unique ids, a root menu (page 0) and menu links to existing pages.
+/// A Journaline carousel with every page of `file` (checked as [`journaline_pages`]
+/// does).
 pub(crate) fn journaline_encoder(file: &JournalineFile, compress: bool) -> Result<JournalineEncoder, String> {
+    let pages = journaline_pages(file, compress)?;
+    let mut enc = JournalineEncoder::new();
+    enc.set_compression(compress).map_err(|e| e.to_string())?;
+    enc.replace_all(pages).map_err(|e| e.to_string())?;
+    Ok(enc)
+}
+
+/// The pages of `file` as NML objects, after checking the page structure: unique ids, a
+/// root menu (page 0), menu links to existing pages, and every page within NML's size
+/// limit (`compress`: as it will be sent).
+fn journaline_pages(file: &JournalineFile, compress: bool) -> Result<Vec<NmlObject>, String> {
     if file.pages.is_empty() {
         return Err("the Journaline page file has no pages".into());
     }
@@ -225,17 +243,150 @@ pub(crate) fn journaline_encoder(file: &JournalineFile, compress: bool) -> Resul
         Some(_) => return Err("Journaline page 0 (the root) must be a menu".into()),
         None => return Err("the Journaline page file needs a root menu with id 0".into()),
     }
-    let mut enc = JournalineEncoder::new();
-    enc.set_compression(compress).map_err(|e| e.to_string())?;
+    let mut pages = Vec::with_capacity(file.pages.len());
     for p in &file.pages {
         if let Some(menu) = &p.menu
             && let Some(bad) = menu.iter().find(|l| !ids.contains(&l.link))
         {
             return Err(format!("Journaline page {} links to page {}, which does not exist", p.id, bad.link));
         }
-        enc.insert(nml_page(p)?).map_err(|e| format!("Journaline page {}: {e} (at most 4092 bytes)", p.id))?;
+        let page = nml_page(p)?;
+        page.to_bytes(compress).map_err(|e| format!("Journaline page {}: {e} (at most 4092 bytes)", p.id))?;
+        pages.push(page);
     }
-    Ok(enc)
+    Ok(pages)
+}
+
+/// A Journaline application's carousel, shared by the packet multiplexer, which takes
+/// its data groups, and the station, which loads the page file into it again
+/// ([`JournalineWatch`]).
+///
+/// Rust note: the multiplexer owns its sources as boxed trait objects, so the station
+/// keeps a second handle to the same carousel: an `Arc<Mutex<_>>`. Both handles live
+/// on the station's thread, so the lock is never contended; a `Mutex` rather than a
+/// `RefCell` keeps the station `Send`.
+#[derive(Clone)]
+pub(crate) struct JournalineCarousel(Arc<Mutex<JournalineEncoder>>);
+
+impl JournalineCarousel {
+    fn lock(&self) -> MutexGuard<'_, JournalineEncoder> {
+        // A lock poisoned by a panic elsewhere still holds a whole carousel:
+        // `replace_all` changes nothing until every page is ready.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl DataUnitSource for JournalineCarousel {
+    fn next_data_unit(&mut self) -> Option<Vec<u8>> {
+        self.lock().next_data_group()
+    }
+}
+
+/// How often a Journaline page file is checked for changes while transmitting.
+const WATCH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// A file's modification time and length; a change of either means new content.
+type FileStamp = (Option<SystemTime>, u64);
+
+fn stamp(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok(), meta.len()))
+}
+
+/// The page file of a Journaline application, loaded into its carousel again when it
+/// changes while the station transmits, or on request ([`Self::reload`]).
+///
+/// The file is checked once per [`WATCH_INTERVAL`], and a change is loaded once the
+/// file has stayed the same for a whole interval, so that a file still being saved is
+/// not read half-written: an edit is on the air one to two seconds after it is saved.
+/// A page file that does not load (a syntax error, a link to a missing page) changes
+/// nothing on the air; the problem is reported, and the next change is tried.
+pub(crate) struct JournalineWatch {
+    path: PathBuf,
+    compress: bool,
+    carousel: JournalineCarousel,
+    /// The file as last loaded (or tried), and as seen at the last check (when).
+    loaded: Option<FileStamp>,
+    seen: Option<FileStamp>,
+    checked: Option<Instant>,
+    pub status: JournalineStatus,
+}
+
+impl JournalineWatch {
+    /// Load the page file of `app` into a new carousel.
+    pub fn open(cfg: &StationConfig, app: &AppSettings) -> Result<Self, String> {
+        let path = required_path(cfg, app)?;
+        // Taken before reading: a change while it is read is then loaded later.
+        let loaded = stamp(&path);
+        let enc = journaline_encoder(&load_journaline(&path)?, app.compress)?;
+        Ok(Self {
+            status: JournalineStatus { path: path.clone(), pages: enc.len(), ..Default::default() },
+            path,
+            compress: app.compress,
+            carousel: JournalineCarousel(Arc::new(Mutex::new(enc))),
+            loaded,
+            seen: loaded,
+            checked: None,
+        })
+    }
+
+    /// The carousel, for the stream's packet multiplexer.
+    pub fn carousel(&self) -> JournalineCarousel {
+        self.carousel.clone()
+    }
+
+    /// Check the page file (at most once per [`WATCH_INTERVAL`]) and load it if it has
+    /// changed and then stayed the same since the last check. `at_s` is the station's
+    /// time, seconds of signal. Returns what happened, for the log.
+    pub fn poll(&mut self, now: Instant, at_s: f64) -> Option<String> {
+        if self.checked.is_some_and(|t| now.duration_since(t) < WATCH_INTERVAL) {
+            return None;
+        }
+        self.checked = Some(now);
+        let current = stamp(&self.path);
+        let settled = current.is_some() && current == self.seen;
+        self.seen = current;
+        (settled && current != self.loaded).then(|| self.reload(at_s))
+    }
+
+    /// Load the page file now (`at_s`: the station's time). Returns what happened, for
+    /// the log.
+    pub fn reload(&mut self, at_s: f64) -> String {
+        self.loaded = stamp(&self.path);
+        let result = load_journaline(&self.path)
+            .and_then(|file| journaline_pages(&file, self.compress))
+            .and_then(|pages| self.carousel.lock().replace_all(pages).map_err(|e| e.to_string()));
+        match result {
+            Ok(changes) => {
+                self.status.error = None;
+                self.status.pages = self.carousel.lock().len();
+                if changes.is_empty() {
+                    return "Journaline page file reloaded: no page changed".into();
+                }
+                self.status.updates += 1;
+                self.status.updated_at_s = Some(at_s);
+                format!("Journaline page file reloaded: {}", describe_changes(&changes))
+            }
+            Err(e) => {
+                let line = format!("{e}; the Journaline pages before stay on the air");
+                self.status.error = Some(e);
+                line
+            }
+        }
+    }
+}
+
+/// E.g. "pages 2, 4 changed, page 5 added".
+fn describe_changes(c: &PageChanges) -> String {
+    [(&c.changed, "changed"), (&c.added, "added"), (&c.removed, "removed")]
+        .into_iter()
+        .filter(|(ids, _)| !ids.is_empty())
+        .map(|(ids, what)| {
+            let list: Vec<String> = ids.iter().map(u16::to_string).collect();
+            format!("page{} {} {what}", if ids.len() == 1 { "" } else { "s" }, list.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // ---------------------------------------------------------------------------------
@@ -393,7 +544,8 @@ mod tests {
         app.path = Some(".".into());
         app.compress = true;
         check_content(&cfg, &app).unwrap();
-        let src = build_source(&cfg, &app, 1).unwrap();
+        let (src, watch) = build_source(&cfg, &app, 1).unwrap();
+        assert!(watch.is_none());
         let mut enc = stream_encoder(48, vec![(&app, 0, src)]).unwrap();
         let mut dec = DataDecoder::new(DataServiceConfig::packet(UserApplication::BroadcastWebsite, 0, 45));
         let events: Vec<DataEvent> = (0..10).flat_map(|_| dec.push_frame(&enc.next_frame(480))).collect();
@@ -406,6 +558,70 @@ mod tests {
             .collect();
         assert_eq!(files, ["img/logo.png".to_string(), "index.html".to_string()].into());
         assert!(events.iter().any(|e| matches!(e, DataEvent::WebsiteIndex { path } if path == "index.html")));
+    }
+
+    /// A page file edited while transmitting: a change is loaded once the file has
+    /// stayed the same for a check interval; a broken file changes nothing on the air
+    /// and is reported; a reload on request loads at once.
+    #[test]
+    fn journaline_page_file_is_watched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pages.toml");
+        let page_file = |root: &str, text: &str| {
+            format!(
+                "[[page]]\nid = 0\ntitle = \"{root}\"\nmenu = [{{ link = 1, text = \"One\" }}]\n\
+                 [[page]]\nid = 1\ntitle = \"One\"\ntext = \"{text}\"\n"
+            )
+        };
+        std::fs::write(&path, page_file("Root", "first")).unwrap();
+        let cfg = StationConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
+        let mut app = AppSettings::new(AppKind::Journaline);
+        app.path = Some("pages.toml".into());
+        let (_, watch) = build_source(&cfg, &app, 1).unwrap();
+        let mut watch = watch.expect("Journaline is watched");
+        assert_eq!(watch.status.pages, 2);
+        let text = |w: &JournalineWatch| match &w.carousel.lock().get(1).unwrap().body {
+            decdrm_data::journaline::NmlBody::PlainText(t) => t.clone(),
+            other => panic!("{other:?}"),
+        };
+        let t0 = Instant::now();
+        let at = |s: f64| t0 + Duration::from_secs_f64(s);
+        assert_eq!(watch.poll(at(0.0), 0.0), None, "unchanged");
+
+        std::fs::write(&path, page_file("Root", "second, longer")).unwrap();
+        assert_eq!(watch.poll(at(0.5), 0.5), None, "checked at most once a second");
+        assert_eq!(watch.poll(at(1.0), 1.0), None, "changed, not yet settled");
+        let line = watch.poll(at(2.0), 2.0).expect("loaded once settled");
+        assert_eq!(line, "Journaline page file reloaded: page 1 changed");
+        assert_eq!(text(&watch), "second, longer");
+        assert_eq!(watch.carousel.lock().get(1).unwrap().revision, 1);
+        assert_eq!((watch.status.updates, watch.status.updated_at_s), (1, Some(2.0)));
+        assert_eq!(watch.poll(at(3.0), 3.0), None, "loaded already");
+
+        // A link to a missing page: reported once, the pages on the air stay.
+        std::fs::write(&path, page_file("Root", "third").replace("link = 1", "link = 9")).unwrap();
+        assert_eq!(watch.poll(at(4.0), 4.0), None);
+        let line = watch.poll(at(5.0), 5.0).expect("tried once settled");
+        assert!(line.contains("links to page 9") && line.ends_with("the Journaline pages before stay on the air"), "{line}");
+        assert!(watch.status.error.as_deref().is_some_and(|e| e.contains("page 9")));
+        assert_eq!(text(&watch), "second, longer");
+        assert_eq!(watch.poll(at(6.0), 6.0), None, "not tried again until the next change");
+
+        // Fixed, and reloaded on request without waiting.
+        std::fs::write(&path, page_file("News", "fourth")).unwrap();
+        assert_eq!(watch.reload(6.5), "Journaline page file reloaded: pages 0, 1 changed");
+        assert_eq!(watch.status.error, None);
+        assert_eq!((watch.status.updates, watch.status.pages), (2, 2));
+        assert_eq!(watch.poll(at(7.0), 7.0), None);
+        assert_eq!(watch.poll(at(8.0), 8.0), None, "the reload took this version");
+    }
+
+    #[test]
+    fn page_changes_read_well() {
+        let c = PageChanges { added: vec![5], changed: vec![2, 4], removed: vec![] };
+        assert_eq!(describe_changes(&c), "pages 2, 4 changed, page 5 added");
+        let r = PageChanges { removed: vec![3], ..Default::default() };
+        assert_eq!(describe_changes(&r), "page 3 removed");
     }
 
     #[test]

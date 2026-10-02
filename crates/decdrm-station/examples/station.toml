@@ -118,7 +118,8 @@ language = "English"
 
 [service.data]
 type = "journaline"
-path = "journaline.toml"     # page file: TOML, or JSON with a .json extension
+path = "journaline.toml"     # page file: TOML, or JSON with a .json extension; changes
+                             # to it go on the air while transmitting
 compress = false             # deflate-compress the pages
 bitrate = 1200
 stream = "data"
