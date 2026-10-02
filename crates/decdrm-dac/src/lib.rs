@@ -106,9 +106,12 @@
 //! A burst leaves one or two wrong codes in a region; with DAC they cost less than
 //! concealing the region's frames, unlike with EnCodec, where trusting the enhancement
 //! layers and concealing a failed base layer was best. Garbage super frames are still
-//! better concealed. With the base layer sent twice few base failures survive the
-//! repair, and the policies come close (one burst test at 1.5·10⁻³/bit: adaptive
-//! 1.15 / −29.6, trust enh. 1.04 / −29.4).
+//! better concealed. With the base layer sent twice (6 and 3 kbit/s) few base failures
+//! survive the repair: up to 3·10⁻³/bit adaptive and trust enh. + interpolate come
+//! within 0.03 dB of each other in LSD, adaptive with the better NRR (6 kbit/s at
+//! 3·10⁻³/bit: 1.94 / −22.4 against 1.93 / −21.5), and they conceal garbage super
+//! frames alike. Only at 10⁻²/bit, far beyond what audio survives, does trust enh. give
+//! the lower LSD (6 kbit/s: 7.18 / −6.6 against 7.64 / −9.3).
 //!
 //! ## Delay and streaming
 //!

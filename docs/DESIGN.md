@@ -288,8 +288,10 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       no repetition, bursts 10⁻³/bit: 1.28 dB / −29.4 against 1.72 / −27.5 for the old
       default), garbage super frames are still better concealed (30 %: 5.61 / −28.1
       against 6.86 / −27.2 ignoring the CRCs); adaptive behaves as the first under
-      bursts and as the second for garbage. With the base layer sent twice the
-      policies come close.
+      bursts and as the second for garbage. With the base layer sent twice (6 and 3
+      kbit/s) adaptive and the old default stay within 0.03 dB LSD up to 3·10⁻³/bit,
+      adaptive with the better NRR, and conceal garbage alike; only at 10⁻²/bit does
+      the old default give the lower LSD (7.18 against 7.64, NRR −6.6 against −9.3).
       Signalled as audio
       coding 10 with `\0DAC1` (`AudioCodec::Dac`); the old `\0ENC1` services are
       recognised as `AudioCodec::Encodec` and shown "no longer supported"; station
