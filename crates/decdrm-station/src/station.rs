@@ -711,7 +711,10 @@ fn modulator_services(ens: &decdrm_core::mux::service::Ensemble) -> Vec<ServiceS
                 .applications
                 .iter()
                 .map(|a| AppStatus {
-                    kind: AppKind::Raw,
+                    // By the user application the SDC signals (type 5).
+                    kind: a.user_app_id().map_or(AppKind::Raw, |id| {
+                        AppKind::of(decdrm_data::UserApplication::from_id(decdrm_data::AppDomain::from_sdc(a.app_domain), id))
+                    }),
                     stream_id: a.stream_id,
                     packet_id: a.packet_id,
                     bitrate: rate(a.stream_id),

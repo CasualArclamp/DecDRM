@@ -147,7 +147,12 @@ fn print_status(s: &StationStatus) {
     }
     for sv in &s.services {
         let mut line = format!("          service {} {:06X} \"{}\" {:.2} kbit/s", sv.short_id, sv.service_id, sv.label, sv.bitrate / 1000.0);
-        if let Some(a) = &sv.audio {
+        if let Some(a) = &sv.audio
+            && s.mdi.is_some()
+        {
+            // A modulator's audio comes encoded with the MDI: no input, no levels.
+            line.push_str(&format!(": {}", a.codec));
+        } else if let Some(a) = &sv.audio {
             line.push_str(&format!(
                 ": {}, input {:.1} dBFS{}{}{}{}",
                 a.codec,

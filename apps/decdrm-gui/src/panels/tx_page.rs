@@ -885,7 +885,12 @@ fn services_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
                     ui.label(RichText::new(format!("{:.2} kbit/s", sv.bitrate / 1000.0)).monospace());
                 });
             });
-            if let Some(a) = &sv.audio {
+            if let Some(a) = &sv.audio
+                && s.mdi.is_some()
+            {
+                // A modulator's audio comes encoded with the MDI: no input, no levels.
+                ui.label(RichText::new(format!("{} \u{b7} from the MDI", a.codec)).weak());
+            } else if let Some(a) = &sv.audio {
                 let level = live.then_some((a.counters.input_rms_dbfs, a.counters.input_peak_dbfs));
                 meter_with_text(ui, ("tx_service_meter", sv.short_id), level, (ui.available_width() - 90.0).max(120.0), MeterKind::Audio);
                 ui.add(

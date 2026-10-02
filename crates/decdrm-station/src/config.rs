@@ -1079,6 +1079,20 @@ impl AppKind {
             AppKind::Raw => U::Other(0),
         }
     }
+
+    /// The kind of a signalled user application (the reverse of
+    /// [`user_application`](Self::user_application)); unknown ones are `Raw`.
+    pub fn of(app: decdrm_data::UserApplication) -> Self {
+        use decdrm_data::UserApplication as U;
+        match app {
+            U::SlideShow => AppKind::Slideshow,
+            U::BroadcastWebsite => AppKind::Website,
+            U::Journaline => AppKind::Journaline,
+            U::Epg => AppKind::Epg,
+            U::Tpeg => AppKind::Tpeg,
+            U::Other(_) => AppKind::Raw,
+        }
+    }
 }
 
 /// Protection part of a stream.
@@ -1310,5 +1324,15 @@ mod tests {
         assert!(e.contains("unknown MSC mode") && e.contains("HMmix"), "{e}");
         let e = StationConfig::from_toml_str("[channel]\nmdoe = \"A\"\n").unwrap_err().to_string();
         assert!(e.contains("mdoe"), "{e}");
+    }
+
+    #[test]
+    fn app_kind_from_user_application() {
+        use decdrm_data::{AppDomain, UserApplication};
+        for k in [AppKind::Slideshow, AppKind::Website, AppKind::Journaline, AppKind::Epg, AppKind::Tpeg] {
+            assert_eq!(AppKind::of(k.user_application()), k);
+            assert_eq!(AppKind::of(UserApplication::from_id(AppDomain::Dab, k.user_application().id())), k);
+        }
+        assert_eq!(AppKind::of(UserApplication::from_id(AppDomain::Dab, 0x123)), AppKind::Raw);
     }
 }
