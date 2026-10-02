@@ -13,7 +13,7 @@ default = []
 # the `decdrm_codecs::DrmAudioDecoder` implementation. Off by default because candle is
 # a large dependency; without it the crate still plans, frames, deframes and signals
 # EnCodec services (so receivers can name them and transmitters can validate them).
-encodec = ["dep:candle-core", "dep:decdrm-codecs"]
+encodec = ["dep:candle-core", "dep:decdrm-codecs", "dep:rayon"]
 # Additionally cross-check the streaming model against candle-transformers' batch
 # EnCodec implementation (`cargo test -p decdrm-encodec --features reference`).
 reference = ["encodec", "dep:candle-nn", "dep:candle-transformers"]
@@ -29,6 +29,9 @@ thiserror.workspace = true
 # unconditionally, which EnCodec does not need.
 candle-core = { version = "0.9.1", optional = true }
 decdrm-codecs = { path = "../decdrm-codecs", optional = true }
+# DAC's elementwise layers (Snake activations, biases, residual sums) as one parallel
+# pass each; candle's own elementwise operations run on one thread.
+rayon = { version = "1.12", optional = true }
 candle-nn = { version = "0.9.1", optional = true }
 candle-transformers = { version = "0.9.1", optional = true }
 
@@ -37,6 +40,8 @@ candle-transformers = { version = "0.9.1", optional = true }
 decdrm-core = { path = "../decdrm-core" }
 # Spectra for the quality measurements of the model tests.
 rustfft.workspace = true
+# WAV files of the codec comparison.
+hound = "3.5.1"
 
 [[test]]
 name = "codec"
@@ -52,4 +57,12 @@ required-features = ["encodec"]
 
 [[example]]
 name = "encodec_errors"
+required-features = ["encodec"]
+
+[[example]]
+name = "codec_compare"
+required-features = ["encodec"]
+
+[[example]]
+name = "dac_rtf"
 required-features = ["encodec"]

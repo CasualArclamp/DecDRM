@@ -148,6 +148,8 @@ mod sha256;
 pub mod weights;
 
 #[cfg(feature = "encodec")]
+pub mod dac;
+#[cfg(feature = "encodec")]
 mod decoder;
 #[cfg(feature = "encodec")]
 mod encoder;
