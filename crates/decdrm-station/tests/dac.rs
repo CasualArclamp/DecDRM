@@ -1,11 +1,11 @@
-//! DecDRM's EnCodec extension in the station:
+//! DecDRM's DAC extension in the station:
 //!
-//! * `encodec_configuration` — planning and validation (with or without the `encodec`
+//! * `dac_configuration` — planning and validation (with or without the `dac`
 //!   feature);
-//! * `encodec_mode_b_*`, `encodec_mode_d_*` — end-to-end loopbacks: the station writes a
+//! * `dac_mode_b_*`, `dac_mode_d_*` — end-to-end loopbacks: the station writes a
 //!   few seconds of signal to a WAV file and the receiver (`decdrm_engine::Session`)
-//!   decodes it. They need `--features encodec` and the model weights
-//!   (`decdrm models download encodec`) and are skipped without the weights.
+//!   decodes it. They need `--features dac` and the model weights
+//!   (`decdrm models download dac`) and are skipped without the weights.
 //!
 //! Run with `--nocapture` to see the multiplex plans and what was decoded.
 
@@ -15,47 +15,47 @@ use decdrm_station::{Codec, StationConfig};
 /// (381 bytes) carries 6 kbit/s with 40 ms CRC groups, next to text messages; and the
 /// configuration is checked like any other.
 #[test]
-fn encodec_configuration() {
+fn dac_configuration() {
     let toml = |audio: &str| {
         format!(
             "[channel]\nmode = \"D\"\nmsc_mode = \"16-QAM\"\nsdc_mode = \"4-QAM\"\n[output]\nfile = \"x.wav\"\n\
-             [[service]]\nlabel = \"EnCodec\"\nid = 0xD0D0E1\n[service.audio]\n{audio}\ninput = {{ tone_hz = 440.0 }}\n"
+             [[service]]\nlabel = \"DAC\"\nid = 0xD0D0E1\n[service.audio]\n{audio}\ninput = {{ tone_hz = 440.0 }}\n"
         )
     };
-    let cfg = StationConfig::from_toml_str(&toml("codec = \"encodec\"\ntext = [\"Hi\"]")).unwrap();
-    assert_eq!(cfg.services[0].audio.as_ref().unwrap().codec, Codec::Encodec);
+    let cfg = StationConfig::from_toml_str(&toml("codec = \"dac\"\ntext = [\"Hi\"]")).unwrap();
+    assert_eq!(cfg.services[0].audio.as_ref().unwrap().codec, Codec::Dac);
     match cfg.validate() {
         Ok(plan) => {
             let a = plan.services[0].audio.as_ref().unwrap();
-            let c = a.encodec.expect("EnCodec configuration");
+            let c = a.dac.expect("DAC configuration");
             println!("{}", plan.describe(&cfg));
             assert_eq!((c.bandwidth.kbps(), c.group_frames, c.repeated_layers), (6.0, 3, 0));
             assert_eq!((a.input_rate, a.input_channels, a.frames_per_super_frame), (24_000, 1, 30));
             assert_eq!(a.super_frame_len, 381 - 4);
-            assert_eq!(a.params.codec, decdrm_core::mux::service::AudioCodec::Encodec);
+            assert_eq!(a.params.codec, decdrm_core::mux::service::AudioCodec::Dac);
             assert_eq!(a.params.codec_config, c.codec_config());
-            assert!(plan.describe(&cfg).contains("EnCodec 6 kbit/s (8 codebooks)"));
+            assert!(plan.describe(&cfg).contains("DAC 6 kbit/s (8 codebooks)"));
         }
         // Without the codec or the weights the station says so up front.
-        Err(e) if !decdrm_encodec::BUILT_IN => assert!(e.to_string().contains("not built in"), "{e}"),
+        Err(e) if !decdrm_dac::BUILT_IN => assert!(e.to_string().contains("not built in"), "{e}"),
         Err(e) => {
-            assert!(decdrm_encodec::find_weights().is_err(), "{e}");
-            assert!(e.to_string().contains("decdrm models download encodec"), "{e}");
+            assert!(decdrm_dac::find_weights().is_err(), "{e}");
+            assert!(e.to_string().contains("decdrm models download dac"), "{e}");
         }
     }
     // Invalid settings.
     let problems = |audio: &str| StationConfig::from_toml_str(&toml(audio)).unwrap().validate().unwrap_err().to_string();
-    let e = problems("codec = \"encodec\"\nstereo = true\ncore_rate = 12000\nbandwidth_kbps = 5");
+    let e = problems("codec = \"dac\"\nstereo = true\ncore_rate = 12000\nbandwidth_kbps = 5");
     assert!(e.contains("mono") && e.contains("24 kHz") && e.contains("bandwidth_kbps 5"), "{e}");
-    assert!(problems("codec = \"aac\"\nbandwidth_kbps = 6").contains("only used by codec = \"encodec\""));
-    if decdrm_encodec::BUILT_IN && decdrm_encodec::find_weights().is_ok() {
+    assert!(problems("codec = \"aac\"\nbandwidth_kbps = 6").contains("only used by codec = \"dac\""));
+    if decdrm_dac::BUILT_IN && decdrm_dac::find_weights().is_ok() {
         // 12 kbit/s does not fit into 381 bytes.
-        let e = problems("codec = \"encodec\"\nbandwidth_kbps = 12");
-        assert!(e.contains("EnCodec 12 kbit/s needs at least") && e.contains("lower bandwidth_kbps"), "{e}");
+        let e = problems("codec = \"dac\"\nbandwidth_kbps = 12");
+        assert!(e.contains("DAC 12 kbit/s needs at least") && e.contains("lower bandwidth_kbps"), "{e}");
     }
 }
 
-#[cfg(feature = "encodec")]
+#[cfg(feature = "dac")]
 mod loopback {
     use decdrm_core::mux::service::AudioCodec;
     use decdrm_engine::{InputFormat, RealChannel, ReceiverConfig, Session, SessionEvent};
@@ -74,7 +74,7 @@ mod loopback {
     }
 
     fn weights_installed() -> bool {
-        match decdrm_encodec::find_weights() {
+        match decdrm_dac::find_weights() {
             Ok(_) => true,
             Err(e) => {
                 eprintln!("skipped: {e}");
@@ -182,7 +182,7 @@ mod loopback {
 
     fn check_service(d: &Decoded, plan: &MultiplexPlan, kbps: f64, text: &str) {
         let st = &d.session.audio_stats;
-        assert!(st.codec.starts_with(&format!("EnCodec {kbps} kbit/s")), "{}", st.codec);
+        assert!(st.codec.starts_with(&format!("DAC {kbps} kbit/s")), "{}", st.codec);
         assert!(st.frames_ok >= 12, "{} super frames decoded", st.frames_ok);
         assert_eq!((st.frames_concealed, st.super_frame_errors), (0, 0), "every CRC must pass");
         assert_eq!((d.rate, d.channels), (24_000, 1));
@@ -194,15 +194,15 @@ mod loopback {
         // The receiver sees exactly the signalling the plan sent.
         let svc = d.session.ensemble().service(0).expect("service 0");
         let audio = svc.audio.as_ref().expect("audio information");
-        assert_eq!(audio.codec, AudioCodec::Encodec);
+        assert_eq!(audio.codec, AudioCodec::Dac);
         assert_eq!(Some(audio), plan.services[0].audio.as_ref().map(|a| &a.params));
         let views = d.session.service_views();
-        assert!(views[0].description.starts_with(&format!("EnCodec {kbps} kbit/s mono 24 kHz, text")), "{}", views[0].description);
+        assert!(views[0].description.starts_with(&format!("DAC {kbps} kbit/s mono 24 kHz, text")), "{}", views[0].description);
     }
 
     /// Mode B, 10 kHz, 64-QAM: 12 kbit/s with codebooks 0-7 sent twice.
     #[test]
-    fn encodec_mode_b_10khz_loopback() {
+    fn dac_mode_b_10khz_loopback() {
         if !weights_installed() {
             return;
         }
@@ -216,33 +216,33 @@ mod loopback {
             interleaving = "short"
             protection_b = 1
             [output]
-            file = "encodec_b.wav"
+            file = "dac_b.wav"
             [[service]]
-            label = "EnCodec B"
+            label = "DAC B"
             id = 0xD0D0E2
             [service.audio]
-            codec = "encodec"
-            text = ["EnCodec over DRM"]
+            codec = "dac"
+            text = ["DAC over DRM"]
             input = { file = "tone.wav" }
         "#;
         let (plan, _) = transmit(dir.path(), toml, 25);
-        let c = plan.services[0].audio.as_ref().unwrap().encodec.unwrap();
+        let c = plan.services[0].audio.as_ref().unwrap().dac.unwrap();
         assert_eq!((c.bandwidth.kbps(), c.repeated_layers), (12.0, 3));
-        let d = decode(&dir.path().join("encodec_b.wav"));
-        check_service(&d, &plan, 12.0, "EnCodec over DRM");
+        let d = decode(&dir.path().join("dac_b.wav"));
+        check_service(&d, &plan, 12.0, "DAC over DRM");
     }
 
     /// Real residual errors: the mode B / 64-QAM signal with white noise, decoded by the
-    /// receiver chain and an EnCodec decoder whose statistics show the CRCs, the
+    /// receiver chain and an DAC decoder whose statistics show the CRCs, the
     /// repeated layers and the concealment at work. A measurement (about a minute):
-    /// `cargo test -p decdrm-station --features encodec --test encodec -- --ignored --nocapture`.
+    /// `cargo test -p decdrm-station --features dac --test dac -- --ignored --nocapture`.
     #[test]
     #[ignore = "measurement: run with --ignored --nocapture"]
-    fn encodec_under_noise() {
+    fn dac_under_noise() {
         use decdrm_core::mux::audio::AudioDeframer;
         use decdrm_core::mux::{Ensemble, demultiplex};
         use decdrm_core::rx::{Receiver, ReceiverEvent};
-        use decdrm_encodec::{EncodecConfig, EncodecDecoder, EncodecModel, ModelParts};
+        use decdrm_dac::{DacConfig, DacDecoder, DacModel, ModelParts};
         if !weights_installed() {
             return;
         }
@@ -257,15 +257,15 @@ mod loopback {
             [output]
             file = "clean.wav"
             [[service]]
-            label = "EnCodec"
+            label = "DAC"
             id = 0xD0D0E4
             [service.audio]
-            codec = "encodec"
+            codec = "dac"
             input = { tone_hz = 700.0 }
         "#;
         transmit(dir.path(), toml, 60);
         // The same channel with HE-AAC, for comparison.
-        let aac = toml.replace("codec = \"encodec\"", "codec = \"he-aac\"").replace("clean.wav", "aac.wav");
+        let aac = toml.replace("codec = \"dac\"", "codec = \"he-aac\"").replace("clean.wav", "aac.wav");
         transmit(dir.path(), &aac, 60);
         let read = |name: &str| {
             let mut reader = FileReader::open(dir.path().join(name)).unwrap();
@@ -277,7 +277,7 @@ mod loopback {
         };
         let (clean, clean_aac) = (read("clean.wav"), read("aac.wav"));
         let power = clean.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>() / clean.len() as f64;
-        let model = EncodecModel::load_default(ModelParts::Decoder).unwrap();
+        let model = DacModel::load_default(ModelParts::Decoder).unwrap();
         println!(
             "{:>7} {:>7} {:>6} {:>15} {:>9} {:>10} {:>11} {:>15}",
             "SNR dB", "rx SNR", "SFs", "regions failed", "repaired", "concealed", "unverified", "HE-AAC conc."
@@ -311,7 +311,7 @@ mod loopback {
             let mut rx = Receiver::new(ReceiverConfig { input: InputFormat::Real(RealChannel::Mix), channels: 1, ..Default::default() });
             let mut ens = Ensemble::new();
             let mut msc_config = None;
-            let mut audio: Option<(AudioDeframer, EncodecDecoder)> = None;
+            let mut audio: Option<(AudioDeframer, DacDecoder)> = None;
             for block in noisy.chunks(4800) {
                 for ev in rx.push(block) {
                     match ev {
@@ -327,8 +327,8 @@ mod loopback {
                                 && let Some(p) = ens.service(0).and_then(|s| s.audio.clone())
                             {
                                 let stream = ens.stream_lengths()[usize::from(p.stream_id)];
-                                let config = EncodecConfig::from_codec_config(&p.codec_config).unwrap();
-                                let dec = EncodecDecoder::new(std::sync::Arc::clone(&model), config).unwrap();
+                                let config = DacConfig::from_codec_config(&p.codec_config).unwrap();
+                                let dec = DacDecoder::new(std::sync::Arc::clone(&model), config).unwrap();
                                 audio = Some((AudioDeframer::new(&p, stream).unwrap(), dec));
                             }
                             if let (Some((deframer, dec)), Some(Some(lf))) = (audio.as_mut(), demultiplex(&frame, mux).first()) {
@@ -366,10 +366,10 @@ mod loopback {
     }
 
     /// Mode D, 10 kHz, 16-QAM, long interleaving and the small 4-QAM SDC (15 bytes: the
-    /// multiplex description and the EnCodec audio information fill it exactly): the
+    /// multiplex description and the DAC audio information fill it exactly): the
     /// robust case, 6 kbit/s.
     #[test]
-    fn encodec_mode_d_10khz_loopback() {
+    fn dac_mode_d_10khz_loopback() {
         if !weights_installed() {
             return;
         }
@@ -384,21 +384,21 @@ mod loopback {
             interleaving = "long"
             protection_b = 1
             [output]
-            file = "encodec_d.wav"
+            file = "dac_d.wav"
             [time]
             enabled = false
             [[service]]
             label = "Mode D"
             id = 0xD0D0E3
             [service.audio]
-            codec = "encodec"
+            codec = "dac"
             bandwidth_kbps = 6
             text = ["Robust"]
             input = { file = "tone.wav" }
         "#;
         let (plan, _) = transmit(dir.path(), toml, 35);
         assert_eq!(plan.sdc_capacity, 15);
-        let d = decode(&dir.path().join("encodec_d.wav"));
+        let d = decode(&dir.path().join("dac_d.wav"));
         check_service(&d, &plan, 6.0, "Robust");
     }
 }

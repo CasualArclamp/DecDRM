@@ -59,7 +59,7 @@ programme_type = "Pop Music" # FAC programme type: name from table 19 or 0-31
 
 [service.audio]
 codec = "he-aac"             # "aac", "he-aac" (SBR), "he-aac-v2" (SBR + parametric stereo), "xhe-aac"
-                             # (MPEG-D USAC), "opus", "encodec"
+                             # (MPEG-D USAC), "opus", "dac"
 core_rate = 12000            # AAC core rate: 12000 (5 frames per 400 ms) or 24000 (10 frames)
 stereo = false               # stereo coding (HE-AAC v2 is always parametric stereo)
 # xHE-AAC (codec = "xhe-aac", without core_rate) fills whatever stream it gets, from about
@@ -72,8 +72,8 @@ stereo = false               # stereo coding (HE-AAC v2 is always parametric ste
                              # (mono only) or 48000
 # sbr_ratio = "auto"         # "xhe-aac" only: "auto" (the encoder's choice for the rate), "none"
                              # (up to 32 kHz), "8:3", "2:1" or "4:1" (mono only, from 32 kHz)
-# bandwidth_kbps = 6         # "encodec" only (DecDRM's experimental neural codec, 24 kHz mono; needs a
-                             # build with --features encodec and `decdrm models download encodec`):
+# bandwidth_kbps = 6         # "dac" only (DecDRM's neural codec DAC, 24 kHz mono; needs a build with
+                             # --features dac and `decdrm models download dac`):
                              # 1.5, 3, 6, 12 or 24 kbit/s; default: the highest that fits the stream
 # share = 1.0                # weight when several audio services split the capacity
 # part = "B"                 # "A" puts the stream into the higher protected part

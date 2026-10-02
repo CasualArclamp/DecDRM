@@ -10,12 +10,12 @@
 //! 2. **Repetition before granularity.** The spare bytes then buy robustness: first as
 //!    many repeated layers as fit (a second copy turns a region loss probability *p*
 //!    into roughly *p*², far more than finer CRC groups gain), then the finest group
-//!    size (3, 5 or 6 frames; never finer than 40 ms — EnCodec's decoder smears errors
+//!    size (3, 5 or 6 frames; never finer than 40 ms — the decoder network smears errors
 //!    over neighbouring frames anyway, and the CRC overhead would grow past 20 %).
 //!
 //! Whatever is still left over is zero padding.
 
-use crate::config::{Bandwidth, EncodecConfig, MAX_REPEATED_LAYERS};
+use crate::config::{Bandwidth, DacConfig, MAX_REPEATED_LAYERS};
 use crate::framing::FrameLayout;
 
 /// Largest CRC group (frames) the automatic bandwidth choice accepts: 80 ms.
@@ -25,7 +25,7 @@ const FINE_GROUPS: [usize; 3] = [3, 5, 6];
 /// Group sizes for streams that only fit with coarser groups.
 const COARSE_GROUPS: [usize; 3] = [10, 15, 30];
 
-/// The stream is too small for EnCodec (at the requested bandwidth).
+/// The stream is too small for DAC (at the requested bandwidth).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanError {
     /// The (lowest) bandwidth that was tried.
@@ -40,7 +40,7 @@ impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "EnCodec {} needs an audio super frame of at least {} bytes ({:.2} kbit/s), the stream leaves {}",
+            "DAC {} needs an audio super frame of at least {} bytes ({:.2} kbit/s), the stream leaves {}",
             self.bandwidth,
             self.needed,
             self.needed as f64 * 8.0 / 400.0,
@@ -53,13 +53,13 @@ impl std::error::Error for PlanError {}
 
 /// Bytes a configuration needs.
 pub fn required_bytes(bandwidth: Bandwidth, group_frames: usize, repeated_layers: usize) -> usize {
-    EncodecConfig::new(bandwidth, group_frames, repeated_layers).map_or(usize::MAX, |c| FrameLayout::new(c).min_bytes())
+    DacConfig::new(bandwidth, group_frames, repeated_layers).map_or(usize::MAX, |c| FrameLayout::new(c).min_bytes())
 }
 
 /// The configuration for an audio super frame (stream minus text message bytes) of
 /// `len` bytes: the requested bandwidth, or the largest that fits (see the module
 /// docs).
-pub fn choose_config(len: usize, requested: Option<Bandwidth>) -> Result<EncodecConfig, PlanError> {
+pub fn choose_config(len: usize, requested: Option<Bandwidth>) -> Result<DacConfig, PlanError> {
     let candidates: Vec<Bandwidth> = match requested {
         Some(b) => vec![b],
         None => Bandwidth::ALL.iter().rev().copied().collect(),
@@ -75,10 +75,10 @@ pub fn choose_config(len: usize, requested: Option<Bandwidth>) -> Result<Encodec
 
 /// Most repeated layers, then the finest group, that fit into `len` bytes. The largest
 /// group without repetition must fit.
-fn best_framing(bw: Bandwidth, groups: &[usize], len: usize) -> EncodecConfig {
+fn best_framing(bw: Bandwidth, groups: &[usize], len: usize) -> DacConfig {
     for r in (0..=MAX_REPEATED_LAYERS.min(bw.layers())).rev() {
         if let Some(&g) = groups.iter().find(|&&g| required_bytes(bw, g, r) <= len) {
-            return EncodecConfig::new(bw, g, r).expect("valid by construction");
+            return DacConfig::new(bw, g, r).expect("valid by construction");
         }
     }
     unreachable!("the caller checked that {bw} fits with {} frames per group", groups[groups.len() - 1])

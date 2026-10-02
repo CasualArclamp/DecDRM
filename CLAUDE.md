@@ -37,9 +37,11 @@ milestone checklist (keep it current).
   and `mock::MockKiwi` (a stand-in Kiwi on 127.0.0.1 for tests). Engine input
   `InputSpec::Kiwi`; CLI `decdrm rx --kiwi`; GUI *KiwiSDR* source and *Find…* window.
   Live tests on public Kiwis only when the user agrees; never pretend to be a browser.
-- `crates/decdrm-encodec` — experimental EnCodec codec; candle only with the
-  `encodec` feature (engine/station/cli/gui forward it). Weights live in the
-  git-ignored `models/` (`decdrm models download encodec`).
+- `crates/decdrm-dac` — DAC (Descript Audio Codec, 24 kHz), DecDRM's neural codec
+  extension (it replaced EnCodec on 2026-10-02; old `ENC1` services are named, not
+  decoded); candle only with the `dac` feature (engine/station/cli/gui forward it).
+  Streaming model with exact chunking (`model.rs`, tested against `model/reference.rs`).
+  Weights live in the git-ignored `models/` (`decdrm models download dac`).
 - `apps/decdrm-cli` (binary `decdrm`: `rx` (also `--kiwi`, `--kiwi2` for diversity), `tx`, `schedule`, `devices`, `models`), `apps/decdrm-gui` (egui,
   MSRV 1.95 because of eframe).
 - `third_party/` — pinned submodules (fdk-aac v2.0.3, opus v1.6.1, libxaac v0.1.13);

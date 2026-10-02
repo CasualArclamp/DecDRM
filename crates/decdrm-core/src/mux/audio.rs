@@ -19,9 +19,9 @@
 //!   frames, so [`XheAacDeframer`] / [`XheAacFramer`] keep state between calls; frame
 //!   border indices 0xFFE/0xFFF place a border 2 or 1 bytes before the end of the
 //!   previous payload.
-//! * **EnCodec** (DecDRM's experimental extension): the whole audio super frame goes to
-//!   the codec as one frame; its layout (codes, CRCs, repetition) is the
-//!   `decdrm-encodec` crate's business.
+//! * **DAC** (DecDRM's neural codec extension): the whole audio super frame goes to the
+//!   codec as one frame; its layout (codes, CRCs, repetition) is the `decdrm-dac`
+//!   crate's business.
 //!
 //! When the SDC text flag is set, the last four bytes of the logical frame carry the
 //! text message (§6.5) and are not part of the audio super frame
@@ -52,7 +52,7 @@ pub const XHE_AAC_MAX_BORDERS: usize = 15;
 pub struct AudioFrame {
     /// AAC: the raw frame without its CRC byte. Opus: the Opus packet. xHE-AAC: the
     /// whole audio frame — USAC access unit plus its 16-bit CRC — which is what Dream
-    /// hands to FDK-AAC (see [`AudioFrame::usac_access_unit`]). EnCodec: the whole audio
+    /// hands to FDK-AAC (see [`AudioFrame::usac_access_unit`]). DAC: the whole audio
     /// super frame.
     pub data: Vec<u8>,
     /// AAC `aac_crc_bits` — it covers bit ranges of the frame's side information, so
@@ -586,7 +586,7 @@ pub struct AudioSuperFrame {
     /// Why the super frame could not be split (a corrupt header); the decoder should
     /// conceal [`AudioSuperFrame::nominal_frames`] frames then.
     pub error: Option<AudioError>,
-    /// Frames per super frame for AAC (5/10), Opus (20) and EnCodec (1: the whole super
+    /// Frames per super frame for AAC (5/10), Opus (20) and DAC (1: the whole super
     /// frame); `None` for xHE-AAC.
     pub nominal_frames: Option<usize>,
     /// Text message bytes of this logical frame (text flag set).
@@ -599,7 +599,7 @@ pub struct AudioSuperFrame {
 enum Deframer {
     Aac(AacSuperFrameFormat),
     Xhe(XheAacDeframer),
-    /// The super frame is one codec frame (EnCodec).
+    /// The super frame is one codec frame (DAC).
     Whole,
 }
 
@@ -625,7 +625,7 @@ impl AudioDeframer {
             }
             AudioCodec::Opus => (Deframer::Aac(AacSuperFrameFormat::opus(stream)), Some(OPUS_FRAMES_PER_SUPER_FRAME)),
             AudioCodec::XheAac => (Deframer::Xhe(XheAacDeframer::new()), None),
-            AudioCodec::Encodec => (Deframer::Whole, Some(1)),
+            AudioCodec::Dac | AudioCodec::Encodec => (Deframer::Whole, Some(1)),
             AudioCodec::Reserved => return Err(AudioError::Unsupported("reserved audio coding")),
         };
         Ok(Self { deframer, text_flag: params.text_flag, nominal_frames })
@@ -989,9 +989,9 @@ mod tests {
     }
 
     #[test]
-    fn encodec_super_frame_passed_whole() {
-        let config = vec![0x00, b'E', b'N', b'C', b'1', 0x48];
-        let params = AudioParams::new(0, AudioCodec::Encodec, false, AudioMode::Mono, 24_000, true, config);
+    fn dac_super_frame_passed_whole() {
+        let config = vec![0x00, b'D', b'A', b'C', b'1', 0x48];
+        let params = AudioParams::new(0, AudioCodec::Dac, false, AudioMode::Mono, 24_000, true, config);
         let mut d = AudioDeframer::new(&params, StreamLengths { part_a: 0, part_b: 104 }).unwrap();
         let mut lf = pseudo(100, 9);
         lf.extend_from_slice(b"TEXT");

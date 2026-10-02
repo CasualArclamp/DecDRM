@@ -1,11 +1,11 @@
 # Builds single-file DecDRM executables for 64-bit Windows 10/11 that need nothing
 # installed: the C runtime is linked statically (no Visual C++ redistributable) and the
-# experimental EnCodec codec comes with its weights built in. The results go to exe\
+# neural codec DAC comes with its weights built in. The results go to exe\
 # (git-ignored): decdrm-gui.exe (receiver + transmitter) and decdrm.exe (command line).
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1
 #
-# Needs the EnCodec weights at build time (`decdrm models download encodec`, or
+# Needs the DAC weights at build time (`decdrm models download dac`, or
 # $env:DECDRM_MODELS). Builds in target\portable, so the usual target directory and its
 # cache stay as they are.
 

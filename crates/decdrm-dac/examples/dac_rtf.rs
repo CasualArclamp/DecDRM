@@ -2,26 +2,23 @@
 //! steps, as a DRM receiver runs it: 20 s of test signal, 16 codebooks (12 kbit/s).
 //!
 //! ```text
-//! cargo run --release -p decdrm-encodec --features encodec --example dac_rtf
+//! cargo run --release -p decdrm-dac --features dac --example dac_rtf
 //! ```
 //!
-//! Set `RAYON_NUM_THREADS=1` to measure on a single core. Needs the DAC weights in
-//! `models/dac_24khz/model.safetensors` (or `$DECDRM_DAC`).
+//! Set `RAYON_NUM_THREADS=1` to measure on a single core. Needs the model weights
+//! (`decdrm models download dac`).
 
 #[path = "../tests/common/mod.rs"]
 mod common;
 
-use decdrm_encodec::dac::{DacModel, ENCODER_LEAD_IN, LATENT_DIM};
-use decdrm_encodec::SUPER_FRAME_SAMPLES;
-use std::path::{Path, PathBuf};
+use decdrm_dac::model::{DacModel, ENCODER_LEAD_IN, ModelParts};
+use decdrm_dac::{LATENT_DIM, SUPER_FRAME_SAMPLES};
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::var_os("DECDRM_DAC")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/dac_24khz/model.safetensors"));
+    let path = decdrm_dac::find_weights()?;
     let t = Instant::now();
-    let model = DacModel::load(&path)?;
+    let model = DacModel::load(&path, ModelParts::Both)?;
     println!("DAC loaded in {:.2} s; candle threads: {}", t.elapsed().as_secs_f64(), candle_core::utils::get_num_threads());
 
     let mut x = common::test_signal();
@@ -32,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seconds = x.len() as f64 / 24_000.0;
     let codebooks = 16;
 
-    let mut enc = model.encoder_state();
+    let mut enc = model.encoder_state()?;
     model.encode_latents(&mut enc, &vec![0.0; ENCODER_LEAD_IN])?;
     let t = Instant::now();
     let mut codes = Vec::new();
@@ -42,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let encode = t.elapsed().as_secs_f64();
 
-    let mut dec = model.decoder_state();
+    let mut dec = model.decoder_state()?;
     let (t, mut worst, mut samples) = (Instant::now(), 0.0f64, 0);
     for c in &codes {
         let t1 = Instant::now();

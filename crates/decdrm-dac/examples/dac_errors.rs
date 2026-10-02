@@ -1,4 +1,4 @@
-//! Bit errors against EnCodec's CRC policies and concealment methods. The decoded audio
+//! Bit errors against DAC's CRC policies and concealment methods. The decoded audio
 //! is compared with the error-free decoding by two measures (see `tests/common`):
 //!
 //! * log-spectral distance (LSD) of 40 ms frames — how far the spectral envelope
@@ -11,20 +11,21 @@
 //! garbage (e.g. while synchronisation is lost).
 //!
 //! ```text
-//! cargo run --release -p decdrm-encodec --features encodec --example encodec_errors
+//! cargo run --release -p decdrm-dac --features dac --example dac_errors
 //! ```
 
 #[path = "../tests/common/mod.rs"]
 mod common;
 
 use common::{Rng, inject_bursts, log_spectral_distance, segmental_nrr};
-use decdrm_encodec::{
-    Bandwidth, Concealment, CrcPolicy, EncodecConfig, EncodecDecoder, EncodecDrmEncoder, EncodecModel, FrameLayout,
+use decdrm_dac::{
+    Bandwidth, Concealment, CrcPolicy, DacConfig, DacDecoder, DacDrmEncoder, DacModel, FrameLayout,
     ModelParts, SUPER_FRAME_SAMPLES,
 };
 use std::sync::Arc;
 
-const STRATEGIES: [(&str, CrcPolicy, Concealment); 5] = [
+const STRATEGIES: [(&str, CrcPolicy, Concealment); 6] = [
+    ("adaptive+interp", CrcPolicy::Adaptive, Concealment::Interpolate),
     ("ignore CRCs", CrcPolicy::Ignore, Concealment::Interpolate),
     ("strict+interp", CrcPolicy::Strict, Concealment::Interpolate),
     ("trust+interp", CrcPolicy::TrustEnhancement, Concealment::Interpolate),
@@ -32,23 +33,23 @@ const STRATEGIES: [(&str, CrcPolicy, Concealment); 5] = [
     ("trust+mute", CrcPolicy::TrustEnhancement, Concealment::Mute),
 ];
 
-fn decode(model: &Arc<EncodecModel>, config: EncodecConfig, sfs: &[Vec<u8>], p: CrcPolicy, c: Concealment) -> Vec<f32> {
-    let mut dec = EncodecDecoder::new(Arc::clone(model), config).expect("decoder");
+fn decode(model: &Arc<DacModel>, config: DacConfig, sfs: &[Vec<u8>], p: CrcPolicy, c: Concealment) -> Vec<f32> {
+    let mut dec = DacDecoder::new(Arc::clone(model), config).expect("decoder");
     dec.set_crc_policy(p);
     dec.set_concealment(c);
     sfs.iter().flat_map(|sf| dec.decode_super_frame(sf).expect("decode").pcm).collect()
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let model = EncodecModel::load_default(ModelParts::Both)?;
+    let model = DacModel::load_default(ModelParts::Both)?;
     let mut x = common::test_signal();
     x.extend(common::speech_like(6.0));
     let seeds = 3u64;
 
     for (bw, repeated) in [(Bandwidth::Kbps6, 0), (Bandwidth::Kbps6, 1), (Bandwidth::Kbps3, 1)] {
-        let config = EncodecConfig::new(bw, 3, repeated)?;
+        let config = DacConfig::new(bw, 3, repeated)?;
         let len = FrameLayout::new(config).min_bytes();
-        let mut enc = EncodecDrmEncoder::new(Arc::clone(&model), config)?;
+        let mut enc = DacDrmEncoder::new(Arc::clone(&model), config)?;
         let clean: Vec<Vec<u8>> =
             x.as_chunks::<SUPER_FRAME_SAMPLES>().0.iter().map(|c| enc.super_frame(c, len)).collect::<Result<_, _>>()?;
         let reference = decode(&model, config, &clean, CrcPolicy::default(), Concealment::default());

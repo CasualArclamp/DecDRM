@@ -4,8 +4,8 @@
 //! (`station.toml`, see `examples/station.toml`): the channel (robustness mode,
 //! bandwidth, MSC/SDC constellations, protection levels, interleaving), the outputs
 //! (WAV/FLAC file and/or sound card, real IF or I/Q), and up to four services — audio
-//! services (AAC, HE-AAC, HE-AAC v2, xHE-AAC, Opus or — with the `encodec` feature —
-//! DecDRM's experimental EnCodec, from a file, a sound card, an internet radio stream
+//! services (AAC, HE-AAC, HE-AAC v2, xHE-AAC, Opus or — with the `dac` feature —
+//! DecDRM's neural codec DAC, from a file, a sound card, an internet radio stream
 //! ([`webstream`]) or a test tone, with text messages) and data services (MOT
 //! slideshow, broadcast website,
 //! Journaline, EPG, TPEG or raw data), whose applications may also ride along with an
@@ -15,7 +15,7 @@
 //! StationConfig ──validate──▶ MultiplexPlan (streams, lengths, codec parameters)
 //!        │
 //!        ▼ Station::new
-//!  audio input ─▶ FDK-AAC / libxaac / Opus / EnCodec ─▶ super frame + text ─┐
+//!  audio input ─▶ FDK-AAC / libxaac / Opus / DAC ─▶ super frame + text ─────┐
 //!  data carousels ─▶ packet mode ─────────────────────────────┼▶ MSC multiplex ─┐
 //!  SDC entities ─▶ SDC scheduler (cycling) ────────────────────────────────────┼▶ Transmitter ─▶ OutputStage ─▶ file / sound card
 //!  FAC service rotation (table 60) ────────────────────────────────────────────┘

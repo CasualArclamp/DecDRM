@@ -1,6 +1,6 @@
 //! Audio services: the input (file, sound card, web stream — see [`crate::webstream`] —
 //! or test tone, converted to the encoder's rate and channel count), the encoder
-//! (FDK-AAC, libxaac for xHE-AAC, Opus, or EnCodec with the `encodec` feature) and the
+//! (FDK-AAC, libxaac for xHE-AAC, Opus, or DAC with the `dac` feature) and the
 //! logical frame of each 400 ms multiplex frame (audio super frame plus text message
 //! piece; a web stream's titles join the configured messages).
 //!
@@ -8,7 +8,7 @@
 //! PCM at the encoder's input rate — five or ten AAC granules of 960 core samples
 //! (1920 input samples with SBR), twenty 20 ms Opus frames, 400 ms of xHE-AAC input
 //! (1024-, 2048- or 4096-sample frames that do not align with the super frames), or
-//! thirty 320-sample EnCodec frames at 24 kHz — and produces one audio super frame
+//! thirty 320-sample DAC frames at 24 kHz — and produces one audio super frame
 //! (ES 201 980 §5.3.1, §5.4.1).
 //!
 //! FDK-AAC has an encoder delay: its first calls return no frame. The encoder is primed
@@ -841,15 +841,15 @@ impl XheEncoder {
     }
 }
 
-/// EnCodec encoder producing DecDRM's EnCodec super frames (the `encodec` feature).
-#[cfg(feature = "encodec")]
-struct EncodecEncoder {
-    enc: decdrm_encodec::EncodecDrmEncoder,
+/// DAC encoder producing DecDRM's DAC super frames (the `dac` feature).
+#[cfg(feature = "dac")]
+struct DacEncoder {
+    enc: decdrm_dac::DacDrmEncoder,
     encoder_errors: u64,
 }
 
-#[cfg(feature = "encodec")]
-impl EncodecEncoder {
+#[cfg(feature = "dac")]
+impl DacEncoder {
     fn super_frame(&mut self, pcm: &[f32], len: usize) -> Vec<u8> {
         match self.enc.super_frame(pcm, len) {
             Ok(sf) => sf,
@@ -862,29 +862,29 @@ impl EncodecEncoder {
     }
 }
 
-/// The EnCodec encoder of `plan`, with the encoder half of the model from the default
-/// location (`decdrm_encodec::weights`).
-#[cfg(feature = "encodec")]
-fn open_encodec(plan: &AudioPlan) -> std::result::Result<Encoder, decdrm_codecs::CodecError> {
+/// The DAC encoder of `plan`, with the encoder half of the model from the default
+/// location (`decdrm_dac::weights`).
+#[cfg(feature = "dac")]
+fn open_dac(plan: &AudioPlan) -> std::result::Result<Encoder, decdrm_codecs::CodecError> {
     let config = plan
-        .encodec
-        .ok_or_else(|| decdrm_codecs::CodecError::InvalidConfig("EnCodec service without a configuration".into()))?;
-    decdrm_encodec::EncodecDrmEncoder::open(config)
-        .map(|enc| Encoder::Encodec(EncodecEncoder { enc, encoder_errors: 0 }))
+        .dac
+        .ok_or_else(|| decdrm_codecs::CodecError::InvalidConfig("DAC service without a configuration".into()))?;
+    decdrm_dac::DacDrmEncoder::open(config)
+        .map(|enc| Encoder::Dac(DacEncoder { enc, encoder_errors: 0 }))
         .map_err(|e| decdrm_codecs::CodecError::Unsupported(e.to_string()))
 }
 
-#[cfg(not(feature = "encodec"))]
-fn open_encodec(_plan: &AudioPlan) -> std::result::Result<Encoder, decdrm_codecs::CodecError> {
-    Err(decdrm_codecs::CodecError::Unsupported("EnCodec is not built in (build with `--features encodec`)".into()))
+#[cfg(not(feature = "dac"))]
+fn open_dac(_plan: &AudioPlan) -> std::result::Result<Encoder, decdrm_codecs::CodecError> {
+    Err(decdrm_codecs::CodecError::Unsupported("DAC is not built in (build with `--features dac`)".into()))
 }
 
 enum Encoder {
     Aac(AacEncoder),
     Xhe(Box<XheEncoder>),
     Opus(OpusEncoder),
-    #[cfg(feature = "encodec")]
-    Encodec(EncodecEncoder),
+    #[cfg(feature = "dac")]
+    Dac(DacEncoder),
 }
 
 // ---------------------------------------------------------------------------------
@@ -941,7 +941,7 @@ impl AudioChain {
         let encoder = match plan.codec {
             Codec::Opus => OpusEncoder::new(plan, stream).map(Encoder::Opus),
             Codec::XheAac => XheEncoder::new(plan).map(|e| Encoder::Xhe(Box::new(e))),
-            Codec::Encodec => open_encodec(plan),
+            Codec::Dac => open_dac(plan),
             _ => AacEncoder::new(plan, stream).map(Encoder::Aac),
         }
         .map_err(|source| StationError::Codec { service: name, source })?;
@@ -1017,10 +1017,10 @@ impl AudioChain {
                 self.counters.encoder_errors = e.encoder_errors;
                 sf
             }
-            #[cfg(feature = "encodec")]
-            Encoder::Encodec(e) => {
+            #[cfg(feature = "dac")]
+            Encoder::Dac(e) => {
                 let sf = e.super_frame(&self.pcm, len);
-                self.counters.frames_dropped = e.encoder_errors * decdrm_encodec::FRAMES_PER_SUPER_FRAME as u64;
+                self.counters.frames_dropped = e.encoder_errors * decdrm_dac::FRAMES_PER_SUPER_FRAME as u64;
                 self.counters.encoder_errors = e.encoder_errors;
                 sf
             }

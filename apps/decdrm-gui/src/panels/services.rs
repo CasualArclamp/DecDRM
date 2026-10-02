@@ -65,10 +65,11 @@ pub fn codec_title(a: &AudioCodingView) -> String {
         "AAC" if a.sbr && a.parametric_stereo => "HE-AAC v2".into(),
         "AAC" if a.sbr => "HE-AAC".into(),
         "reserved" => "CELP/HVXC (reserved)".into(),
-        "EnCodec" => match &a.detail {
-            Some(d) => format!("EnCodec {d}"),
-            None => "EnCodec".into(),
+        "DAC" => match &a.detail {
+            Some(d) => format!("DAC {d}"),
+            None => "DAC".into(),
         },
+        "EnCodec" => "EnCodec (no longer supported)".into(),
         "EVS" => "EVS 13.2".into(),
         other => other.into(),
     }

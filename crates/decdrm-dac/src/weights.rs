@@ -1,20 +1,20 @@
-//! Where the EnCodec model weights live, and fetching them.
+//! Where the DAC model weights live, and fetching them.
 //!
-//! The weights are Meta's `facebook/encodec_24khz` model from Hugging Face (MIT
-//! licence), the `model.safetensors` of a pinned revision (93 MB, float32). They are
+//! The weights are Descript's `descript/dac_24khz` model from Hugging Face (MIT
+//! licence), the `model.safetensors` of a pinned revision (299 MB, float32). They are
 //! never committed; each installation downloads them once:
 //!
 //! ```text
-//! decdrm models download encodec            # into the default models directory
-//! decdrm models download encodec --dir D    # into D/encodec_24khz/model.safetensors
+//! decdrm models download dac            # into the default models directory
+//! decdrm models download dac --dir D    # into D/dac_24khz/model.safetensors
 //! ```
 //!
 //! **Models directory**: `$DECDRM_MODELS` if that environment variable is set,
 //! otherwise `models` next to the executable. The weights are
-//! `<models>/encodec_24khz/model.safetensors`.
+//! `<models>/dac_24khz/model.safetensors`.
 //!
 //! **Lookup** ([`find_weights`]): with `$DECDRM_MODELS` set, only there. Otherwise
-//! `models/encodec_24khz/model.safetensors` in the executable's directory and up to four
+//! `models/dac_24khz/model.safetensors` in the executable's directory and up to four
 //! of its parents, so that development builds (`target/release/decdrm`, test binaries in
 //! `target/debug/deps`) find a `models` directory at the workspace root. Builds with the
 //! `embed-weights` feature (single-file portable executables) fall back to the weights
@@ -27,17 +27,17 @@ use std::process::Command;
 
 /// Environment variable naming the models directory.
 pub const MODELS_ENV: &str = "DECDRM_MODELS";
-/// Subdirectory of the models directory for the EnCodec model.
-pub const MODEL_NAME: &str = "encodec_24khz";
+/// Subdirectory of the models directory for the DAC model.
+pub const MODEL_NAME: &str = "dac_24khz";
 /// Weights file name.
 pub const WEIGHTS_FILE: &str = "model.safetensors";
-/// Download URL of the weights (pinned revision of `facebook/encodec_24khz`).
+/// Download URL of the weights (pinned revision of `descript/dac_24khz`).
 pub const WEIGHTS_URL: &str =
-    "https://huggingface.co/facebook/encodec_24khz/resolve/c1dbe2ae3f1de713481a3b3e7c47f357092ee040/model.safetensors";
+    "https://huggingface.co/descript/dac_24khz/resolve/6ba020b5ba7d9d8076fb90db7e67f27e31980f6e/model.safetensors";
 /// Size of the weights file, bytes.
-pub const WEIGHTS_SIZE: u64 = 93_119_608;
+pub const WEIGHTS_SIZE: u64 = 298_652_268;
 /// SHA-256 of the weights file.
-pub const WEIGHTS_SHA256: &str = "37a7cb100f71a29e6c1d815aca8666a1d7ea8885ebe44c306c751a5103559d57";
+pub const WEIGHTS_SHA256: &str = "7452e3fc6972991da871ae1a1c9d3e8e219aa247cc0f757018867d6a7fe59aaf";
 
 /// Parent directories of the executable searched besides its own.
 const PARENT_LEVELS: usize = 4;
@@ -94,7 +94,7 @@ pub struct WeightsNotFound {
 
 impl std::fmt::Display for WeightsNotFound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "EnCodec model weights not found")?;
+        write!(f, "DAC model weights not found")?;
         match self.searched.as_slice() {
             [] => {}
             [one] => write!(f, " at {}", one.display())?,
@@ -102,7 +102,7 @@ impl std::fmt::Display for WeightsNotFound {
         }
         write!(
             f,
-            "; run `decdrm models download encodec`, or set {MODELS_ENV} to the directory containing \
+            "; run `decdrm models download dac`, or set {MODELS_ENV} to the directory containing \
              {MODEL_NAME}/{WEIGHTS_FILE}"
         )
     }
@@ -136,7 +136,7 @@ pub enum DownloadError {
         #[source]
         source: std::io::Error,
     },
-    #[error("{path} has {got} bytes, the EnCodec weights have {want}")]
+    #[error("{path} has {got} bytes, the DAC weights have {want}")]
     Size { path: PathBuf, got: u64, want: u64 },
     #[error("{path}: SHA-256 {got} differs from the expected {want}")]
     Checksum { path: PathBuf, got: String, want: &'static str },
@@ -174,7 +174,7 @@ fn check_weights(path: &Path, got: u64, mut file: impl Read) -> Result<(), Downl
     Ok(())
 }
 
-/// Download the weights into `models_dir` (as `encodec_24khz/model.safetensors`) with
+/// Download the weights into `models_dir` (as `dac_24khz/model.safetensors`) with
 /// `curl` (or `wget`), which show their own progress on stderr. The file is written
 /// under a temporary name, verified ([`verify_weights`]) and then renamed, so an
 /// interrupted download never leaves a broken weights file behind. Returns the path.
@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn lookup_paths() {
         let p = weights_path(Path::new("m"));
-        assert_eq!(p, Path::new("m").join("encodec_24khz").join("model.safetensors"));
+        assert_eq!(p, Path::new("m").join("dac_24khz").join("model.safetensors"));
         // Without the environment variable: the executable's directory and its parents.
         if std::env::var_os(MODELS_ENV).is_none() {
             let c = candidate_paths();
@@ -235,7 +235,7 @@ mod tests {
             assert_eq!(c[0], weights_path(&exe_dir.join("models")));
         }
         let e = WeightsNotFound { searched: vec![PathBuf::from("a"), PathBuf::from("b")] }.to_string();
-        assert!(e.contains("decdrm models download encodec") && e.contains(MODELS_ENV), "{e}");
+        assert!(e.contains("decdrm models download dac") && e.contains(MODELS_ENV), "{e}");
     }
 
     /// The downloaded weights at the workspace root (if present) are intact.

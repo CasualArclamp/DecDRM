@@ -492,6 +492,7 @@ pub(crate) fn describe_audio(p: &decdrm_core::mux::service::AudioParams) -> Stri
         AudioCodec::Aac => "AAC",
         AudioCodec::Opus => "Opus",
         AudioCodec::XheAac => "xHE-AAC",
+        AudioCodec::Dac => "DAC",
         AudioCodec::Encodec => "EnCodec",
         AudioCodec::Reserved => "audio",
     };

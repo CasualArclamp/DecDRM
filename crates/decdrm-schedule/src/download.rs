@@ -1,5 +1,5 @@
 //! Fetching a URL with `curl` (or `wget`), as `decdrm models download` fetches the
-//! EnCodec weights (`decdrm_encodec::weights::download_weights`): DecDRM has no HTTP
+//! DAC weights (`decdrm_dac::weights::download_weights`): DecDRM has no HTTP
 //! client of its own. Windows 10/11 ship `curl.exe`; Linux distributions have one of
 //! the two. Called only when the user asks for an update.
 

@@ -80,9 +80,13 @@ encoding) and libopus.
   `…_6140.00_iq.wav`) picks out the station.
 - Light on the CPU: the receiver decodes 10 kHz signals at 100–150× real time (20 kHz
   at ~45×) on one core; the GUI needs a few percent of a core while decoding live.
-- Experimental **EnCodec** (Meta's neural codec) as a DecDRM-only audio codec: 1.5–24
-  kbit/s, CRC-protected layers and concealment — at 15 dB SNR it lost 2 % of audio
-  frames where HE-AAC lost 26 %. Standard receivers (and Dream) ignore it.
+- **DAC** (the Descript Audio Codec, a neural codec) as a DecDRM-only audio codec:
+  1.5–24 kbit/s, CRC-protected layers and concealment — at 15 dB SNR it lost 1.4 % of
+  audio frames where HE-AAC lost 37 %. On broadcast audio and speech, DAC at 3 kbit/s
+  came about as close to the original as EnCodec (the neural codec of DecDRM 0.4.6 and
+  earlier) at 12. It needs a reasonably modern CPU: decoding takes a quarter of real
+  time on a 16-thread desktop, 0.83 on one core. Standard receivers (and Dream) ignore
+  it.
 
 ## Building
 
@@ -97,11 +101,11 @@ on Windows, gcc on Linux) and CMake for the vendored codecs, and on Linux the AL
 development package (`libasound2-dev`).
 
 **Portable Windows executables**: `decdrm-gui.exe` and `decdrm.exe` that run on any
-64-bit Windows 10/11 with nothing installed (C runtime linked statically, EnCodec with
-its weights built in, about 100 MB each) are attached to the
+64-bit Windows 10/11 with nothing installed (C runtime linked statically, DAC with its
+weights built in, about 320 MB each) are attached to the
 [releases](https://github.com/CasualArclamp/DecDRM/releases), or built into `exe\`
 with `powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1` (after
-`decdrm models download encodec`).
+`decdrm models download dac`).
 
 ## Usage
 
@@ -138,12 +142,12 @@ Korean Central Broadcasting (6140 kHz) sends EVS speech inside a data service. D
 recognises it and shows it as EVS audio, but does not decode it (see the
 [user guide](docs/USER_GUIDE.md#services-and-audio)).
 
-EnCodec (optional, pulls in the candle ML library):
+DAC (optional, pulls in the candle ML library):
 
 ```bash
-cargo build --release -p decdrm-cli --features encodec
-decdrm models download encodec          # ~93 MB weights, SHA-256 checked
-# station.toml: [service.audio] codec = "encodec"   (optional: bandwidth_kbps = 6)
+cargo build --release -p decdrm-cli --features dac
+decdrm models download dac          # ~299 MB weights, SHA-256 checked
+# station.toml: [service.audio] codec = "dac"   (optional: bandwidth_kbps = 6)
 ```
 
 `--log` writes one metrics row per second of signal (SNR, MER, Doppler, delay, clock
@@ -160,7 +164,7 @@ messages, data objects and log lines as events.
 | `decdrm-io` | WAV/FLAC, resampling, sound-card input/output, drift-compensated playback |
 | `decdrm-engine` | Receiver threads, sources, decoding pipelines, status snapshots, logging |
 | `decdrm-station` | Transmitter station: TOML configuration → multiplex → signal |
-| `decdrm-encodec` | Experimental EnCodec codec (feature `encodec`) |
+| `decdrm-dac` | DAC neural codec (feature `dac`) |
 | `decdrm-schedule` | Broadcast schedules (EiBi CSV, Dream's `DRMSchedule.ini`): what is on the air now |
 | `decdrm-cli` | The `decdrm` command-line tool |
 | `decdrm-gui` | The desktop GUI |

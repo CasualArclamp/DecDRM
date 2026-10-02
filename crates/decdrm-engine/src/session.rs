@@ -5,7 +5,7 @@
 //! Pipeline: [`Receiver`] → FAC/SDC into the multiplex model ([`Ensemble`]), which
 //! yields the MSC configuration → decoded MSC frames are demultiplexed into streams →
 //! the selected audio service's stream goes through the super-frame deframer and the
-//! codec (FDK-AAC / Opus / EnCodec with the `encodec` feature), its text message through
+//! codec (FDK-AAC / Opus / DAC with the `dac` feature), its text message through
 //! the text decoder, and every data application's stream through a `decdrm-data`
 //! decoder. EVS audio sent in a data application (KCBS, see `decdrm_evs::kcbs`) is
 //! recognised there and shown as audio, but not decoded.
@@ -879,8 +879,8 @@ fn service_view(s: &ServiceInfo, lengths: &[StreamLengths]) -> crate::snapshot::
         country: s.country_code.as_ref().filter(|c| !c.is_empty() && *c != "--").map(|c| c.to_ascii_uppercase()),
         ca: s.fac.is_some_and(|f| f.audio_ca || f.data_ca),
         decodable: s.audio.as_ref().is_some_and(|a| match a.codec {
-            AudioCodec::Reserved => false,
-            AudioCodec::Encodec => decdrm_encodec::BUILT_IN,
+            AudioCodec::Reserved | AudioCodec::Encodec => false,
+            AudioCodec::Dac => decdrm_dac::BUILT_IN,
             _ => true,
         }),
         warning: None,
@@ -892,13 +892,17 @@ fn audio_view(p: &AudioParams) -> crate::snapshot::AudioCodingView {
         AudioCodec::Aac => "AAC",
         AudioCodec::XheAac => "xHE-AAC",
         AudioCodec::Opus => "Opus",
+        AudioCodec::Dac => "DAC",
         AudioCodec::Encodec => "EnCodec",
         AudioCodec::Reserved => "reserved",
     };
-    let detail = (p.codec == AudioCodec::Encodec).then(|| {
-        decdrm_encodec::EncodecConfig::from_codec_config(&p.codec_config)
-            .map_or_else(|e| e.to_string(), |c| c.bandwidth.to_string())
-    });
+    let detail = match p.codec {
+        AudioCodec::Dac => Some(
+            decdrm_dac::DacConfig::from_codec_config(&p.codec_config).map_or_else(|e| e.to_string(), |c| c.bandwidth.to_string()),
+        ),
+        AudioCodec::Encodec => Some("DecDRM 0.4.6 and earlier, no longer supported".to_string()),
+        _ => None,
+    };
     crate::snapshot::AudioCodingView {
         codec: codec.to_string(),
         sbr: p.sbr,
@@ -929,13 +933,14 @@ fn build_audio(short_id: u8, params: &AudioParams, stream: StreamLengths) -> Res
         AudioCodec::Aac => Some(DrmAudioCoding::Aac),
         AudioCodec::XheAac => Some(DrmAudioCoding::XheAac),
         AudioCodec::Opus => Some(DrmAudioCoding::Opus),
-        AudioCodec::Encodec => None,
+        AudioCodec::Dac => None,
+        AudioCodec::Encodec => return Err(decdrm_dac::ConfigError::Encodec.to_string()),
         AudioCodec::Reserved => return Err("reserved audio coding (CELP/HVXC are not supported)".into()),
     };
     let deframer = AudioDeframer::new(params, stream).map_err(|e| e.to_string())?;
     let decoder = match coding {
         Some(coding) => open_decoder(coding, &params.type9_bytes).map_err(|e| e.to_string())?,
-        None => open_encodec(params)?,
+        None => open_dac(params)?,
     };
     Ok(AudioPipeline {
         short_id,
@@ -948,17 +953,16 @@ fn build_audio(short_id: u8, params: &AudioParams, stream: StreamLengths) -> Res
     })
 }
 
-/// The decoder of a DecDRM EnCodec service (the `encodec` feature). The model weights
-/// are loaded (once per process) from the default location, see
-/// `decdrm_encodec::weights`.
-#[cfg(feature = "encodec")]
-fn open_encodec(params: &AudioParams) -> Result<Box<dyn DrmAudioDecoder>, String> {
-    decdrm_encodec::open_decoder(&params.type9_bytes).map_err(|e| e.to_string())
+/// The decoder of a DecDRM DAC service (the `dac` feature). The model weights are
+/// loaded (once per process) from the default location, see `decdrm_dac::weights`.
+#[cfg(feature = "dac")]
+fn open_dac(params: &AudioParams) -> Result<Box<dyn DrmAudioDecoder>, String> {
+    decdrm_dac::open_decoder(&params.type9_bytes).map_err(|e| e.to_string())
 }
 
-#[cfg(not(feature = "encodec"))]
-fn open_encodec(_params: &AudioParams) -> Result<Box<dyn DrmAudioDecoder>, String> {
-    Err("EnCodec (not built in)".into())
+#[cfg(not(feature = "dac"))]
+fn open_dac(_params: &AudioParams) -> Result<Box<dyn DrmAudioDecoder>, String> {
+    Err("DAC (not built in)".into())
 }
 
 /// Whether two application entries describe the same data channel: the same stream,
@@ -985,7 +989,8 @@ fn describe_audio(p: &AudioParams) -> String {
         AudioCodec::Aac => "AAC",
         AudioCodec::XheAac => "xHE-AAC",
         AudioCodec::Opus => "Opus",
-        AudioCodec::Encodec => return describe_encodec(p),
+        AudioCodec::Dac => return describe_dac(p),
+        AudioCodec::Encodec => return "EnCodec (DecDRM 0.4.6 and earlier, no longer supported)".to_string(),
         AudioCodec::Reserved => "reserved",
     };
     let mode = match p.mode {
@@ -997,18 +1002,18 @@ fn describe_audio(p: &AudioParams) -> String {
     format!("{codec} {mode} {} kHz{}", p.sample_rate_hz / 1000, if p.text_flag { ", text" } else { "" })
 }
 
-/// E.g. `EnCodec 6 kbit/s mono 24 kHz, text` — DecDRM's experimental extension — with
-/// `(not built in)` when this build cannot decode it (no `encodec` feature).
-fn describe_encodec(p: &AudioParams) -> String {
-    let bandwidth = match decdrm_encodec::EncodecConfig::from_codec_config(&p.codec_config) {
+/// E.g. `DAC 6 kbit/s mono 24 kHz, text` — DecDRM's neural codec extension — with
+/// `(not built in)` when this build cannot decode it (no `dac` feature).
+fn describe_dac(p: &AudioParams) -> String {
+    let bandwidth = match decdrm_dac::DacConfig::from_codec_config(&p.codec_config) {
         Ok(c) => format!("{} ", c.bandwidth),
         Err(e) => format!("({e}) "),
     };
     format!(
-        "EnCodec {bandwidth}mono {} kHz{}{}",
+        "DAC {bandwidth}mono {} kHz{}{}",
         p.sample_rate_hz / 1000,
         if p.text_flag { ", text" } else { "" },
-        if decdrm_encodec::BUILT_IN { "" } else { " (not built in)" }
+        if decdrm_dac::BUILT_IN { "" } else { " (not built in)" }
     )
 }
 

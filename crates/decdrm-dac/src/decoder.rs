@@ -5,19 +5,28 @@
 //!
 //! Regions that failed their CRC are first repaired from the repeated copy where there
 //! is one ([`crate::framing`]). What remains is handled by the [`CrcPolicy`] — by
-//! default a frame whose base layer (codebooks 0–1) failed is lost, while failed
-//! enhancement layers are used as received — and lost frames are concealed in the
-//! latent domain, the input of EnCodec's decoder network, according to
-//! [`Concealment`] (default: interpolation between the neighbouring good frames). Both
-//! defaults were the best choices in the measurements quoted in the crate docs.
+//! default ([`CrcPolicy::Adaptive`]) every code is used as received unless the super
+//! frame is garbage; then a frame whose base layer (codebooks 0–1) failed is lost —
+//! and lost frames are concealed in the latent domain, the input of DAC's decoder
+//! network, according to [`Concealment`] (default: interpolation between the
+//! neighbouring good frames). The measurements behind the defaults are in the crate
+//! docs.
+//!
+//! # Delay
+//!
+//! DAC's decoder looks [`DECODER_LAG`] samples (131 ms) ahead, so the PCM of a super
+//! frame comes out that much later: a decoder starts with that much silence and then
+//! returns 400 ms per super frame. The output gains of the concealment follow their
+//! frames through the delay.
 
 use crate::config::{
-    Bandwidth, EncodecConfig, FRAME_SAMPLES, FRAMES_PER_SUPER_FRAME, LATENT_DIM, SAMPLE_RATE,
+    Bandwidth, DacConfig, FRAME_SAMPLES, FRAMES_PER_SUPER_FRAME, LATENT_DIM, SAMPLE_RATE, SUPER_FRAME_SAMPLES,
 };
-use crate::error::EncodecError;
+use crate::error::DacError;
 use crate::framing::{Codes, FrameLayout, layer_codebooks};
-use crate::model::{DecoderState, EncodecModel, ModelParts};
+use crate::model::{DECODER_LAG, DacModel, DecoderState, ModelParts};
 use decdrm_codecs::{CodecError, DrmAudioDecoder, PcmFrame};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 /// Frames (40 ms) a gap is bridged by repeating the last latent before fading out.
@@ -28,7 +37,7 @@ pub const FADE_FRAMES: usize = 6;
 pub const MAX_INTERPOLATION_FRAMES: usize = 9;
 
 /// What the decoder does with the codes of a region that failed its CRC (in every
-/// copy). Measured in `examples/encodec_errors.rs` (see the crate docs).
+/// copy). Measured in `examples/dac_errors.rs` (see the crate docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CrcPolicy {
     /// Use every code as received, as if there were no CRCs. Fine for sparse bursts,
@@ -40,9 +49,20 @@ pub enum CrcPolicy {
     Strict,
     /// A failed base layer makes the frame lost (concealed); failed enhancement layers
     /// are used anyway — a wrong fine code costs less than dropping the region.
-    #[default]
     TrustEnhancement,
+    /// Every code as received while most of the super frame is intact; when at least
+    /// [`GARBAGE_FRACTION`] of its regions failed — garbage, e.g. while the signal is
+    /// being lost — as [`CrcPolicy::TrustEnhancement`]. With DAC, the one or two wrong
+    /// codes a burst leaves in a region cost less than concealing its frames, while a
+    /// garbage super frame is better concealed.
+    #[default]
+    Adaptive,
 }
+
+/// Share of a super frame's regions that must fail for [`CrcPolicy::Adaptive`] to take
+/// it as garbage. Random data passes CRC-8 once in 256, so garbage fails about 99.6 % of
+/// its regions; bursts of 10⁻² per bit, far more than audio survives, about half.
+pub const GARBAGE_FRACTION: f64 = 0.9;
 
 /// What replaces frames that are lost (base layer failed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -92,9 +112,9 @@ pub struct DecodedSuperFrame {
     pub degraded: usize,
 }
 
-/// A streaming EnCodec decoder for one DRM service.
-pub struct EncodecDecoder {
-    model: Arc<EncodecModel>,
+/// A streaming DAC decoder for one DRM service.
+pub struct DacDecoder {
+    model: Arc<DacModel>,
     state: DecoderState,
     layout: FrameLayout,
     policy: CrcPolicy,
@@ -106,11 +126,15 @@ pub struct EncodecDecoder {
     gap: usize,
     /// Output gain at the end of the last frame.
     gain: f32,
+    /// Gains of the samples the network has not put out yet (its look-ahead).
+    gains: VecDeque<f32>,
+    /// PCM waiting to go out: starts with the decoder's delay as silence.
+    pending: VecDeque<f32>,
     stats: DecoderStats,
 }
 
-impl EncodecDecoder {
-    pub fn new(model: Arc<EncodecModel>, config: EncodecConfig) -> Result<Self, EncodecError> {
+impl DacDecoder {
+    pub fn new(model: Arc<DacModel>, config: DacConfig) -> Result<Self, DacError> {
         let state = model.decoder_state()?;
         Ok(Self {
             model,
@@ -121,6 +145,8 @@ impl EncodecDecoder {
             last_latent: None,
             gap: 0,
             gain: 0.0,
+            gains: VecDeque::new(),
+            pending: std::iter::repeat_n(0.0, DECODER_LAG).collect(),
             stats: DecoderStats::default(),
         })
     }
@@ -128,12 +154,12 @@ impl EncodecDecoder {
     /// A decoder for the service whose SDC type 9 bytes (after Short Id and Stream Id)
     /// are `type9`, with the decoder half of the model from the default location (see
     /// [`crate::weights`]).
-    pub fn from_type9_bytes(type9: &[u8]) -> Result<Self, EncodecError> {
-        let config = EncodecConfig::from_type9_bytes(type9)?;
-        Self::new(EncodecModel::load_default(ModelParts::Decoder)?, config)
+    pub fn from_type9_bytes(type9: &[u8]) -> Result<Self, DacError> {
+        let config = DacConfig::from_type9_bytes(type9)?;
+        Self::new(DacModel::load_default(ModelParts::Decoder)?, config)
     }
 
-    pub fn config(&self) -> EncodecConfig {
+    pub fn config(&self) -> DacConfig {
         self.layout.config
     }
 
@@ -151,17 +177,20 @@ impl EncodecDecoder {
 
     /// Decode one audio super frame (the stream's logical frame without text message
     /// bytes).
-    pub fn decode_super_frame(&mut self, sf: &[u8]) -> Result<DecodedSuperFrame, EncodecError> {
+    pub fn decode_super_frame(&mut self, sf: &[u8]) -> Result<DecodedSuperFrame, DacError> {
         let u = self.layout.unpack(sf)?;
         self.stats.regions_failed += (u.failed + u.repaired) as u64;
         self.stats.regions_repaired += u.repaired as u64;
         let all = self.layout.codebooks();
         let group = self.layout.config.group_frames;
         let mut depth = u.depth;
+        let regions = u.region_ok.iter().map(Vec::len).sum::<usize>().max(1);
+        let garbage = u.failed as f64 >= GARBAGE_FRACTION * regions as f64;
         match self.policy {
             CrcPolicy::Ignore => depth = [all; FRAMES_PER_SUPER_FRAME],
+            CrcPolicy::Adaptive if !garbage => depth = [all; FRAMES_PER_SUPER_FRAME],
             CrcPolicy::Strict => {}
-            CrcPolicy::TrustEnhancement => {
+            CrcPolicy::TrustEnhancement | CrcPolicy::Adaptive => {
                 for (f, d) in depth.iter_mut().enumerate() {
                     if u.region_ok[0][f / group] {
                         *d = all;
@@ -181,11 +210,11 @@ impl EncodecDecoder {
     }
 
     /// 400 ms of concealment (nothing received).
-    pub fn conceal_super_frame(&mut self) -> Result<DecodedSuperFrame, EncodecError> {
+    pub fn conceal_super_frame(&mut self) -> Result<DecodedSuperFrame, DacError> {
         self.decode_frames(&Codes::new(self.layout.codebooks()), [0; FRAMES_PER_SUPER_FRAME])
     }
 
-    fn decode_frames(&mut self, codes: &Codes, depth: [usize; FRAMES_PER_SUPER_FRAME]) -> Result<DecodedSuperFrame, EncodecError> {
+    fn decode_frames(&mut self, codes: &Codes, depth: [usize; FRAMES_PER_SUPER_FRAME]) -> Result<DecodedSuperFrame, DacError> {
         let mut latents = vec![0f32; FRAMES_PER_SUPER_FRAME * LATENT_DIM];
         for (f, out) in latents.as_chunks_mut::<LATENT_DIM>().0.iter_mut().enumerate() {
             if depth[f] > 0 {
@@ -194,19 +223,22 @@ impl EncodecDecoder {
         }
         let mut gains = [1f32; FRAMES_PER_SUPER_FRAME];
         let last_valid = self.fill_gaps(&depth, &mut latents, &mut gains);
-        let mut pcm = self.model.decode_latents(&mut self.state, &latents)?;
-
-        // Gain ramps across each frame from the previous frame's gain to its own.
+        // Gain ramps across each frame from the previous frame's gain to its own; they
+        // wait with the frames' samples for the network's look-ahead.
         let mut g0 = self.gain;
-        for (chunk, &g1) in pcm.as_chunks_mut::<FRAME_SAMPLES>().0.iter_mut().zip(&gains) {
-            if g0 != 1.0 || g1 != 1.0 {
-                for (i, s) in chunk.iter_mut().enumerate() {
-                    *s *= g0 + (g1 - g0) * (i + 1) as f32 / FRAME_SAMPLES as f32;
-                }
-            }
+        for &g1 in &gains {
+            self.gains.extend((0..FRAME_SAMPLES).map(|i| g0 + (g1 - g0) * (i + 1) as f32 / FRAME_SAMPLES as f32));
             g0 = g1;
         }
         self.gain = g0;
+        let out = self.model.decode_latents_stream(&mut self.state, &latents)?;
+        let n = out.len().min(self.gains.len());
+        for (s, g) in out.into_iter().zip(self.gains.drain(..n)) {
+            self.pending.push_back(s * g);
+        }
+        let take = SUPER_FRAME_SAMPLES.min(self.pending.len());
+        let mut pcm: Vec<f32> = self.pending.drain(..take).collect();
+        pcm.resize(SUPER_FRAME_SAMPLES, 0.0);
         self.last_latent = last_valid.then(|| latents[latents.len() - LATENT_DIM..].to_vec());
 
         let concealed = depth.iter().filter(|&&d| d == 0).count();
@@ -279,7 +311,7 @@ impl EncodecDecoder {
     }
 }
 
-impl DrmAudioDecoder for EncodecDecoder {
+impl DrmAudioDecoder for DacDecoder {
     /// `frame` is the whole audio super frame (the CRCs are inside it; `crc` is unused).
     fn decode(&mut self, frame: &[u8], _crc: Option<u8>) -> Result<PcmFrame, CodecError> {
         let d = if frame.is_empty() { self.conceal_super_frame() } else { self.decode_super_frame(frame) }
@@ -294,7 +326,7 @@ impl DrmAudioDecoder for EncodecDecoder {
 
     fn describe(&self) -> String {
         let bw: Bandwidth = self.layout.config.bandwidth;
-        format!("EnCodec {bw} ({} codebooks), 24 kHz mono", bw.codebooks())
+        format!("DAC {bw} ({} codebooks), 24 kHz mono", bw.codebooks())
     }
 }
 
@@ -304,11 +336,11 @@ fn pcm_frame(d: DecodedSuperFrame) -> PcmFrame {
     PcmFrame { sample_rate: SAMPLE_RATE, channels: 1, samples: d.pcm, concealed: d.concealed > 0 }
 }
 
-/// Open the decoder of an EnCodec service for the receiver engine, from the service's
+/// Open the decoder of a DAC service for the receiver engine, from the service's
 /// SDC type 9 bytes (`AudioParams::type9_bytes`).
 pub fn open_decoder(type9_bytes: &[u8]) -> Result<Box<dyn DrmAudioDecoder>, CodecError> {
-    let config = EncodecConfig::from_type9_bytes(type9_bytes).map_err(|e| CodecError::InvalidConfig(e.to_string()))?;
-    let model = EncodecModel::load_default(ModelParts::Decoder).map_err(|e| CodecError::Unsupported(e.to_string()))?;
-    let decoder = EncodecDecoder::new(model, config).map_err(|e| CodecError::Unsupported(e.to_string()))?;
+    let config = DacConfig::from_type9_bytes(type9_bytes).map_err(|e| CodecError::InvalidConfig(e.to_string()))?;
+    let model = DacModel::load_default(ModelParts::Decoder).map_err(|e| CodecError::Unsupported(e.to_string()))?;
+    let decoder = DacDecoder::new(model, config).map_err(|e| CodecError::Unsupported(e.to_string()))?;
     Ok(Box::new(decoder))
 }

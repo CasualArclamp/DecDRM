@@ -45,28 +45,42 @@ pub enum AudioCodec {
     Reserved,
     /// 11: xHE-AAC (MPEG-D USAC).
     XheAac,
-    /// DecDRM's experimental EnCodec (neural codec) extension: audio coding 10, reserved
-    /// in ES 201 980 V4, followed by a codec specific config that starts with
-    /// [`ENCODEC_CONFIG_MAGIC`] (format in the `decdrm-encodec` crate). Receivers that
-    /// follow the standard see a reserved coding and ignore the service.
+    /// DecDRM's DAC (neural codec) extension: audio coding 10, reserved in ES 201 980
+    /// V4, followed by a codec specific config that starts with [`DAC_CONFIG_MAGIC`]
+    /// (format in the `decdrm-dac` crate). Receivers that follow the standard see a
+    /// reserved coding and ignore the service.
+    Dac,
+    /// The EnCodec services DecDRM 0.4.6 and earlier sent: the same signalling with
+    /// [`ENCODEC_CONFIG_MAGIC`]. DAC replaced EnCodec; such services are recognised and
+    /// named, not decoded.
     Encodec,
 }
 
-/// Start of the codec specific config of an EnCodec service (after the two type 9
-/// bytes): a zero byte, then `"ENC"` and the format version digit (`'1'`).
+/// Start of the codec specific config of a DAC service (after the two type 9 bytes): a
+/// zero byte, then `"DAC"` and the format version digit (`'1'`).
 ///
 /// The zero byte matters to receivers that parse the type 9 body field by field instead
 /// of skipping it by its length (Dream's `CSDCReceive` reads no config for audio coding
 /// 10): they read the following 7 bits as the next entity's length, see 0 — the SDC end
-/// marker — and stop parsing the block cleanly. The station therefore sends an EnCodec
-/// type 9 entity last in its SDC block.
+/// marker — and stop parsing the block cleanly. The station therefore sends a DAC type 9
+/// entity last in its SDC block.
+pub const DAC_CONFIG_MAGIC: [u8; 4] = [0x00, b'D', b'A', b'C'];
+
+/// The same for the EnCodec services of DecDRM 0.4.6 and earlier.
 pub const ENCODEC_CONFIG_MAGIC: [u8; 4] = [0x00, b'E', b'N', b'C'];
 
-/// Sampling rate of the EnCodec model (the 24 kHz model; type 9 sampling rate code 011).
-pub const ENCODEC_SAMPLE_RATE_HZ: u32 = 24_000;
+/// Sampling rate of the DAC model (the 24 kHz model; type 9 sampling rate code 011),
+/// and of the EnCodec model before it.
+pub const DAC_SAMPLE_RATE_HZ: u32 = 24_000;
 
-/// Whether a type 9 codec specific config announces an EnCodec service (the magic plus
-/// at least a version byte; the version itself is checked by the decoder).
+/// Whether a type 9 codec specific config announces a DAC service (the magic plus at
+/// least a version byte; the version itself is checked by the decoder).
+pub fn is_dac_config(config: &[u8]) -> bool {
+    config.len() > DAC_CONFIG_MAGIC.len() && config.starts_with(&DAC_CONFIG_MAGIC)
+}
+
+/// Whether a type 9 codec specific config announces an EnCodec service of DecDRM 0.4.6
+/// or earlier.
 pub fn is_encodec_config(config: &[u8]) -> bool {
     config.len() > ENCODEC_CONFIG_MAGIC.len() && config.starts_with(&ENCODEC_CONFIG_MAGIC)
 }
@@ -77,7 +91,7 @@ impl AudioCodec {
         match self {
             Self::Aac => 0,
             Self::Opus => 1,
-            Self::Reserved | Self::Encodec => 2,
+            Self::Reserved | Self::Dac | Self::Encodec => 2,
             Self::XheAac => 3,
         }
     }
@@ -141,14 +155,14 @@ pub struct AudioParams {
     /// The signalled sampling rate in Hz. AAC: the core coder rate (12000/24000 in
     /// DRM30; the output rate doubles with SBR). xHE-AAC: the USAC output rate (see
     /// [`XHE_AAC_SAMPLE_RATES`]; the core runs at a fraction set by the SBR ratio of the
-    /// Static Config). Opus: 48000. EnCodec: 24000.
+    /// Static Config). Opus: 48000. DAC: 24000.
     pub sample_rate_hz: u32,
     /// A text message occupies the last 4 bytes of each logical frame of the stream.
     pub text_flag: bool,
     pub enhancement: bool,
     /// MPEG Surround mode (3 msbs of the coder field; AAC and xHE-AAC).
     pub surround_mode: u8,
-    /// xHE-AAC static configuration, or the EnCodec configuration ("codec specific
+    /// xHE-AAC static configuration, or the DAC configuration ("codec specific
     /// config").
     pub codec_config: Vec<u8>,
     /// The type 9 body *after* the Short Id and Stream Id, re-encoded exactly like
@@ -166,16 +180,21 @@ impl AudioParams {
     /// Opus is accepted here with any SBR/mode bits (both are then normalised as Dream
     /// does: no SBR, stereo, 48 kHz).
     pub fn from_entity(a: &AudioInfo) -> Result<Self, &'static str> {
-        if a.coding == AudioCodec::Encodec.bits() && is_encodec_config(&a.codec_config) {
-            // DecDRM's EnCodec extension: the SBR, mode, rate and coder fields are rfa
-            // for audio coding 10; the service is always 24 kHz mono.
+        let neural = match &a.codec_config {
+            c if is_dac_config(c) => Some(AudioCodec::Dac),
+            c if is_encodec_config(c) => Some(AudioCodec::Encodec),
+            _ => None,
+        };
+        if let (true, Some(codec)) = (a.coding == AudioCodec::Dac.bits(), neural) {
+            // DecDRM's neural codec extension (DAC, or EnCodec before it): the SBR,
+            // mode, rate and coder fields are rfa for audio coding 10; the service is
+            // always 24 kHz mono.
             let codec_config = a.codec_config.clone();
-            let (mode, rate) = (AudioMode::Mono, ENCODEC_SAMPLE_RATE_HZ);
-            let type9_bytes =
-                dream_type9_bytes(AudioCodec::Encodec, false, mode, rate, a.text, a.enhancement, 0, &codec_config);
+            let (mode, rate) = (AudioMode::Mono, DAC_SAMPLE_RATE_HZ);
+            let type9_bytes = dream_type9_bytes(codec, false, mode, rate, a.text, a.enhancement, 0, &codec_config);
             return Ok(Self {
                 stream_id: a.stream_id,
-                codec: AudioCodec::Encodec,
+                codec,
                 sbr: false,
                 mode,
                 sample_rate_hz: rate,
@@ -269,9 +288,9 @@ impl AudioParams {
     /// The type 9 entity to transmit for this service (as Dream's `CSDCTransmit` /
     /// `CAudioParam::EnqueueType9` writes it). Opus is signalled the way current Dream
     /// receivers accept it: audio coding 01, no SBR, audio mode *mono* (Dream rejects
-    /// other modes, then treats the service as stereo), rate code 101. EnCodec goes out
-    /// as audio coding 10 with rate code 011 (Dream rejects the entity for the other
-    /// rate codes and would then skip the rest of the SDC block) and its config.
+    /// other modes, then treats the service as stereo), rate code 101. DAC goes out as
+    /// audio coding 10 with rate code 011 (Dream rejects the entity for the other rate
+    /// codes and would then skip the rest of the SDC block) and its config.
     pub fn to_entity(&self, short_id: u8) -> AudioInfo {
         let t = &self.type9_bytes;
         let mut b0 = t.first().copied().unwrap_or(0);
@@ -314,7 +333,7 @@ impl AudioParams {
 /// Dream's `CAudioParam::EnqueueType9` applied to interpreted parameters: audio coding,
 /// SBR, mode, sampling rate, text and enhancement flags, coder field (MPEG Surround
 /// mode for AAC/xHE-AAC, else zero), rfa = 0, then the xHE-AAC configuration (or the
-/// EnCodec configuration, DecDRM's extension).
+/// DAC configuration, DecDRM's extension).
 #[allow(clippy::too_many_arguments)]
 fn dream_type9_bytes(
     codec: AudioCodec,
@@ -334,7 +353,7 @@ fn dream_type9_bytes(
         // Dream writes nothing for AC_RESERVED at 24 kHz (code stays 0).
         24_000 => match codec {
             AudioCodec::XheAac => 4,
-            AudioCodec::Aac | AudioCodec::Opus | AudioCodec::Encodec => 3,
+            AudioCodec::Aac | AudioCodec::Opus | AudioCodec::Dac | AudioCodec::Encodec => 3,
             AudioCodec::Reserved => 0,
         },
         32_000 => 5,
@@ -352,7 +371,7 @@ fn dream_type9_bytes(
     let coder = if matches!(codec, AudioCodec::Aac | AudioCodec::XheAac) { (surround & 7) << 2 } else { 0 };
     let b1 = (u8::from(text) << 7) | (u8::from(enhancement) << 6) | (coder << 1);
     let mut v = vec![b0, b1];
-    if matches!(codec, AudioCodec::XheAac | AudioCodec::Encodec) {
+    if matches!(codec, AudioCodec::XheAac | AudioCodec::Dac | AudioCodec::Encodec) {
         v.extend_from_slice(config);
     }
     v
@@ -1101,10 +1120,10 @@ mod tests {
     }
 
     #[test]
-    fn encodec_type9_signalling() {
-        // DecDRM's EnCodec extension: audio coding 10, rate code 011, then the config.
-        let config = vec![0x00, b'E', b'N', b'C', b'1', 0x48];
-        let p = AudioParams::new(2, AudioCodec::Encodec, false, AudioMode::Mono, 24_000, true, config.clone());
+    fn dac_type9_signalling() {
+        // DecDRM's DAC extension: audio coding 10, rate code 011, then the config.
+        let config = vec![0x00, b'D', b'A', b'C', b'1', 0x48];
+        let p = AudioParams::new(2, AudioCodec::Dac, false, AudioMode::Mono, 24_000, true, config.clone());
         assert_eq!(p.type9_bytes, [&[0b1000_0011, 0x80][..], &config].concat());
         assert_eq!((p.aac_frames_per_super_frame(), p.output_sample_rate_hz()), (None, 24_000));
         let e = p.to_entity(1);
@@ -1125,8 +1144,13 @@ mod tests {
         r.codec_config.clear();
         r.sample_rate = 0;
         assert!(AudioParams::from_entity(&r).is_err());
-        assert!(!is_encodec_config(&ENCODEC_CONFIG_MAGIC));
-        // Another coding with the magic is not EnCodec (xHE-AAC keeps its config).
+        assert!(!is_dac_config(&DAC_CONFIG_MAGIC));
+        // The EnCodec services of DecDRM 0.4.6 and earlier are recognised as such.
+        let mut old = e.clone();
+        old.codec_config = vec![0x00, b'E', b'N', b'C', b'1', 0x48];
+        let q = AudioParams::from_entity(&old).unwrap();
+        assert_eq!((q.codec, q.output_sample_rate_hz()), (AudioCodec::Encodec, 24_000));
+        // Another coding with the magic is not DAC (xHE-AAC keeps its config).
         let mut x = e;
         x.coding = 3;
         assert_eq!(AudioParams::from_entity(&x).unwrap().codec, AudioCodec::XheAac);

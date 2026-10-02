@@ -563,7 +563,7 @@ const CODECS: &[(&str, &str)] = &[
     ("he-aac-v2", "HE-AAC v2 (SBR + parametric stereo)"),
     ("xhe-aac", "xHE-AAC (USAC)"),
     ("opus", "Opus"),
-    ("encodec", "EnCodec (experimental)"),
+    ("dac", "DAC (neural codec)"),
 ];
 const CORE_RATES: &[(&str, &str)] = &[("12000", "12 kHz core (5 frames per 400 ms)"), ("24000", "24 kHz core (10 frames)")];
 const XHE_RATES: &[(&str, &str)] = &[
@@ -577,7 +577,7 @@ const XHE_RATES: &[(&str, &str)] = &[
     ("38400", "38.4 kHz (mono)"),
     ("48000", "48 kHz"),
 ];
-const ENCODEC_RATES: &[(&str, &str)] =
+const DAC_RATES: &[(&str, &str)] =
     &[("auto", "Highest that fits"), ("1.5", "1.5 kbit/s"), ("3", "3 kbit/s"), ("6", "6 kbit/s"), ("12", "12 kbit/s"), ("24", "24 kbit/s")];
 
 /// Which kind of audio input a table describes.
@@ -619,7 +619,7 @@ fn audio_settings(ui: &mut Ui, audio: &mut dyn TableLike, i: usize, ctx: &mut Fo
     let codec = get_str(audio, "codec").unwrap_or_else(|| "he-aac".into());
     let c = canon(&codec);
     let codecs: Vec<(&str, &str)> =
-        CODECS.iter().copied().filter(|(v, _)| *v != "encodec" || cfg!(feature = "encodec") || canon(v) == c).collect();
+        CODECS.iter().copied().filter(|(v, _)| *v != "dac" || cfg!(feature = "dac") || canon(v) == c).collect();
     grid(ui, ("tx_form_audio", i), |ui| {
         row_label(ui, "Codec");
         if let Some(v) = combo(ui, ("tx_codec", i), &codec, &codecs, 280.0) {
@@ -635,7 +635,7 @@ fn audio_settings(ui: &mut Ui, audio: &mut dyn TableLike, i: usize, ctx: &mut Fo
                 remove(audio, "sample_rate");
                 remove(audio, "sbr_ratio");
             }
-            if canon(v) != "encodec" {
+            if canon(v) != "dac" {
                 remove(audio, "bandwidth_kbps");
             }
             changed = true;
@@ -664,10 +664,10 @@ fn audio_settings(ui: &mut Ui, audio: &mut dyn TableLike, i: usize, ctx: &mut Fo
                 }
                 ui.end_row();
             }
-            "encodec" => {
+            "dac" => {
                 row_label(ui, "Bit rate");
                 let rate = get_num(audio, "bandwidth_kbps").map_or_else(|| "auto".into(), |r| format!("{r}"));
-                if let Some(v) = combo(ui, ("tx_encodec_rate", i), &rate, ENCODEC_RATES, 280.0) {
+                if let Some(v) = combo(ui, ("tx_dac_rate", i), &rate, DAC_RATES, 280.0) {
                     if v == "auto" {
                         remove(audio, "bandwidth_kbps");
                     } else {
@@ -679,7 +679,7 @@ fn audio_settings(ui: &mut Ui, audio: &mut dyn TableLike, i: usize, ctx: &mut Fo
             }
             _ => {}
         }
-        if !matches!(c.as_str(), "heaacv2" | "encodec") {
+        if !matches!(c.as_str(), "heaacv2" | "dac") {
             row_label(ui, "Channels");
             let mut stereo = get_bool(audio, "stereo").unwrap_or(false);
             if ui.checkbox(&mut stereo, "Stereo").changed() {

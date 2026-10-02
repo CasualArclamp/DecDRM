@@ -44,7 +44,7 @@ jobs:
           name: gui-screenshot
           path: ${{ runner.temp }}/gui.png
           if-no-files-found: warn
-      - name: EnCodec feature (candle; model tests skip without weights)
+      - name: DAC feature (candle; model tests skip without weights)
         run: |
-          cargo build --release -p decdrm-cli -p decdrm-gui --features decdrm-cli/encodec,decdrm-gui/encodec
-          cargo test --release -p decdrm-encodec -p decdrm-station --features decdrm-encodec/encodec,decdrm-station/encodec
+          cargo build --release -p decdrm-cli -p decdrm-gui --features decdrm-cli/dac,decdrm-gui/dac
+          cargo test --release -p decdrm-dac -p decdrm-station --features decdrm-dac/dac,decdrm-station/dac

@@ -1,8 +1,8 @@
-//! The DRM audio super frame of an EnCodec service (framing format 1).
+//! The DRM audio super frame of a DAC service (framing format 1).
 //!
-//! A super frame carries the codes of 30 EnCodec frames (400 ms). They are sent as
+//! A super frame carries the codes of 30 DAC frames (400 ms). They are sent as
 //! *regions*: the codes of one layer (a group of codebooks, [`layer_codebooks`]) for one
-//! group of [`EncodecConfig::group_frames`] consecutive frames, each region followed by
+//! group of [`DacConfig::group_frames`] consecutive frames, each region followed by
 //! its CRC-8. Layer-major order, as one bit string (MSB first, 10 bits per code):
 //!
 //! ```text
@@ -18,7 +18,7 @@
 //! first or the repeated copy): an error in a fine layer only lowers the bandwidth of
 //! that group for a moment, an error in layer 0 makes the frames lost (concealed).
 
-use crate::config::{CODE_BITS, CODEBOOK_SIZE, EncodecConfig, FRAMES_PER_SUPER_FRAME};
+use crate::config::{CODE_BITS, CODEBOOK_SIZE, DacConfig, FRAMES_PER_SUPER_FRAME};
 use crate::crc::Crc8;
 use std::ops::Range;
 
@@ -81,14 +81,14 @@ pub enum FramingError {
     CodeRange(u16),
     #[error("codes of {got} codebooks given, the configuration has {want}")]
     Codebooks { got: usize, want: usize },
-    #[error("the audio super frame has {len} bytes, the EnCodec configuration needs {need}")]
+    #[error("the audio super frame has {len} bytes, the DAC configuration needs {need}")]
     TooShort { len: usize, need: usize },
 }
 
 /// Sizes and positions of everything in a super frame of a configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameLayout {
-    pub config: EncodecConfig,
+    pub config: DacConfig,
 }
 
 /// The content of a received super frame after the CRC checks.
@@ -117,7 +117,7 @@ impl Unpacked {
 }
 
 impl FrameLayout {
-    pub fn new(config: EncodecConfig) -> Self {
+    pub fn new(config: DacConfig) -> Self {
         Self { config }
     }
 
@@ -332,14 +332,14 @@ mod tests {
     #[test]
     fn sizes() {
         // 6 kbit/s, 3-frame groups, nothing repeated: 300 bytes of codes, 30 CRCs.
-        let l = FrameLayout::new(EncodecConfig::new(Bandwidth::Kbps6, 3, 0).unwrap());
+        let l = FrameLayout::new(DacConfig::new(Bandwidth::Kbps6, 3, 0).unwrap());
         assert_eq!((l.groups(), l.region_bits(0), l.region_bits(2)), (10, 60, 120));
         assert_eq!((l.main_bits(), l.crc_bits(), l.min_bytes()), (2400 + 240, 240, 330));
         // Layer 0 repeated: + 75 bytes of codes and 10 CRCs.
-        let l = FrameLayout::new(EncodecConfig::new(Bandwidth::Kbps6, 3, 1).unwrap());
+        let l = FrameLayout::new(DacConfig::new(Bandwidth::Kbps6, 3, 1).unwrap());
         assert_eq!(l.min_bytes(), 330 + 85);
         // 24 kbit/s in one 400 ms group: 1200 + 5 bytes.
-        let l = FrameLayout::new(EncodecConfig::new(Bandwidth::Kbps24, 30, 0).unwrap());
+        let l = FrameLayout::new(DacConfig::new(Bandwidth::Kbps24, 30, 0).unwrap());
         assert_eq!(l.min_bytes(), 1205);
     }
 
@@ -348,7 +348,7 @@ mod tests {
         for bw in Bandwidth::ALL {
             for g in GROUP_SIZES {
                 for r in 0..=MAX_REPEATED_LAYERS.min(bw.layers()) {
-                    let layout = FrameLayout::new(EncodecConfig::new(bw, g, r).unwrap());
+                    let layout = FrameLayout::new(DacConfig::new(bw, g, r).unwrap());
                     let c = codes(bw.codebooks(), (g * 7 + r) as u32);
                     let len = layout.min_bytes() + 3;
                     let sf = layout.pack(&c, len).unwrap();
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn too_short_and_wrong_codebooks() {
-        let layout = FrameLayout::new(EncodecConfig::new(Bandwidth::Kbps3, 5, 0).unwrap());
+        let layout = FrameLayout::new(DacConfig::new(Bandwidth::Kbps3, 5, 0).unwrap());
         let need = layout.min_bytes();
         assert_eq!(layout.pack(&codes(4, 1), need - 1), Err(FramingError::TooShort { len: need - 1, need }));
         assert!(matches!(layout.pack(&codes(8, 1), need), Err(FramingError::Codebooks { got: 8, want: 4 })));
@@ -380,7 +380,7 @@ mod tests {
     /// loses the group's frames; the repeated copy repairs the base layer.
     #[test]
     fn errors_degrade_by_layer_and_repetition_repairs() {
-        let layout = FrameLayout::new(EncodecConfig::new(Bandwidth::Kbps6, 3, 1).unwrap());
+        let layout = FrameLayout::new(DacConfig::new(Bandwidth::Kbps6, 3, 1).unwrap());
         let c = codes(8, 42);
         let sf = layout.pack(&c, layout.min_bytes()).unwrap();
         let bit_of = |layer: usize, g: usize| -> usize {

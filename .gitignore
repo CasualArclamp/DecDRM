@@ -8,7 +8,7 @@
 /samples/
 /reference/
 /out/
-# Neural codec weights (EnCodec), fetched with `decdrm models download encodec`
+# Neural codec weights (DAC), fetched with `decdrm models download dac`
 /models/
 
 # Editor/OS noise

@@ -131,7 +131,8 @@ pub struct ServiceView {
     /// Conditional access (scrambled audio or data, FAC CA flags).
     pub ca: bool,
     /// Whether this receiver can decode the audio: false for a reserved coding (CELP,
-    /// HVXC), for EnCodec in a build without it, and for EVS sent as data.
+    /// HVXC), for DAC in a build without it, for the EnCodec of DecDRM 0.4.6 and
+    /// earlier, and for EVS sent as data.
     pub decodable: bool,
     /// A caveat for the service bar, e.g. that EVS audio sent as data is nonstandard
     /// and likely encrypted.
@@ -141,7 +142,7 @@ pub struct ServiceView {
 /// Audio coding of a service (SDC type 9), the facts Dream's service bars show.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AudioCodingView {
-    /// "AAC", "xHE-AAC", "Opus", "EnCodec", "reserved", or "EVS" (sent in a data
+    /// "AAC", "xHE-AAC", "Opus", "DAC", "EnCodec", "reserved", or "EVS" (sent in a data
     /// application, see `decdrm_evs::kcbs`).
     pub codec: String,
     /// Spectral band replication (AAC; HE-AAC).
@@ -161,7 +162,7 @@ pub struct AudioCodingView {
     /// 3 7.1 output channels, 7 given in the MPEG Surround data; 1, 4–6 reserved. The
     /// mono/stereo core is decoded either way.
     pub surround_mode: u8,
-    /// Further codec detail, e.g. the EnCodec bit-rate tier or the EVS bandwidth.
+    /// Further codec detail, e.g. the DAC bit-rate tier or the EVS bandwidth.
     pub detail: Option<String>,
 }
 

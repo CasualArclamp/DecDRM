@@ -85,9 +85,9 @@ pub(crate) fn entities(cfg: &StationConfig, plan: &MultiplexPlan) -> SdcEntities
     SdcEntities { multiplex: e(EntityBody::Multiplex(plan.multiplex.clone())), others }
 }
 
-/// Audio information of a DecDRM EnCodec service.
-fn is_encodec_audio(e: &SdcEntity) -> bool {
-    matches!(&e.body, EntityBody::Audio(a) if decdrm_core::mux::service::is_encodec_config(&a.codec_config))
+/// Audio information of a DecDRM DAC service.
+fn is_dac_audio(e: &SdcEntity) -> bool {
+    matches!(&e.body, EntityBody::Audio(a) if decdrm_core::mux::service::is_dac_config(&a.codec_config))
 }
 
 fn describe(e: &SdcEntity) -> String {
@@ -218,10 +218,10 @@ impl SdcScheduler {
         if let Some(i) = first_skipped {
             self.cursor = i;
         }
-        // An EnCodec audio entity goes last: receivers that do not skip its codec config
-        // by the entity length (Dream) stop parsing the block there (see
-        // `decdrm_core::mux::service::ENCODEC_CONFIG_MAGIC`). The sort is stable.
-        chosen.sort_by_key(is_encodec_audio);
+        // A DAC audio entity goes last: receivers that do not skip its codec config by
+        // the entity length (Dream) stop parsing the block there (see
+        // `decdrm_core::mux::service::DAC_CONFIG_MAGIC`). The sort is stable.
+        chosen.sort_by_key(is_dac_audio);
         let data = encode_sdc_data(&chosen, self.capacity)?;
         debug_assert!(data.skipped.is_empty());
         self.blocks += 1;
@@ -272,17 +272,17 @@ mod tests {
         assert!(seen.iter().all(|&n| n >= 18), "{seen:?}");
     }
 
-    /// An EnCodec audio information entity is the last entity of every block it is in,
+    /// A DAC audio information entity is the last entity of every block it is in,
     /// however the round robin orders the others.
     #[test]
-    fn encodec_audio_information_goes_last() {
+    fn dac_audio_information_goes_last() {
         use decdrm_core::mux::service::{AudioCodec, AudioMode, AudioParams};
         let mux = SdcEntity::new(
             false,
             EntityBody::Multiplex(MultiplexDescription::new(0, 1, &[StreamLengths { part_a: 0, part_b: 381 }])),
         );
-        let config = vec![0x00, b'E', b'N', b'C', b'1', 0x48];
-        let audio = AudioParams::new(0, AudioCodec::Encodec, false, AudioMode::Mono, 24_000, true, config);
+        let config = vec![0x00, b'D', b'A', b'C', b'1', 0x48];
+        let audio = AudioParams::new(0, AudioCodec::Dac, false, AudioMode::Mono, 24_000, true, config);
         let mut others = vec![SdcEntity::new(false, EntityBody::Audio(audio.to_entity(0)))];
         others.extend((0..3).map(|i| label(i, "ABCDEFGHI")));
         let mut s = SdcScheduler::new(SdcEntities { multiplex: mux, others }, 40, false, None).unwrap();

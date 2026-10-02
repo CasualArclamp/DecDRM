@@ -1,19 +1,24 @@
-//! The EnCodec model through the DRM framing: quality, streaming, bandwidth tiers, bit
-//! errors and concealment. Needs `--features encodec` and the model weights
-//! (`decdrm models download encodec`); skipped when the weights are not installed.
-//! Run with `--nocapture` to see the measurements.
+//! The DAC model through the DRM framing: quality, streaming, bandwidth tiers, bit
+//! errors and concealment. Needs `--features dac` and the model weights
+//! (`decdrm models download dac`); skipped when the weights are not installed. Run with
+//! `--release --nocapture` to see the measurements (the network is slow unoptimised).
 
 mod common;
 
 use common::*;
-use decdrm_encodec::*;
+use decdrm_dac::model::{DECODER_LAG, ENCODER_LEAD_IN};
+use decdrm_dac::*;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// The codec's delay through `DacDrmEncoder` and `DacDecoder`: the encoder's lead-in
+/// and the decoder's look-ahead.
+const DELAY: usize = ENCODER_LEAD_IN + DECODER_LAG;
+
 /// The model (both halves), or `None` (test skipped) without weights.
-fn model() -> Option<Arc<EncodecModel>> {
+fn model() -> Option<Arc<DacModel>> {
     match find_weights() {
-        Ok(path) => Some(EncodecModel::load_cached(&path, ModelParts::Both).expect("load the EnCodec weights")),
+        Ok(path) => Some(DacModel::load_cached(&path, ModelParts::Both).expect("load the DAC weights")),
         Err(e) => {
             eprintln!("skipped: {e}");
             None
@@ -22,20 +27,20 @@ fn model() -> Option<Arc<EncodecModel>> {
 }
 
 /// Encode and frame `pcm` (whole super frames) into super frames of `len` bytes.
-fn transmit(model: &Arc<EncodecModel>, config: EncodecConfig, pcm: &[f32], len: usize) -> Vec<Vec<u8>> {
-    let mut enc = EncodecDrmEncoder::new(Arc::clone(model), config).unwrap();
+fn transmit(model: &Arc<DacModel>, config: DacConfig, pcm: &[f32], len: usize) -> Vec<Vec<u8>> {
+    let mut enc = DacDrmEncoder::new(Arc::clone(model), config).unwrap();
     pcm.as_chunks::<SUPER_FRAME_SAMPLES>().0.iter().map(|c| enc.super_frame(c, len).unwrap()).collect()
 }
 
 /// Decode super frames.
 fn receive(
-    model: &Arc<EncodecModel>,
-    config: EncodecConfig,
+    model: &Arc<DacModel>,
+    config: DacConfig,
     super_frames: &[Vec<u8>],
     policy: CrcPolicy,
     concealment: Concealment,
 ) -> (Vec<f32>, DecoderStats) {
-    let mut dec = EncodecDecoder::new(Arc::clone(model), config).unwrap();
+    let mut dec = DacDecoder::new(Arc::clone(model), config).unwrap();
     dec.set_crc_policy(policy);
     dec.set_concealment(concealment);
     let mut out = Vec::new();
@@ -45,74 +50,87 @@ fn receive(
     (out, dec.stats())
 }
 
+/// `x` and one super frame of silence after it, so the delayed output covers `x`.
+fn with_tail(x: &[f32]) -> Vec<f32> {
+    let mut v = x.to_vec();
+    v.resize(x.len() + SUPER_FRAME_SAMPLES, 0.0);
+    v
+}
+
 #[test]
 fn round_trip_6kbps_through_framing() {
     let Some(model) = model() else { return };
     let x = test_signal();
-    let config = EncodecConfig::new(Bandwidth::Kbps6, 3, 0).unwrap();
+    let config = DacConfig::new(Bandwidth::Kbps6, 3, 0).unwrap();
     let len = FrameLayout::new(config).min_bytes() + 7;
     let t0 = Instant::now();
-    let sfs = transmit(&model, config, &x, len);
+    let sfs = transmit(&model, config, &with_tail(&x), len);
     let encode_s = t0.elapsed().as_secs_f64();
     let t1 = Instant::now();
     let (y, stats) = receive(&model, config, &sfs, CrcPolicy::default(), Concealment::default());
     let decode_s = t1.elapsed().as_secs_f64();
-    let audio_s = x.len() as f64 / RATE;
+    let audio_s = y.len() as f64 / RATE;
     println!(
         "{:.1} s of audio: encode {encode_s:.2} s (RTF {:.3}), decode {decode_s:.2} s (RTF {:.3}) [test profile]",
         audio_s,
         encode_s / audio_s,
         decode_s / audio_s
     );
-    assert_eq!(y.len(), x.len());
-    assert_eq!((stats.frames_full, stats.frames_concealed, stats.regions_failed), (450, 0, 0));
+    assert_eq!(y.len(), x.len() + SUPER_FRAME_SAMPLES);
+    assert_eq!((stats.frames_full, stats.frames_concealed, stats.regions_failed), (480, 0, 0));
+    let y = &y[DELAY..DELAY + x.len()];
 
-    // Delay from the chirp (a tone's correlation repeats every period).
-    let lag = best_lag(part(&x, 1), part(&y, 1), 48_000, 400);
-    println!("delay of the decoded audio: {lag} samples");
-    assert!(lag.abs() <= 2, "EnCodec 24 kHz is causal with no look-ahead, found a {lag}-sample lag");
+    // What is left of the delay (from the chirp: a tone's correlation repeats every
+    // period): the model's own alignment, a few samples.
+    let lag = best_lag(part(&x, 1), part(y, 1), 48_000, 400);
+    println!("delay of the decoded audio: {} samples ({DELAY} + {lag})", DELAY as isize + lag);
+    assert!(lag.abs() <= 16, "{lag} samples more delay than lead-in and look-ahead");
     for (k, name) in ["tone", "chirp", "speech-like"].iter().enumerate() {
-        // Skip the first 200 ms of each part (the start-up / the change of signal).
+        // Skip the first 200 ms of each part (the change of signal).
         let skip = 4800;
-        let (a, b) = (&part(&x, k)[skip..], &part(&y, k)[skip..]);
+        let (a, b) = (&part(&x, k)[skip..], &part(y, k)[skip..]);
         let lsd = log_spectral_distance(a, b);
         println!("{name}: input {:.1} dBFS, output {:.1} dBFS, log-spectral distance {lsd:.2} dB", rms_db(a), rms_db(b));
         assert!((rms_db(a) - rms_db(b)).abs() < 6.0, "{name}: level changed");
         assert!(lsd < 8.0, "{name}: spectral envelope not preserved ({lsd:.2} dB)");
     }
-    let f = dominant_frequency(&part(&y, 0)[4800..], 100.0, 2000.0);
+    let f = dominant_frequency(&part(y, 0)[4800..], 100.0, 2000.0);
     println!("dominant frequency of the tone part: {f} Hz");
     assert!((f - TONE_HZ).abs() <= 2.0, "tone decoded at {f} Hz");
 }
 
-/// Running the network super frame by super frame gives what one whole-signal run
-/// gives (the streaming state is carried correctly).
+/// The DRM encoder and decoder, 400 ms at a time, give what whole-signal runs give.
 #[test]
 fn streaming_equals_whole_signal() {
     let Some(model) = model() else { return };
     let x = test_signal();
-    let mut whole_state = model.encoder_state().unwrap();
-    let whole = model.encode(&mut whole_state, &x, 8).unwrap();
-    let mut enc = EncodecEncoder::new(Arc::clone(&model), 8).unwrap();
+    // The encoder: the whole signal after the lead-in, against the stream.
+    let mut padded = vec![0.0; ENCODER_LEAD_IN];
+    padded.extend(&x);
+    let whole = model.encode(&padded, 8).unwrap();
+    let mut enc = DacEncoder::new(Arc::clone(&model), 8).unwrap();
     let mut chunked = Vec::new();
     for c in x.chunks(SUPER_FRAME_SAMPLES) {
         chunked.extend(enc.encode(c).unwrap());
     }
-    let same = whole.iter().zip(&chunked).filter(|(a, b)| a == b).count();
-    println!("encoder: {same} of {} codes identical", whole.len());
+    // The stream's codes start with the lead-in's frames: it lags the input by them.
+    assert_eq!(chunked.len(), x.len() / FRAME_SAMPLES * 8);
+    let same = chunked.iter().zip(&whole).filter(|(a, b)| a == b).count();
+    println!("encoder: {same} of {} codes identical", chunked.len());
     // Float rounding may tip a near-tie between two codebook entries.
-    assert!(same as f64 >= 0.995 * whole.len() as f64);
+    assert!(same as f64 >= 0.995 * chunked.len() as f64);
 
-    let mut s = model.decoder_state().unwrap();
-    let a = model.decode_codes(&mut s, &whole, 8, 8).unwrap();
+    // The decoder: 400 ms at a time lags the whole-signal decoding by its look-ahead.
+    let latents = model.latents(&chunked, 8, 8).unwrap();
+    let a = model.decode_latents(&latents).unwrap();
     let mut s = model.decoder_state().unwrap();
     let mut b = Vec::new();
-    for c in whole.chunks(8 * FRAMES_PER_SUPER_FRAME) {
-        b.extend(model.decode_codes(&mut s, c, 8, 8).unwrap());
+    for c in latents.chunks(FRAMES_PER_SUPER_FRAME * LATENT_DIM) {
+        b.extend(model.decode_latents_stream(&mut s, c).unwrap());
     }
+    assert_eq!(b.len(), a.len() - DECODER_LAG);
     let diff = a.iter().zip(&b).map(|(p, q)| (p - q).abs()).fold(0.0f32, f32::max);
     println!("decoder: largest difference {diff:.2e}");
-    assert_eq!(a.len(), b.len());
     assert!(diff < 1e-3, "chunked decoding differs by {diff}");
 }
 
@@ -122,12 +140,10 @@ fn streaming_equals_whole_signal() {
 fn bandwidth_tiers() {
     let Some(model) = model() else { return };
     let x = test_signal();
-    let mut st = model.encoder_state().unwrap();
-    let codes = model.encode(&mut st, &x, 32).unwrap();
+    let codes = model.encode(&x, 32).unwrap();
     let mut lsds = Vec::new();
     for bw in Bandwidth::ALL {
-        let mut s = model.decoder_state().unwrap();
-        let y = model.decode_codes(&mut s, &codes, 32, bw.codebooks()).unwrap();
+        let y = model.decode(&codes, 32, bw.codebooks()).unwrap();
         let lsd = log_spectral_distance(&x[4800..], &y[4800..]);
         println!("{bw:>10}: log-spectral distance {lsd:.2} dB");
         lsds.push(lsd);
@@ -159,7 +175,7 @@ fn region_of(layout: &FrameLayout, bit: usize) -> Option<(usize, usize)> {
 fn bit_errors_detected_and_concealed() {
     let Some(model) = model() else { return };
     let x = test_signal();
-    let config = EncodecConfig::new(Bandwidth::Kbps6, 3, 1).unwrap();
+    let config = DacConfig::new(Bandwidth::Kbps6, 3, 1).unwrap();
     let layout = FrameLayout::new(config);
     let len = layout.min_bytes();
     let clean = transmit(&model, config, &x, len);
@@ -200,9 +216,10 @@ fn bit_errors_detected_and_concealed() {
     assert_eq!(false_alarms, 0);
     assert!(missed * 50 <= hit, "CRC-8 should miss about 1 in 256 corrupted regions");
 
-    // Bursts: trusting the enhancement layers beats dropping them.
+    // Bursts: trusting the enhancement layers beats dropping them (the adaptive policy
+    // is printed for comparison; `examples/dac_errors.rs` measures the policies).
     let mut lsd = Vec::new();
-    for p in [CrcPolicy::Strict, CrcPolicy::TrustEnhancement] {
+    for p in [CrcPolicy::Strict, CrcPolicy::TrustEnhancement, CrcPolicy::Adaptive] {
         let (y, stats) = receive(&model, config, &noisy, p, Concealment::Interpolate);
         lsd.push(log_spectral_distance(&reference, &y));
         println!(
@@ -234,30 +251,34 @@ fn bit_errors_detected_and_concealed() {
     let (c, i) = (segmental_nrr(&reference, &concealed), segmental_nrr(&reference, &ignored));
     println!("{lost} garbage super frames: NRR {c:+.1} dB concealed, {i:+.1} dB decoded as received");
     // (A random region passes CRC-8 with probability 1/256, so a few frames of garbage
-    // may slip through.)
+    // may slip through.) DAC decodes random codes to a quieter sound than EnCodec did,
+    // so silence wins by less than it did then (0.9 dB here; the EnCodec test required
+    // 1 dB).
     assert!(stats.frames_concealed >= 27 * lost, "{} frames concealed", stats.frames_concealed);
-    assert!(c < i - 1.0, "concealment should beat decoding garbage");
+    assert!(c < i, "concealment should beat decoding garbage");
 }
 
 /// The concealment output of a lost super frame fades out; the first good frame after
-/// fades back in; nothing blows up.
+/// fades back in; nothing blows up. (The decoder's output lags by its look-ahead, so a
+/// super frame's concealment shows [`DECODER_LAG`] samples into the next output block.)
 #[test]
 fn lost_super_frames_fade_out_and_back_in() {
     let Some(model) = model() else { return };
     let x = tone(TONE_HZ, 0.3, 4.0);
-    let config = EncodecConfig::new(Bandwidth::Kbps3, 3, 0).unwrap();
+    let config = DacConfig::new(Bandwidth::Kbps3, 3, 0).unwrap();
     let sfs = transmit(&model, config, &x, 200);
-    let mut dec = EncodecDecoder::new(Arc::clone(&model), config).unwrap();
+    let mut dec = DacDecoder::new(Arc::clone(&model), config).unwrap();
     let mut out = Vec::new();
     for (i, sf) in sfs.iter().enumerate() {
         let d = if (4..6).contains(&i) { dec.conceal_super_frame() } else { dec.decode_super_frame(sf) }.unwrap();
         out.push(d.pcm);
     }
     let levels: Vec<f64> = out.iter().map(|p| rms_db(p)).collect();
-    println!("super frame levels (4 and 5 lost): {:?}", levels.iter().map(|l| format!("{l:.1}")).collect::<Vec<_>>());
+    println!("output block levels (super frames 4 and 5 lost): {:?}", levels.iter().map(|l| format!("{l:.1}")).collect::<Vec<_>>());
     // The first lost super frame holds 40 ms and fades over 80 ms, then silence.
-    assert!(rms_db(&out[4][..960]) > -20.0);
-    assert!(rms_db(&out[4][3600..]) < -80.0 && rms_db(&out[5]) < -80.0);
+    let lag = DECODER_LAG;
+    assert!(rms_db(&out[4][lag..lag + 960]) > -20.0);
+    assert!(rms_db(&out[4][lag + 3000..]) < -80.0 && rms_db(&out[5]) < -80.0);
     assert!(levels[7] > -20.0, "no recovery");
     assert!(out.iter().flatten().all(|v| v.is_finite() && v.abs() < 2.0));
     assert_eq!(dec.stats().frames_concealed, 60);

@@ -12,17 +12,17 @@ name = "decdrm"
 path = "src/main.rs"
 
 [features]
-# DecDRM's experimental EnCodec codec in the receiver and the transmitter (pulls in
-# candle): `cargo build --release -p decdrm-cli --features encodec`. The weights are
-# fetched with `decdrm models download encodec` (available in every build).
-encodec = ["decdrm-engine/encodec", "decdrm-station/encodec"]
-# EnCodec with its weights built in (a single-file executable, 93 MB more; see
+# DecDRM's DAC codec (neural) in the receiver and the transmitter (pulls in candle):
+# `cargo build --release -p decdrm-cli --features dac`. The weights are fetched with
+# `decdrm models download dac` (available in every build).
+dac = ["decdrm-engine/dac", "decdrm-station/dac"]
+# DAC with its weights built in (a single-file executable, 299 MB more; see
 # `scripts/build-portable.ps1`).
-embed-weights = ["encodec", "decdrm-encodec/embed-weights"]
+embed-weights = ["dac", "decdrm-dac/embed-weights"]
 
 [dependencies]
 decdrm-engine = { path = "../../crates/decdrm-engine" }
-decdrm-encodec = { path = "../../crates/decdrm-encodec" }
+decdrm-dac = { path = "../../crates/decdrm-dac" }
 decdrm-io = { path = "../../crates/decdrm-io" }
 decdrm-schedule = { path = "../../crates/decdrm-schedule" }
 decdrm-station = { path = "../../crates/decdrm-station" }

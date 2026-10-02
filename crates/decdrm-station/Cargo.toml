@@ -8,16 +8,16 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-# Encode DecDRM's experimental EnCodec services (neural codec; pulls in candle). Without
-# it such configurations are recognised but rejected ("not built in"). The receiving
-# engine of the loopback tests gets it too.
-encodec = ["decdrm-encodec/encodec", "decdrm-engine/encodec"]
+# Encode DecDRM's DAC services (neural codec; pulls in candle). Without it such
+# configurations are recognised but rejected ("not built in"). The receiving engine of
+# the loopback tests gets it too.
+dac = ["decdrm-dac/dac", "decdrm-engine/dac"]
 
 [dependencies]
 decdrm-core = { path = "../decdrm-core" }
 decdrm-codecs = { path = "../decdrm-codecs" }
 decdrm-data = { path = "../decdrm-data" }
-decdrm-encodec = { path = "../decdrm-encodec" }
+decdrm-dac = { path = "../decdrm-dac" }
 decdrm-io = { path = "../decdrm-io" }
 # MDI: a station's frames as MDI, and the modulator for MDI from a content server.
 decdrm-mdi = { path = "../decdrm-mdi" }

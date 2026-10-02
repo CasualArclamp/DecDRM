@@ -1,4 +1,4 @@
-//! Bit-serial CRC-8 over arbitrary bit strings (the protected regions of an EnCodec
+//! Bit-serial CRC-8 over arbitrary bit strings (the protected regions of a DAC
 //! super frame are not byte aligned).
 
 /// The DRM CRC-8 of ES 201 980 annex D — G(x) = x⁸ + x⁴ + x³ + x² + 1, register preset

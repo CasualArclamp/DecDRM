@@ -456,7 +456,7 @@ impl ServiceSettings {
 #[serde(deny_unknown_fields)]
 pub struct AudioSettings {
     /// aac, he-aac (AAC + SBR), he-aac-v2 (AAC + SBR + parametric stereo), xhe-aac
-    /// (MPEG-D USAC), opus or encodec (DecDRM's experimental neural codec, 24 kHz mono).
+    /// (MPEG-D USAC), opus or dac (DecDRM's neural codec extension, 24 kHz mono).
     pub codec: Codec,
     /// AAC core sampling rate: 12000 (5 frames per 400 ms) or 24000 (10 frames).
     /// Default: 24000 for AAC, 12000 for HE-AAC and HE-AAC v2. Not used by Opus
@@ -491,7 +491,7 @@ pub struct AudioSettings {
     /// only; its length is then fixed by the channel).
     #[serde(default)]
     pub hierarchical: bool,
-    /// EnCodec only: bit rate of the codes, kbit/s — 1.5, 3, 6, 12 or 24. Default: the
+    /// DAC only: bit rate of the codes, kbit/s — 1.5, 3, 6, 12 or 24. Default: the
     /// highest that fits the stream (spare bytes then carry a second copy of the most
     /// important codebooks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -929,9 +929,9 @@ pub enum Codec {
     XheAac,
     /// Opus (Dream's extension; not part of ES 201 980).
     Opus,
-    /// EnCodec, Meta's neural codec (DecDRM's experimental extension, 24 kHz mono,
-    /// 1.5–24 kbit/s; needs the `encodec` feature and the model weights).
-    Encodec,
+    /// DAC, the Descript Audio Codec (DecDRM's neural codec extension, 24 kHz mono,
+    /// 1.5–24 kbit/s; needs the `dac` feature and the model weights).
+    Dac,
 }
 
 string_setting!(
@@ -942,8 +942,9 @@ string_setting!(
         "heaacv2" | "aacps" | "eaacplus" => Ok(Codec::HeAacV2),
         "xheaac" | "xhe" | "usac" | "xheaacusac" => Ok(Codec::XheAac),
         "opus" => Ok(Codec::Opus),
-        "encodec" => Ok(Codec::Encodec),
-        _ => Err(format!("unknown codec \"{s}\" (use aac, he-aac, he-aac-v2, xhe-aac, opus or encodec)")),
+        "dac" | "descriptaudiocodec" => Ok(Codec::Dac),
+        "encodec" => Err("DecDRM's neural codec is now DAC: use codec = \"dac\" (EnCodec was replaced)".to_string()),
+        _ => Err(format!("unknown codec \"{s}\" (use aac, he-aac, he-aac-v2, xhe-aac, opus or dac)")),
     },
     |c: Codec| match c {
         Codec::Aac => "aac",
@@ -951,7 +952,7 @@ string_setting!(
         Codec::HeAacV2 => "he-aac-v2",
         Codec::XheAac => "xhe-aac",
         Codec::Opus => "opus",
-        Codec::Encodec => "encodec",
+        Codec::Dac => "dac",
     }
     .to_string()
 );

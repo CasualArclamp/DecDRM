@@ -11,7 +11,7 @@ internals.
 - [Reading the displays](#reading-the-displays)
 - [Services, data and logs](#services-data-and-logs)
 - [Transmitting](#transmitting)
-- [EnCodec (experimental)](#encodec-experimental)
+- [DAC (neural codec)](#dac-neural-codec)
 - [Troubleshooting](#troubleshooting)
 - [Files and folders](#files-and-folders)
 
@@ -333,7 +333,7 @@ The services appear as four bars, one per Short Id, as in Dream. Each bar shows:
 - the label and the bit rate of its audio stream (for a data service, of its data
   streams);
 - tags for:
-  - the codec (HE-AAC, HE-AAC v2, AAC, xHE-AAC, Opus, EnCodec), SBR, PS / Stereo /
+  - the codec (HE-AAC, HE-AAC v2, AAC, xHE-AAC, Opus, DAC), SBR, PS / Stereo /
     Mono, and the core/output rate;
   - MPEG Surround with the channel set-up the station signals (5.1, 7.1, "other mode"
     given in the surround data, or a reserved code). DecDRM plays the mono or stereo
@@ -396,7 +396,7 @@ Supported audio:
 |---|---|
 | AAC, HE-AAC, HE-AAC v2 (parametric stereo), xHE-AAC | FDK-AAC |
 | Opus | Dream's extension, all three signalling variants |
-| EnCodec | DecDRM's own extension, see below |
+| DAC | DecDRM's own extension, see below |
 
 Old CELP/HVXC streams are reported as unsupported. Text messages appear under the
 services; lost audio frames are concealed.
@@ -504,7 +504,7 @@ multiplex: streams, bit rates, codec settings and what goes where.
 - **`[[service]]`:** `label`, 24-bit `id`, FAC language and programme type, and
   optional ISO language and country. Each service is either:
   - an **audio service** with `[service.audio]`:
-    - `codec` = `aac`, `he-aac`, `he-aac-v2`, `xhe-aac`, `opus` or `encodec`;
+    - `codec` = `aac`, `he-aac`, `he-aac-v2`, `xhe-aac`, `opus` or `dac`;
     - `core_rate`, `stereo`;
     - `text = [...]`, text messages sent in turn;
     - `[service.audio.input]`, exactly one of `file` (any WAV/FLAC, `loop`), `device`
@@ -686,23 +686,36 @@ url = "https://radio.example/live.mp3"
   playing, reconnecting), buffer and title to its status lines. The station's status
   also carries the stream's coding, bit rate, sampling rate and station name.
 
-## EnCodec (experimental)
+## DAC (neural codec)
 
-EnCodec is Meta's neural audio codec, which DecDRM carries as its own audio coding (SDC
-audio coding 10 with an `ENC1` configuration). Other receivers, including Dream, ignore
-such services. It runs 1.5–24 kbit/s with CRC-protected layers and conceals lost frames
-well: at 15 dB SNR it lost 2 % of frames where HE-AAC lost 26 %. It runs about 15× real
-time on a desktop CPU.
+DAC, the Descript Audio Codec, is a neural audio codec, which DecDRM carries as its own
+audio coding (SDC audio coding 10 with a `DAC1` configuration). Other receivers,
+including Dream, ignore such services. It runs at 1.5–24 kbit/s (24 kHz mono) with
+CRC-protected layers, and conceals lost frames well: at 15 dB SNR it lost 1.4 % of
+frames where HE-AAC lost 37 %.
 
 ```bash
-cargo build --release -p decdrm-cli -p decdrm-gui --features decdrm-cli/encodec,decdrm-gui/encodec
-decdrm models download encodec        # ~93 MB, checked by SHA-256
+cargo build --release -p decdrm-cli -p decdrm-gui --features decdrm-cli/dac,decdrm-gui/dac
+decdrm models download dac            # ~299 MB, checked by SHA-256
 decdrm models list                    # where the weights are looked for
 ```
 
-In the station file set `codec = "encodec"`, optionally with `bandwidth_kbps`. Weights
-are looked for in `DECDRM_MODELS`, then in `models/` next to the program and in its
-parent directories.
+In the station file set `codec = "dac"`, optionally with `bandwidth_kbps` (1.5, 3, 6,
+12 or 24; by default the highest that fits, with spare bytes sending the most important
+codes twice). Weights are looked for in `DECDRM_MODELS`, then in `models/` next to the
+program and in its parent directories.
+
+Things to know:
+- **Quality.** On decoded broadcast audio and speech, DAC at 3 kbit/s came about as
+  close to the original as EnCodec at 12 kbit/s, and DAC at 6 kbit/s closer than
+  EnCodec at 24.
+- **CPU.** The network is large: decoding takes about a quarter of real time on a
+  16-thread desktop CPU (0.83 on a single core), encoding about 0.15. A slow PC
+  cannot keep up, and the audio then stutters.
+- **Delay.** DAC looks ahead: the transmitter adds 107 ms, the receiver 131 ms.
+- **EnCodec.** DecDRM 0.4.6 and earlier used EnCodec, Meta's neural codec, signalled
+  as `ENC1`. Such services are recognised and shown as "EnCodec (no longer
+  supported)"; station files with `codec = "encodec"` give an error that names DAC.
 
 ## Troubleshooting
 
@@ -721,7 +734,8 @@ parent directories.
 **FAC and SDC fine, but no audio.**
 - The MSC needs more SNR than the FAC, about 15 dB for 64-QAM.
 - Choose the audio service if a data service is selected.
-- Check the log for "unsupported" (CELP/HVXC, or EnCodec in a build without it).
+- Check the log for "unsupported" (CELP/HVXC, DAC in a build without it, or the
+  EnCodec of DecDRM 0.4.6 and earlier).
 
 **Audio drops out or stutters in live use.**
 - Check the log for resynchronisations, which come from network gaps in the SDR
@@ -743,6 +757,6 @@ it records ALSA's `default` device; route that to the cable's monitor as describ
 | GUI settings | `%APPDATA%\decdrm\gui.toml` (Windows), `$XDG_CONFIG_HOME/decdrm/gui.toml` or `~/.config/decdrm/gui.toml` (Linux); `--config FILE` uses another file |
 | GUI's website copies (no data folder set) | `websites/<service id>/` next to the settings file |
 | Received objects | the data folder (`--data-dir`, GUI *Data info → Folder…*): `slides/`, `website/`, `epg/`, `raw/` |
-| EnCodec weights | `models/encodec_24khz/model.safetensors` (see `decdrm models list`) |
+| DAC weights | `models/dac_24khz/model.safetensors` (see `decdrm models list`) |
 | KiwiSDR list (*Find…*) | `kiwi/kiwisdr_com.js` next to the GUI settings (`%APPDATA%\decdrm\kiwi` on Windows) |
 | Broadcast schedules | `schedule/` next to the GUI settings (`%APPDATA%\decdrm\schedule` on Windows): `sked-a26.csv` (EiBi), `DRMSchedule.ini` (Dream), optional `sources.toml`; `decdrm schedule --dir DIR` uses another folder |

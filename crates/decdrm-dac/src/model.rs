@@ -1,4 +1,5 @@
-//! DAC — the Descript Audio Codec, 24 kHz model — streaming on candle (CPU).
+//! The DAC network — the Descript Audio Codec, 24 kHz model — streaming on candle
+//! (CPU).
 //!
 //! The network is DAC as ported to Hugging Face `transformers` (`modeling_dac.py`;
 //! weights `descript/dac_24khz`, MIT licence, weight norm folded in):
@@ -14,9 +15,8 @@
 //!   convolution (×8 ×5 ×4 ×2, halving the channels) and three residual units, then a
 //!   convolution to the waveform and tanh.
 //!
-//! The frame rate and code size are EnCodec 24 kHz's: 75 frames per second of 1–32 codes
-//! of 10 bits (0.75–24 kbit/s; DAC was trained with quantiser dropout, so any number of
-//! codebooks works).
+//! 75 frames per second of 1–32 codes of 10 bits (0.75–24 kbit/s; DAC was trained with
+//! quantiser dropout, so any number of codebooks works).
 //!
 //! ## Streaming
 //!
@@ -34,25 +34,23 @@
 //! candle (whose own convolutions gather the matrix in one thread and transpose the
 //! result, which left most cores idle). Snake activations, biases and residual sums run
 //! as one parallel pass each.
+//!
+//! The receiver loads only the decoder half, the transmitter only the encoder half (the
+//! codebooks come with either).
 
-use crate::error::EncodecError;
+use crate::config::{CODEBOOK_SIZE, FRAME_SAMPLES, LATENT_DIM, MAX_CODEBOOKS as CODEBOOKS};
+use crate::error::DacError;
+use crate::weights;
 use candle_core::safetensors::SliceSafetensors;
 use candle_core::{DType, Device, Tensor};
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 #[cfg(test)]
 mod reference;
 
-/// Sample rate of the 24 kHz model.
-pub const SAMPLE_RATE: u32 = 24_000;
-/// Samples per frame (the product of the strides): 75 frames per second.
-pub const FRAME_SAMPLES: usize = 320;
-/// Codebooks, and entries per codebook (10-bit codes).
-pub const CODEBOOKS: usize = 32;
-pub const CODEBOOK_SIZE: usize = 1024;
-/// Dimension of the latent (the decoder's input).
-pub const LATENT_DIM: usize = 1024;
 /// The decoder's output lags its input by this many samples: its look-ahead (131 ms).
 pub const DECODER_LAG: usize = 3 * 320 + DECODER_BLOCK_LAG + 3;
 /// Zero samples to feed the encoder before the signal, so that every 320 samples of
@@ -450,6 +448,11 @@ struct Codebook {
     /// The entries (1024, 8), and L2-normalised and transposed (8, 1024).
     entries: Tensor,
     unit_t: Tensor,
+    /// The same as plain numbers, for the latent of single frames: entries
+    /// `[entry][8]`, out_proj `[8][1024]`, its bias.
+    entries_v: Vec<f32>,
+    out_w_v: Vec<f32>,
+    out_b_v: Vec<f32>,
 }
 
 // ---------------------------------------------------------------------------------
@@ -462,11 +465,11 @@ struct Loader<'a> {
 }
 
 impl Loader<'_> {
-    fn error(&self, message: String) -> EncodecError {
-        EncodecError::Weights { path: self.path.to_path_buf(), message }
+    fn error(&self, message: String) -> DacError {
+        DacError::Weights { path: self.path.to_path_buf(), message }
     }
 
-    fn tensor(&self, name: &str, shape: &[usize]) -> Result<Tensor, EncodecError> {
+    fn tensor(&self, name: &str, shape: &[usize]) -> Result<Tensor, DacError> {
         let t = self
             .st
             .load(name, &Device::Cpu)
@@ -478,19 +481,19 @@ impl Loader<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn conv(&self, p: &str, cin: usize, cout: usize, k: usize, stride: usize, padding: usize, dilation: usize) -> Result<Conv, EncodecError> {
+    fn conv(&self, p: &str, cin: usize, cout: usize, k: usize, stride: usize, padding: usize, dilation: usize) -> Result<Conv, DacError> {
         // (out, in, k) → (k, in, out) → (k·in, out).
         let w = self.tensor(&format!("{p}.weight"), &[cout, cin, k])?.permute((2, 1, 0))?.reshape((k * cin, cout))?.contiguous()?;
         Ok(Conv { w, bias: self.tensor(&format!("{p}.bias"), &[cout])?.to_vec1()?, cin, k, stride, dilation, padding })
     }
 
-    fn snake(&self, p: &str, channels: usize) -> Result<Snake, EncodecError> {
+    fn snake(&self, p: &str, channels: usize) -> Result<Snake, DacError> {
         let alpha: Vec<f32> = self.tensor(&format!("{p}.alpha"), &[1, channels, 1])?.flatten_all()?.to_vec1()?;
         let inv = alpha.iter().map(|a| 1.0 / (a + 1e-9)).collect();
         Ok(Snake { alpha, inv })
     }
 
-    fn res_units(&self, p: &str, dim: usize) -> Result<Vec<ResUnit>, EncodecError> {
+    fn res_units(&self, p: &str, dim: usize) -> Result<Vec<ResUnit>, DacError> {
         DILATIONS
             .iter()
             .enumerate()
@@ -506,7 +509,7 @@ impl Loader<'_> {
             .collect()
     }
 
-    fn encoder(&self) -> Result<Encoder, EncodecError> {
+    fn encoder(&self) -> Result<Encoder, DacError> {
         let conv1 = self.conv("encoder.conv1", 1, ENCODER_DIM, 7, 1, 3, 1)?;
         let mut dim = ENCODER_DIM;
         let mut blocks = Vec::new();
@@ -527,7 +530,7 @@ impl Loader<'_> {
         })
     }
 
-    fn decoder(&self) -> Result<Decoder, EncodecError> {
+    fn decoder(&self) -> Result<Decoder, DacError> {
         let conv1 = self.conv("decoder.conv1", LATENT_DIM, DECODER_DIM, 7, 1, 3, 1)?;
         let mut dim = DECODER_DIM;
         let mut blocks = Vec::new();
@@ -558,18 +561,23 @@ impl Loader<'_> {
         })
     }
 
-    fn codebook(&self, k: usize) -> Result<Codebook, EncodecError> {
+    fn codebook(&self, k: usize) -> Result<Codebook, DacError> {
         let p = format!("quantizer.quantizers.{k}");
         let entries = self.tensor(&format!("{p}.codebook.weight"), &[CODEBOOK_SIZE, CODEBOOK_DIM])?;
         let norm = entries.sqr()?.sum_keepdim(1)?.sqrt()?.maximum(1e-12)?;
         let unit_t = entries.broadcast_div(&norm)?.t()?.contiguous()?;
         let in_w = self.tensor(&format!("{p}.in_proj.weight"), &[CODEBOOK_DIM, LATENT_DIM, 1])?;
         let out_w = self.tensor(&format!("{p}.out_proj.weight"), &[LATENT_DIM, CODEBOOK_DIM, 1])?;
+        let out_w_t = out_w.squeeze(2)?.t()?.contiguous()?;
+        let out_b = self.tensor(&format!("{p}.out_proj.bias"), &[LATENT_DIM])?;
         Ok(Codebook {
             in_w_t: in_w.squeeze(2)?.t()?.contiguous()?,
             in_b: self.tensor(&format!("{p}.in_proj.bias"), &[CODEBOOK_DIM])?,
-            out_w_t: out_w.squeeze(2)?.t()?.contiguous()?,
-            out_b: self.tensor(&format!("{p}.out_proj.bias"), &[LATENT_DIM])?,
+            entries_v: entries.flatten_all()?.to_vec1()?,
+            out_w_v: out_w_t.flatten_all()?.to_vec1()?,
+            out_b_v: out_b.to_vec1()?,
+            out_w_t,
+            out_b,
             entries,
             unit_t,
         })
@@ -580,35 +588,90 @@ impl Loader<'_> {
 // Model
 // ---------------------------------------------------------------------------------
 
+/// Which halves of the network to load: a receiver needs only the decoder (209 MB of
+/// weights), a transmitter only the encoder (86 MB); the codebooks come with either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModelParts {
+    Encoder,
+    Decoder,
+    Both,
+}
+
+impl ModelParts {
+    fn encoder(self) -> bool {
+        matches!(self, Self::Encoder | Self::Both)
+    }
+
+    fn decoder(self) -> bool {
+        matches!(self, Self::Decoder | Self::Both)
+    }
+}
+
 /// The DAC 24 kHz model (weights only; streams keep their state in [`EncoderState`] /
 /// [`DecoderState`]). Immutable and `Send + Sync`: share it with `Arc`.
 pub struct DacModel {
     path: PathBuf,
-    encoder: Encoder,
-    decoder: Decoder,
+    parts: ModelParts,
+    encoder: Option<Encoder>,
+    decoder: Option<Decoder>,
     codebooks: Vec<Codebook>,
 }
 
 impl std::fmt::Debug for DacModel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DacModel").field("path", &self.path).finish_non_exhaustive()
+        f.debug_struct("DacModel").field("path", &self.path).field("parts", &self.parts).finish_non_exhaustive()
     }
 }
 
+/// Models loaded by [`DacModel::load_cached`], kept for the life of the process.
+/// (`OnceLock` initialises the static on first use; the `Mutex` serialises access.)
+type ModelCache = Mutex<HashMap<(PathBuf, ModelParts), Arc<DacModel>>>;
+static CACHE: OnceLock<ModelCache> = OnceLock::new();
+
 impl DacModel {
-    /// Load the model from a `model.safetensors` of `descript/dac_24khz` (299 MB).
-    pub fn load(path: &Path) -> Result<Self, EncodecError> {
-        let data = std::fs::read(path).map_err(|e| EncodecError::Weights { path: path.to_path_buf(), message: e.to_string() })?;
-        Self::from_bytes(&data, path)
+    /// Load `parts` of the model from a `model.safetensors` of `descript/dac_24khz`
+    /// (299 MB), or from the weights built into the executable
+    /// ([`weights::EMBEDDED_PATH`]).
+    pub fn load(path: &Path, parts: ModelParts) -> Result<Self, DacError> {
+        match weights::EMBEDDED_WEIGHTS {
+            Some(bytes) if weights::is_embedded(path) => Self::from_bytes(bytes, path, parts),
+            _ => {
+                let data = std::fs::read(path).map_err(|e| DacError::Weights { path: path.to_path_buf(), message: e.to_string() })?;
+                Self::from_bytes(&data, path, parts)
+            }
+        }
     }
 
-    /// Load the model from the bytes of its weights file (`path` for messages).
-    pub fn from_bytes(data: &[u8], path: &Path) -> Result<Self, EncodecError> {
+    /// Load `parts` of the model from the bytes of its weights file (`path` for
+    /// messages).
+    pub fn from_bytes(data: &[u8], path: &Path, parts: ModelParts) -> Result<Self, DacError> {
         let st = SliceSafetensors::new(data)
-            .map_err(|e| EncodecError::Weights { path: path.to_path_buf(), message: format!("not a safetensors file: {e}") })?;
+            .map_err(|e| DacError::Weights { path: path.to_path_buf(), message: format!("not a safetensors file: {e}") })?;
         let l = Loader { st, path };
         let codebooks = (0..CODEBOOKS).map(|k| l.codebook(k)).collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { path: path.to_path_buf(), encoder: l.encoder()?, decoder: l.decoder()?, codebooks })
+        let encoder = if parts.encoder() { Some(l.encoder()?) } else { None };
+        let decoder = if parts.decoder() { Some(l.decoder()?) } else { None };
+        Ok(Self { path: path.to_path_buf(), parts, encoder, decoder, codebooks })
+    }
+
+    /// [`Self::load`], or the model already loaded from `path` (with at least `parts`).
+    pub fn load_cached(path: &Path, parts: ModelParts) -> Result<Arc<Self>, DacError> {
+        let cache = CACHE.get_or_init(Default::default);
+        // A panic while the lock was held cannot leave the map inconsistent: go on.
+        let mut map = cache.lock().unwrap_or_else(PoisonError::into_inner);
+        for p in [parts, ModelParts::Both] {
+            if let Some(m) = map.get(&(path.to_path_buf(), p)) {
+                return Ok(Arc::clone(m));
+            }
+        }
+        let model = Arc::new(Self::load(path, parts)?);
+        map.insert((path.to_path_buf(), parts), Arc::clone(&model));
+        Ok(model)
+    }
+
+    /// [`Self::load_cached`] from the default location ([`weights::find_weights`]).
+    pub fn load_default(parts: ModelParts) -> Result<Arc<Self>, DacError> {
+        Self::load_cached(&weights::find_weights()?, parts)
     }
 
     /// The weights file.
@@ -616,34 +679,47 @@ impl DacModel {
         &self.path
     }
 
+    /// The parts that were loaded.
+    pub fn parts(&self) -> ModelParts {
+        self.parts
+    }
+
+    fn encoder(&self) -> Result<&Encoder, DacError> {
+        self.encoder.as_ref().ok_or(DacError::MissingPart("encoder"))
+    }
+
+    fn decoder(&self) -> Result<&Decoder, DacError> {
+        self.decoder.as_ref().ok_or(DacError::MissingPart("decoder"))
+    }
+
     /// A fresh encoder stream.
-    pub fn encoder_state(&self) -> EncoderState {
-        self.encoder.state()
+    pub fn encoder_state(&self) -> Result<EncoderState, DacError> {
+        Ok(self.encoder()?.state())
     }
 
     /// A fresh decoder stream.
-    pub fn decoder_state(&self) -> DecoderState {
-        self.decoder.state()
+    pub fn decoder_state(&self) -> Result<DecoderState, DacError> {
+        Ok(self.decoder()?.state())
     }
 
     /// Continue an encoder stream with 24 kHz mono PCM: the latents (frame-major,
     /// [`LATENT_DIM`] values per frame) now complete. A frame needs 2493 samples after
     /// its own; see [`ENCODER_LEAD_IN`].
-    pub fn encode_latents(&self, st: &mut EncoderState, pcm: &[f32]) -> Result<Vec<f32>, EncodecError> {
-        Ok(self.encoder.push(st, pcm, false)?)
+    pub fn encode_latents(&self, st: &mut EncoderState, pcm: &[f32]) -> Result<Vec<f32>, DacError> {
+        Ok(self.encoder()?.push(st, pcm, false)?)
     }
 
     /// End an encoder stream: the remaining latents.
-    pub fn finish_encoding(&self, st: &mut EncoderState) -> Result<Vec<f32>, EncodecError> {
-        Ok(self.encoder.push(st, &[], true)?)
+    pub fn finish_encoding(&self, st: &mut EncoderState) -> Result<Vec<f32>, DacError> {
+        Ok(self.encoder()?.push(st, &[], true)?)
     }
 
     /// Residual vector quantisation of latents (frame-major) into `codebooks` codes per
     /// frame: each codebook takes the entry nearest in direction to the residual's
     /// projection.
-    pub fn quantize(&self, latents: &[f32], codebooks: usize) -> Result<Vec<u16>, EncodecError> {
+    pub fn quantize(&self, latents: &[f32], codebooks: usize) -> Result<Vec<u16>, DacError> {
         if !(1..=CODEBOOKS).contains(&codebooks) {
-            return Err(EncodecError::InvalidInput(format!("{codebooks} codebooks (1-{CODEBOOKS} possible)")));
+            return Err(DacError::InvalidInput(format!("{codebooks} codebooks (1-{CODEBOOKS} possible)")));
         }
         let frames = latents.len() / LATENT_DIM;
         let mut codes = vec![0u16; frames * codebooks];
@@ -666,9 +742,9 @@ impl DacModel {
 
     /// The latents (frame-major) of codes (`codebooks` per frame) using the first
     /// `depth` codebooks.
-    pub fn latents(&self, codes: &[u16], codebooks: usize, depth: usize) -> Result<Vec<f32>, EncodecError> {
+    pub fn latents(&self, codes: &[u16], codebooks: usize, depth: usize) -> Result<Vec<f32>, DacError> {
         if codebooks == 0 || !codes.len().is_multiple_of(codebooks) {
-            return Err(EncodecError::InvalidInput(format!("{} codes of {codebooks} codebooks", codes.len())));
+            return Err(DacError::InvalidInput(format!("{} codes of {codebooks} codebooks", codes.len())));
         }
         let frames = codes.len() / codebooks;
         let mut z = Tensor::zeros((frames, LATENT_DIM), DType::F32, &Device::Cpu)?;
@@ -680,27 +756,48 @@ impl DacModel {
         Ok(z.flatten_all()?.to_vec1()?)
     }
 
+    /// The latent of one frame from its codes: the projected entries of the first
+    /// `depth` codebooks, summed (`out` gets [`LATENT_DIM`] values).
+    pub fn latent(&self, codes: &[u16], depth: usize, out: &mut [f32]) -> Result<(), DacError> {
+        if out.len() != LATENT_DIM {
+            return Err(DacError::InvalidInput(format!("latent of {} values, need {LATENT_DIM}", out.len())));
+        }
+        out.fill(0.0);
+        for (cb, &c) in self.codebooks.iter().zip(codes).take(depth.min(CODEBOOKS)) {
+            let e = &cb.entries_v[usize::from(c) % CODEBOOK_SIZE * CODEBOOK_DIM..][..CODEBOOK_DIM];
+            for (o, b) in out.iter_mut().zip(&cb.out_b_v) {
+                *o += b;
+            }
+            for (d, &v) in e.iter().enumerate() {
+                for (o, w) in out.iter_mut().zip(&cb.out_w_v[d * LATENT_DIM..(d + 1) * LATENT_DIM]) {
+                    *o += v * w;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Continue a decoder stream with latents (frame-major): the samples now complete
     /// (320 per frame, lagging by [`DECODER_LAG`]).
-    pub fn decode_latents_stream(&self, st: &mut DecoderState, latents: &[f32]) -> Result<Vec<f32>, EncodecError> {
+    pub fn decode_latents_stream(&self, st: &mut DecoderState, latents: &[f32]) -> Result<Vec<f32>, DacError> {
         if !latents.len().is_multiple_of(LATENT_DIM) {
-            return Err(EncodecError::InvalidInput(format!("{} latent values is not a whole number of frames", latents.len())));
+            return Err(DacError::InvalidInput(format!("{} latent values is not a whole number of frames", latents.len())));
         }
-        Ok(self.decoder.push(st, latents, false)?)
+        Ok(self.decoder()?.push(st, latents, false)?)
     }
 
     /// End a decoder stream: the remaining samples.
-    pub fn finish_decoding(&self, st: &mut DecoderState) -> Result<Vec<f32>, EncodecError> {
-        Ok(self.decoder.push(st, &[], true)?)
+    pub fn finish_decoding(&self, st: &mut DecoderState) -> Result<Vec<f32>, DacError> {
+        Ok(self.decoder()?.push(st, &[], true)?)
     }
 
     /// Encode a whole signal (24 kHz mono, padded with zeros to whole frames) into
     /// `codebooks` codes per frame, frame-major.
-    pub fn encode(&self, pcm: &[f32], codebooks: usize) -> Result<Vec<u16>, EncodecError> {
+    pub fn encode(&self, pcm: &[f32], codebooks: usize) -> Result<Vec<u16>, DacError> {
         let frames = pcm.len().div_ceil(FRAME_SAMPLES);
         let mut x = pcm.to_vec();
         x.resize(frames * FRAME_SAMPLES, 0.0);
-        let mut st = self.encoder_state();
+        let mut st = self.encoder_state()?;
         let mut z = self.encode_latents(&mut st, &x)?;
         z.extend(self.finish_encoding(&mut st)?);
         self.quantize(&z, codebooks)
@@ -708,9 +805,9 @@ impl DacModel {
 
     /// Decode whole-signal latents: 320 samples per frame (the last 8 are zero: the
     /// stride-5 transposed convolution yields one sample less than 5× its input).
-    pub fn decode_latents(&self, latents: &[f32]) -> Result<Vec<f32>, EncodecError> {
+    pub fn decode_latents(&self, latents: &[f32]) -> Result<Vec<f32>, DacError> {
         let frames = latents.len() / LATENT_DIM;
-        let mut st = self.decoder_state();
+        let mut st = self.decoder_state()?;
         let mut y = self.decode_latents_stream(&mut st, latents)?;
         y.extend(self.finish_decoding(&mut st)?);
         y.resize(frames * FRAME_SAMPLES, 0.0);
@@ -719,7 +816,7 @@ impl DacModel {
 
     /// Decode whole-signal codes (`codebooks` per frame) using the first `depth`
     /// codebooks.
-    pub fn decode(&self, codes: &[u16], codebooks: usize, depth: usize) -> Result<Vec<f32>, EncodecError> {
+    pub fn decode(&self, codes: &[u16], codebooks: usize, depth: usize) -> Result<Vec<f32>, DacError> {
         self.decode_latents(&self.latents(codes, codebooks, depth)?)
     }
 }
@@ -728,10 +825,15 @@ impl DacModel {
 mod tests {
     use super::*;
 
-    /// The workspace's DAC weights, if downloaded.
-    fn weights() -> Option<PathBuf> {
-        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/dac_24khz/model.safetensors");
-        p.is_file().then_some(p)
+    /// The DAC weights, if downloaded (the workspace's `models` directory).
+    fn model() -> Option<(Arc<DacModel>, PathBuf)> {
+        match weights::find_weights() {
+            Ok(path) => Some((DacModel::load_cached(&path, ModelParts::Both).expect("load the DAC weights"), path)),
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                None
+            }
+        }
     }
 
     /// A test signal: a chirp with harmonics and a noise burst.
@@ -764,15 +866,11 @@ mod tests {
     /// Streaming in uneven chunks gives what the whole-signal reference gives.
     #[test]
     fn streaming_matches_the_reference() {
-        let Some(path) = weights() else {
-            eprintln!("skipped: DAC weights not downloaded");
-            return;
-        };
-        let model = DacModel::load(&path).unwrap();
+        let Some((model, path)) = model() else { return };
         let reference = reference::DacModel::load(&path).unwrap();
         let x = signal(40 * FRAME_SAMPLES);
         // Encoder: latents of the whole signal, then fed in odd chunks.
-        let mut st = model.encoder_state();
+        let mut st = model.encoder_state().unwrap();
         let mut z = Vec::new();
         for chunk in x.chunks(3001) {
             z.extend(model.encode_latents(&mut st, chunk).unwrap());
@@ -782,7 +880,7 @@ mod tests {
         assert_eq!(model.quantize(&z, 12).unwrap(), codes, "codes");
         // Decoder: in odd chunks of frames, against the reference.
         let latents = reference.latents(&codes, 12, 12).unwrap();
-        let mut st = model.decoder_state();
+        let mut st = model.decoder_state().unwrap();
         let mut y = Vec::new();
         for chunk in latents.chunks(7 * LATENT_DIM) {
             y.extend(model.decode_latents_stream(&mut st, chunk).unwrap());
@@ -792,8 +890,12 @@ mod tests {
         y.resize(want.len(), 0.0);
         let d = max_diff(&y, &want);
         assert!(d < 1e-4, "max difference {d}");
+        // The latent of a single frame is the batch one.
+        let mut one = vec![0f32; LATENT_DIM];
+        model.latent(&codes[5 * 12..6 * 12], 12, &mut one).unwrap();
+        assert!(max_diff(&one, &latents[5 * LATENT_DIM..6 * LATENT_DIM]) < 1e-4);
         // Without the flush, a stream lags by the decoder's look-ahead.
-        let mut st = model.decoder_state();
+        let mut st = model.decoder_state().unwrap();
         let part = model.decode_latents_stream(&mut st, &latents).unwrap();
         assert_eq!(part.len(), 40 * FRAME_SAMPLES - DECODER_LAG);
     }
@@ -801,12 +903,8 @@ mod tests {
     /// With the lead-in, every 320 samples of signal complete one frame.
     #[test]
     fn encoder_lead_in() {
-        let Some(path) = weights() else {
-            eprintln!("skipped: DAC weights not downloaded");
-            return;
-        };
-        let model = DacModel::load(&path).unwrap();
-        let mut st = model.encoder_state();
+        let Some((model, _)) = model() else { return };
+        let mut st = model.encoder_state().unwrap();
         assert!(model.encode_latents(&mut st, &vec![0.0; ENCODER_LEAD_IN]).unwrap().is_empty());
         for _ in 0..3 {
             let z = model.encode_latents(&mut st, &signal(30 * FRAME_SAMPLES)).unwrap();

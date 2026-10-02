@@ -1,15 +1,15 @@
-//! EnCodec constants, bandwidths and the codec configuration signalled in SDC entity
+//! DAC constants, bandwidths and the codec configuration signalled in SDC entity
 //! type 9 (see the crate docs for the byte layout).
 
 use std::fmt;
 
-/// Sampling rate of the EnCodec 24 kHz model, Hz.
+/// Sampling rate of the DAC 24 kHz model, Hz.
 pub const SAMPLE_RATE: u32 = 24_000;
-/// PCM samples per EnCodec frame: the encoder's total stride 2·4·5·8.
+/// PCM samples per DAC frame: the encoder's total stride 2·4·5·8.
 pub const FRAME_SAMPLES: usize = 320;
-/// EnCodec frames per second.
+/// DAC frames per second.
 pub const FRAME_RATE: u32 = 75;
-/// EnCodec frames per 400 ms DRM audio super frame.
+/// DAC frames per 400 ms DRM audio super frame.
 pub const FRAMES_PER_SUPER_FRAME: usize = 30;
 /// PCM samples per audio super frame (400 ms).
 pub const SUPER_FRAME_SAMPLES: usize = FRAMES_PER_SUPER_FRAME * FRAME_SAMPLES;
@@ -19,17 +19,20 @@ pub const CODEBOOK_SIZE: usize = 1024;
 pub const CODE_BITS: usize = 10;
 /// Codebooks of the model (24 kbit/s).
 pub const MAX_CODEBOOKS: usize = 32;
-/// Dimension of the latent vectors the codebooks quantise.
-pub const LATENT_DIM: usize = 128;
+/// Dimension of the latent vectors the codebooks quantise (the decoder's input).
+pub const LATENT_DIM: usize = 1024;
 
-/// SDC type 9 "audio coding" value of an EnCodec service (10, reserved in
+/// SDC type 9 "audio coding" value of a DAC service (10, reserved in
 /// ES 201 980 V4 §6.4.3.10).
 pub const AUDIO_CODING: u8 = 2;
 /// Start of the codec specific config: a zero byte (read as the SDC end marker by
-/// receivers that do not skip the config by the entity length, e.g. Dream), `"ENC"`
+/// receivers that do not skip the config by the entity length, e.g. Dream), `"DAC"`
 /// and the framing format version `'1'`. Mirrors
-/// `decdrm_core::mux::service::ENCODEC_CONFIG_MAGIC` plus the version digit.
-pub const CONFIG_MAGIC: [u8; 5] = [0x00, b'E', b'N', b'C', b'1'];
+/// `decdrm_core::mux::service::DAC_CONFIG_MAGIC` plus the version digit.
+pub const CONFIG_MAGIC: [u8; 5] = [0x00, b'D', b'A', b'C', b'1'];
+/// The start of the codec specific config of the EnCodec services DecDRM 0.4.6 and
+/// earlier sent (the same framing with Meta's EnCodec model, which DAC replaced).
+pub const ENCODEC_MAGIC: [u8; 4] = [0x00, b'E', b'N', b'C'];
 /// Length of the codec specific config: the magic and one parameter byte.
 pub const CONFIG_LEN: usize = CONFIG_MAGIC.len() + 1;
 /// Frames per CRC group, by their 3-bit code in the parameter byte (the divisors of 30).
@@ -37,10 +40,11 @@ pub const GROUP_SIZES: [usize; 8] = [1, 2, 3, 5, 6, 10, 15, 30];
 /// Most layers that can be sent twice (2 bits in the parameter byte).
 pub const MAX_REPEATED_LAYERS: usize = 3;
 
-/// The five bit rates EnCodec 24 kHz was trained for. Each doubles the number of
-/// codebooks (residual vector quantiser stages) of the previous one; the codebooks a
-/// tier adds over the previous one form a *layer* (see
-/// [`crate::framing::layer_codebooks`]).
+/// The five bit-rate tiers. Each doubles the number of codebooks (residual vector
+/// quantiser stages) of the previous one; the codebooks a tier adds over the previous
+/// one form a *layer* (see [`crate::framing::layer_codebooks`]). (DAC decodes any
+/// number of codebooks; the framing, inherited from DecDRM's earlier EnCodec codec,
+/// uses these five.)
 ///
 /// (Rust note: `#[derive(PartialOrd, Ord)]` orders the variants as declared, so
 /// `Bandwidth::Kbps3 < Bandwidth::Kbps6`.)
@@ -111,34 +115,37 @@ impl fmt::Display for Bandwidth {
     }
 }
 
-/// Everything a receiver needs to know about an EnCodec service besides its stream
+/// Everything a receiver needs to know about a DAC service besides its stream
 /// length: the bandwidth and the DRM framing. Sent as the codec specific config of SDC
-/// entity type 9 ([`EncodecConfig::codec_config`]).
+/// entity type 9 ([`DacConfig::codec_config`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EncodecConfig {
+pub struct DacConfig {
     /// Codebooks per frame.
     pub bandwidth: Bandwidth,
-    /// EnCodec frames covered by each CRC (one of [`GROUP_SIZES`]).
+    /// DAC frames covered by each CRC (one of [`GROUP_SIZES`]).
     pub group_frames: usize,
     /// Leading layers sent a second time after the main block (0 ..= 3, at most
     /// [`Bandwidth::layers`]).
     pub repeated_layers: usize,
 }
 
-/// A codec specific config that is not a valid EnCodec configuration.
+/// A codec specific config that is not a valid DAC configuration.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
-    /// The magic is missing: another codec, or DecDRM's EnCodec signalling is absent.
-    #[error("not an EnCodec configuration")]
-    NotEncodec,
+    /// The magic is missing: another codec, or DecDRM's DAC signalling is absent.
+    #[error("not a DAC configuration")]
+    NotDac,
+    /// An EnCodec service of DecDRM 0.4.6 or earlier.
+    #[error("EnCodec, the neural codec of DecDRM 0.4.6 and earlier, is no longer supported (DecDRM now uses DAC)")]
+    Encodec,
     /// The configuration ends early.
-    #[error("EnCodec configuration of {0} bytes is truncated")]
+    #[error("DAC configuration of {0} bytes is truncated")]
     Truncated(usize),
     /// A framing format this version of DecDRM does not know.
-    #[error("EnCodec framing format {0:#04x} is not supported (this receiver knows format '1')")]
+    #[error("DAC framing format {0:#04x} is not supported (this receiver knows format '1')")]
     UnsupportedVersion(u8),
     /// Bandwidth code 5–7.
-    #[error("EnCodec bandwidth code {0} is reserved")]
+    #[error("DAC bandwidth code {0} is reserved")]
     InvalidBandwidth(u8),
     /// The group size does not divide the 30 frames of a super frame.
     #[error("{0} frames per CRC group is not one of 1, 2, 3, 5, 6, 10, 15, 30")]
@@ -148,7 +155,7 @@ pub enum ConfigError {
     InvalidRepetition { repeated: usize, max: usize, bandwidth: Bandwidth },
 }
 
-impl EncodecConfig {
+impl DacConfig {
     /// A validated configuration.
     pub fn new(bandwidth: Bandwidth, group_frames: usize, repeated_layers: usize) -> Result<Self, ConfigError> {
         if !GROUP_SIZES.contains(&group_frames) {
@@ -180,8 +187,11 @@ impl EncodecConfig {
     /// Parse a codec specific config. Bytes after the parameter byte are ignored (room
     /// for compatible additions within format 1).
     pub fn from_codec_config(config: &[u8]) -> Result<Self, ConfigError> {
+        if config.starts_with(&ENCODEC_MAGIC) {
+            return Err(ConfigError::Encodec);
+        }
         if config.len() < 4 || config[..4] != CONFIG_MAGIC[..4] {
-            return Err(ConfigError::NotEncodec);
+            return Err(ConfigError::NotDac);
         }
         match config.get(4) {
             None => return Err(ConfigError::Truncated(config.len())),
@@ -198,12 +208,12 @@ impl EncodecConfig {
     pub fn from_type9_bytes(type9: &[u8]) -> Result<Self, ConfigError> {
         match type9.first() {
             None => Err(ConfigError::Truncated(0)),
-            Some(b0) if b0 >> 6 != AUDIO_CODING => Err(ConfigError::NotEncodec),
+            Some(b0) if b0 >> 6 != AUDIO_CODING => Err(ConfigError::NotDac),
             Some(_) => Self::from_codec_config(type9.get(2..).unwrap_or(&[])),
         }
     }
 
-    /// E.g. `EnCodec 6 kbit/s (8 codebooks), CRC per 40 ms, codebooks 0-3 sent twice`.
+    /// E.g. `DAC 6 kbit/s (8 codebooks), CRC per 40 ms, codebooks 0-3 sent twice`.
     pub fn describe(&self) -> String {
         let group_ms = self.group_frames as f64 * 1000.0 / f64::from(FRAME_RATE);
         let repeated = match self.repeated_layers {
@@ -211,7 +221,7 @@ impl EncodecConfig {
             r => format!(", codebooks 0-{} sent twice", crate::framing::layer_codebooks(r - 1).end - 1),
         };
         format!(
-            "EnCodec {} ({} codebooks), CRC per {group_ms:.0} ms{repeated}",
+            "DAC {} ({} codebooks), CRC per {group_ms:.0} ms{repeated}",
             self.bandwidth,
             self.bandwidth.codebooks()
         )
@@ -239,42 +249,45 @@ mod tests {
         for bw in Bandwidth::ALL {
             for g in GROUP_SIZES {
                 for r in 0..=MAX_REPEATED_LAYERS.min(bw.layers()) {
-                    let c = EncodecConfig::new(bw, g, r).unwrap();
+                    let c = DacConfig::new(bw, g, r).unwrap();
                     let bytes = c.codec_config();
-                    assert_eq!(&bytes[..5], b"\0ENC1");
-                    assert_eq!(EncodecConfig::from_codec_config(&bytes), Ok(c));
+                    assert_eq!(&bytes[..5], b"\0DAC1");
+                    assert_eq!(DacConfig::from_codec_config(&bytes), Ok(c));
                     let type9 = [&[0b1000_0011, 0x80][..], &bytes].concat();
-                    assert_eq!(EncodecConfig::from_type9_bytes(&type9), Ok(c));
+                    assert_eq!(DacConfig::from_type9_bytes(&type9), Ok(c));
                 }
             }
         }
         assert_eq!(
-            EncodecConfig::new(Bandwidth::Kbps1_5, 3, 2),
+            DacConfig::new(Bandwidth::Kbps1_5, 3, 2),
             Err(ConfigError::InvalidRepetition { repeated: 2, max: 1, bandwidth: Bandwidth::Kbps1_5 })
         );
-        assert_eq!(EncodecConfig::new(Bandwidth::Kbps6, 4, 0), Err(ConfigError::InvalidGroup(4)));
-        assert_eq!(EncodecConfig::from_codec_config(b"\0ENC2\x40"), Err(ConfigError::UnsupportedVersion(b'2')));
-        assert_eq!(EncodecConfig::from_codec_config(b"\0ENC1"), Err(ConfigError::Truncated(5)));
-        assert_eq!(EncodecConfig::from_codec_config(b"ENC1\x40"), Err(ConfigError::NotEncodec));
-        assert_eq!(EncodecConfig::from_codec_config(&[0, b'E', b'N', b'C', b'1', 0xA0]), Err(ConfigError::InvalidBandwidth(5)));
-        // AAC type 9 bytes are not EnCodec.
-        assert_eq!(EncodecConfig::from_type9_bytes(&[0x23, 0x80]), Err(ConfigError::NotEncodec));
+        assert_eq!(DacConfig::new(Bandwidth::Kbps6, 4, 0), Err(ConfigError::InvalidGroup(4)));
+        assert_eq!(DacConfig::from_codec_config(b"\0DAC2\x40"), Err(ConfigError::UnsupportedVersion(b'2')));
+        assert_eq!(DacConfig::from_codec_config(b"\0DAC1"), Err(ConfigError::Truncated(5)));
+        assert_eq!(DacConfig::from_codec_config(b"DAC1\x40"), Err(ConfigError::NotDac));
+        assert_eq!(DacConfig::from_codec_config(&[0, b'D', b'A', b'C', b'1', 0xA0]), Err(ConfigError::InvalidBandwidth(5)));
+        // The EnCodec services of DecDRM 0.4.6 and earlier are named, not decoded.
+        assert_eq!(DacConfig::from_codec_config(b"\0ENC1\x48"), Err(ConfigError::Encodec));
+        assert!(ConfigError::Encodec.to_string().contains("no longer supported"));
+        // AAC type 9 bytes are not DAC.
+        assert_eq!(DacConfig::from_type9_bytes(&[0x23, 0x80]), Err(ConfigError::NotDac));
     }
 
     /// The magic mirrors the prefix decdrm-core recognises.
     #[test]
     fn magic_matches_core() {
-        assert_eq!(CONFIG_MAGIC[..4], decdrm_core::mux::service::ENCODEC_CONFIG_MAGIC);
-        let c = EncodecConfig::new(Bandwidth::Kbps6, 3, 1).unwrap().codec_config();
-        assert!(decdrm_core::mux::service::is_encodec_config(&c));
+        assert_eq!(CONFIG_MAGIC[..4], decdrm_core::mux::service::DAC_CONFIG_MAGIC);
+        let c = DacConfig::new(Bandwidth::Kbps6, 3, 1).unwrap().codec_config();
+        assert!(decdrm_core::mux::service::is_dac_config(&c));
         assert_eq!(
             c,
-            [0, b'E', b'N', b'C', b'1', (2 << 5) | (2 << 2) | 1],
+            [0, b'D', b'A', b'C', b'1', (2 << 5) | (2 << 2) | 1],
             "6 kbit/s, 3-frame groups, layer 0 repeated"
         );
         assert_eq!(
-            EncodecConfig::new(Bandwidth::Kbps6, 3, 1).unwrap().describe(),
-            "EnCodec 6 kbit/s (8 codebooks), CRC per 40 ms, codebooks 0-1 sent twice"
+            DacConfig::new(Bandwidth::Kbps6, 3, 1).unwrap().describe(),
+            "DAC 6 kbit/s (8 codebooks), CRC per 40 ms, codebooks 0-1 sent twice"
         );
     }
 }

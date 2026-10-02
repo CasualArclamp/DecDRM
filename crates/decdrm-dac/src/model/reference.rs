@@ -16,16 +16,15 @@
 //!   convolution (×8 ×5 ×4 ×2, halving the channels) and three residual units, then a
 //!   convolution to the waveform and tanh.
 //!
-//! The same frame rate and code size as EnCodec 24 kHz: 75 frames per second of 1–32
-//! codes of 10 bits (0.75–24 kbit/s; DAC was trained with quantiser dropout, so any
-//! number of codebooks works). Unlike EnCodec its convolutions are centred, not causal:
+//! 75 frames per second of 1–32 codes of 10 bits (0.75–24 kbit/s; DAC was trained with
+//! quantiser dropout, so any number of codebooks works). Its convolutions are centred, not causal:
 //! an output sample depends on about ten frames before and nine after it. Long signals
 //! are therefore processed in chunks with [`CONTEXT_FRAMES`] of context on each side,
 //! which gives the same result as one run over the whole signal.
 
 #![allow(dead_code)]
 
-use crate::error::EncodecError;
+use crate::error::DacError;
 use candle_core::safetensors::SliceSafetensors;
 use candle_core::{DType, Device, Tensor};
 use rayon::prelude::*;
@@ -251,11 +250,11 @@ struct Loader<'a> {
 }
 
 impl Loader<'_> {
-    fn error(&self, message: String) -> EncodecError {
-        EncodecError::Weights { path: self.path.to_path_buf(), message }
+    fn error(&self, message: String) -> DacError {
+        DacError::Weights { path: self.path.to_path_buf(), message }
     }
 
-    fn tensor(&self, name: &str, shape: &[usize]) -> Result<Tensor, EncodecError> {
+    fn tensor(&self, name: &str, shape: &[usize]) -> Result<Tensor, DacError> {
         let t = self
             .st
             .load(name, &Device::Cpu)
@@ -267,7 +266,7 @@ impl Loader<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn conv(&self, p: &str, cin: usize, cout: usize, kernel: usize, stride: usize, padding: usize, dilation: usize) -> Result<Conv, EncodecError> {
+    fn conv(&self, p: &str, cin: usize, cout: usize, kernel: usize, stride: usize, padding: usize, dilation: usize) -> Result<Conv, DacError> {
         Ok(Conv {
             weight: self.tensor(&format!("{p}.weight"), &[cout, cin, kernel])?,
             bias: self.tensor(&format!("{p}.bias"), &[cout])?.to_vec1()?,
@@ -277,13 +276,13 @@ impl Loader<'_> {
         })
     }
 
-    fn snake(&self, p: &str, channels: usize) -> Result<Snake, EncodecError> {
+    fn snake(&self, p: &str, channels: usize) -> Result<Snake, DacError> {
         let alpha: Vec<f32> = self.tensor(&format!("{p}.alpha"), &[1, channels, 1])?.flatten_all()?.to_vec1()?;
         let inv = alpha.iter().map(|a| 1.0 / (a + 1e-9)).collect();
         Ok(Snake { alpha, inv })
     }
 
-    fn res_units(&self, p: &str, dim: usize) -> Result<Vec<ResUnit>, EncodecError> {
+    fn res_units(&self, p: &str, dim: usize) -> Result<Vec<ResUnit>, DacError> {
         DILATIONS
             .iter()
             .enumerate()
@@ -299,7 +298,7 @@ impl Loader<'_> {
             .collect()
     }
 
-    fn encoder(&self) -> Result<Encoder, EncodecError> {
+    fn encoder(&self) -> Result<Encoder, DacError> {
         let conv1 = self.conv("encoder.conv1", 1, ENCODER_DIM, 7, 1, 3, 1)?;
         let mut dim = ENCODER_DIM;
         let mut blocks = Vec::new();
@@ -320,7 +319,7 @@ impl Loader<'_> {
         })
     }
 
-    fn decoder(&self) -> Result<Decoder, EncodecError> {
+    fn decoder(&self) -> Result<Decoder, DacError> {
         let conv1 = self.conv("decoder.conv1", LATENT_DIM, DECODER_DIM, 7, 1, 3, 1)?;
         let mut dim = DECODER_DIM;
         let mut blocks = Vec::new();
@@ -347,7 +346,7 @@ impl Loader<'_> {
         })
     }
 
-    fn codebook(&self, k: usize) -> Result<Codebook, EncodecError> {
+    fn codebook(&self, k: usize) -> Result<Codebook, DacError> {
         let p = format!("quantizer.quantizers.{k}");
         let entries = self.tensor(&format!("{p}.codebook.weight"), &[CODEBOOK_SIZE, CODEBOOK_DIM])?;
         let norm = entries.sqr()?.sum_keepdim(1)?.sqrt()?.maximum(1e-12)?;
@@ -393,10 +392,10 @@ fn chunks(frames: usize) -> impl Iterator<Item = (usize, usize, usize, usize)> {
 
 impl DacModel {
     /// Load the model from a `model.safetensors` of `descript/dac_24khz` (299 MB).
-    pub fn load(path: &Path) -> Result<Self, EncodecError> {
-        let data = std::fs::read(path).map_err(|e| EncodecError::Weights { path: path.to_path_buf(), message: e.to_string() })?;
+    pub fn load(path: &Path) -> Result<Self, DacError> {
+        let data = std::fs::read(path).map_err(|e| DacError::Weights { path: path.to_path_buf(), message: e.to_string() })?;
         let st = SliceSafetensors::new(&data)
-            .map_err(|e| EncodecError::Weights { path: path.to_path_buf(), message: format!("not a safetensors file: {e}") })?;
+            .map_err(|e| DacError::Weights { path: path.to_path_buf(), message: format!("not a safetensors file: {e}") })?;
         let l = Loader { st, path };
         let codebooks = (0..CODEBOOKS).map(|k| l.codebook(k)).collect::<Result<Vec<_>, _>>()?;
         Ok(Self { path: path.to_path_buf(), encoder: l.encoder()?, decoder: l.decoder()?, codebooks })
@@ -404,9 +403,9 @@ impl DacModel {
 
     /// Encode 24 kHz mono PCM (padded with zeros to whole frames) into `codebooks` codes
     /// per frame, frame-major.
-    pub fn encode(&self, pcm: &[f32], codebooks: usize) -> Result<Vec<u16>, EncodecError> {
+    pub fn encode(&self, pcm: &[f32], codebooks: usize) -> Result<Vec<u16>, DacError> {
         if !(1..=CODEBOOKS).contains(&codebooks) {
-            return Err(EncodecError::InvalidInput(format!("{codebooks} codebooks (1-{CODEBOOKS} possible)")));
+            return Err(DacError::InvalidInput(format!("{codebooks} codebooks (1-{CODEBOOKS} possible)")));
         }
         let frames = pcm.len().div_ceil(FRAME_SAMPLES);
         let mut x = pcm.to_vec();
@@ -423,7 +422,7 @@ impl DacModel {
 
     /// Residual vector quantisation of latents (T, 1024): each codebook takes the
     /// entry nearest in direction to the residual's projection.
-    fn quantize(&self, latent: &Tensor, codebooks: usize) -> Result<Vec<u16>, EncodecError> {
+    fn quantize(&self, latent: &Tensor, codebooks: usize) -> Result<Vec<u16>, DacError> {
         let frames = latent.dim(0)?;
         let mut residual = latent.clone();
         let mut codes = vec![0u16; frames * codebooks];
@@ -442,9 +441,9 @@ impl DacModel {
 
     /// The latents (frame-major, [`LATENT_DIM`] values per frame) of codes
     /// (`codebooks` per frame) using the first `depth` codebooks.
-    pub fn latents(&self, codes: &[u16], codebooks: usize, depth: usize) -> Result<Vec<f32>, EncodecError> {
+    pub fn latents(&self, codes: &[u16], codebooks: usize, depth: usize) -> Result<Vec<f32>, DacError> {
         if codebooks == 0 || !codes.len().is_multiple_of(codebooks) {
-            return Err(EncodecError::InvalidInput(format!("{} codes of {codebooks} codebooks", codes.len())));
+            return Err(DacError::InvalidInput(format!("{} codes of {codebooks} codebooks", codes.len())));
         }
         let frames = codes.len() / codebooks;
         let mut z = Tensor::zeros((frames, LATENT_DIM), DType::F32, &Device::Cpu)?;
@@ -457,9 +456,9 @@ impl DacModel {
     }
 
     /// Decode latents (frame-major): 320 samples per frame.
-    pub fn decode_latents(&self, latents: &[f32]) -> Result<Vec<f32>, EncodecError> {
+    pub fn decode_latents(&self, latents: &[f32]) -> Result<Vec<f32>, DacError> {
         if latents.is_empty() || !latents.len().is_multiple_of(LATENT_DIM) {
-            return Err(EncodecError::InvalidInput(format!("{} latent values is not a whole number of frames", latents.len())));
+            return Err(DacError::InvalidInput(format!("{} latent values is not a whole number of frames", latents.len())));
         }
         let frames = latents.len() / LATENT_DIM;
         let z = Tensor::from_slice(latents, (frames, LATENT_DIM), &Device::Cpu)?;
@@ -475,7 +474,7 @@ impl DacModel {
     }
 
     /// Decode codes (`codebooks` per frame) using the first `depth` codebooks.
-    pub fn decode(&self, codes: &[u16], codebooks: usize, depth: usize) -> Result<Vec<f32>, EncodecError> {
+    pub fn decode(&self, codes: &[u16], codebooks: usize, depth: usize) -> Result<Vec<f32>, DacError> {
         self.decode_latents(&self.latents(codes, codebooks, depth)?)
     }
 }

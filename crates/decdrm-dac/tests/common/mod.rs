@@ -1,4 +1,4 @@
-//! Test signals and measurements shared by the EnCodec tests and examples.
+//! Test signals and measurements shared by the DAC tests and examples.
 
 #![allow(dead_code)]
 

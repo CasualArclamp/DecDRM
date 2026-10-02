@@ -1,15 +1,15 @@
-//! `decdrm models` — the weights of the neural codec (EnCodec).
+//! `decdrm models` — the weights of the neural codec (DAC).
 //!
-//! `decdrm models download encodec [--dir DIR]` fetches Meta's `facebook/encodec_24khz`
-//! weights (93 MB, a pinned revision) with curl or wget, checks their SHA-256 and
-//! installs them as `DIR/encodec_24khz/model.safetensors`. The default directory is
+//! `decdrm models download dac [--dir DIR]` fetches Descript's `descript/dac_24khz`
+//! weights (299 MB, a pinned revision) with curl or wget, checks their SHA-256 and
+//! installs them as `DIR/dac_24khz/model.safetensors`. The default directory is
 //! `$DECDRM_MODELS`, else `models` next to this executable. The receiver and
 //! transmitter look there (and, for development builds, in a `models` directory up to
 //! four levels above the executable, e.g. the workspace root). `decdrm models list`
 //! shows where they are looked for and what is installed.
 
 use anyhow::{Context, Result};
-use decdrm_encodec::weights;
+use decdrm_dac::weights;
 use std::path::{Path, PathBuf};
 
 #[derive(clap::Args)]
@@ -39,13 +39,13 @@ enum ModelsCmd {
 
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum Model {
-    /// Meta's EnCodec 24 kHz (facebook/encodec_24khz, 93 MB).
-    Encodec,
+    /// The Descript Audio Codec, 24 kHz (descript/dac_24khz, 299 MB).
+    Dac,
 }
 
 pub fn run(a: ModelsArgs) -> Result<()> {
     match a.cmd {
-        ModelsCmd::Download { model: Model::Encodec, dir, force } => download(dir, force),
+        ModelsCmd::Download { model: Model::Dac, dir, force } => download(dir, force),
         ModelsCmd::List => list(),
     }
 }
@@ -66,7 +66,7 @@ fn download(dir: Option<PathBuf>, force: bool) -> Result<()> {
         }
     }
     println!(
-        "downloading the EnCodec 24 kHz weights ({:.0} MB) from {}",
+        "downloading the DAC 24 kHz weights ({:.0} MB) from {}",
         weights::WEIGHTS_SIZE as f64 / 1e6,
         weights::WEIGHTS_URL
     );
@@ -95,21 +95,21 @@ fn lookup_note(path: &Path) -> Result<()> {
             models_dir_of(path).display()
         ),
     }
-    if !decdrm_encodec::BUILT_IN {
-        println!("note: this decdrm is built without EnCodec; build it with `--features encodec` to use the codec");
+    if !decdrm_dac::BUILT_IN {
+        println!("note: this decdrm is built without DAC; build it with `--features dac` to use the codec");
     }
     Ok(())
 }
 
-/// The models directory a weights file is in (`<dir>/encodec_24khz/model.safetensors`).
+/// The models directory a weights file is in (`<dir>/dac_24khz/model.safetensors`).
 fn models_dir_of(path: &Path) -> PathBuf {
     path.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default()
 }
 
 fn list() -> Result<()> {
     println!(
-        "EnCodec 24 kHz (facebook/encodec_24khz): codec {}",
-        if decdrm_encodec::BUILT_IN { "built in" } else { "not built in (build with `--features encodec`)" }
+        "DAC 24 kHz (descript/dac_24khz): codec {}",
+        if decdrm_dac::BUILT_IN { "built in" } else { "not built in (build with `--features dac`)" }
     );
     match std::env::var_os(weights::MODELS_ENV) {
         Some(v) => println!("{} = {}", weights::MODELS_ENV, v.to_string_lossy()),
@@ -121,7 +121,7 @@ fn list() -> Result<()> {
     }
     match weights::find_weights() {
         Ok(p) => println!("using {}", p.display()),
-        Err(_) => println!("not installed: run `decdrm models download encodec`"),
+        Err(_) => println!("not installed: run `decdrm models download dac`"),
     }
     Ok(())
 }

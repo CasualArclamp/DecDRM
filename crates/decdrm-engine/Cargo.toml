@@ -8,16 +8,16 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-# Decode DecDRM's experimental EnCodec services (neural codec; pulls in candle). Without
-# it they are recognised and reported as "EnCodec (not built in)".
-encodec = ["decdrm-encodec/encodec"]
+# Decode DecDRM's DAC services (neural codec; pulls in candle). Without it they are
+# recognised and reported as "DAC (not built in)".
+dac = ["decdrm-dac/dac"]
 
 [dependencies]
 decdrm-core = { path = "../decdrm-core" }
 decdrm-io = { path = "../decdrm-io" }
 decdrm-data = { path = "../decdrm-data" }
 decdrm-codecs = { path = "../decdrm-codecs" }
-decdrm-encodec = { path = "../decdrm-encodec" }
+decdrm-dac = { path = "../decdrm-dac" }
 decdrm-evs = { path = "../decdrm-evs" }
 decdrm-kiwi = { path = "../decdrm-kiwi" }
 decdrm-mdi = { path = "../decdrm-mdi" }

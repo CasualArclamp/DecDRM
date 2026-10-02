@@ -16,7 +16,7 @@ and the milestone plan. Keep the milestone checklist current.
 | Data services | Text messages, Journaline, MOT Slideshow, EPG, Broadcast Website, TPEG/unknown (raw data saved). Broadcast clock and alternative-frequency (AFS) info from the SDC. |
 | Inputs | Recorded files (WAV/FLAC; real IF or I/Q; any sample rate), live sound card (including a virtual audio cable fed by any web SDR), and KiwiSDRs directly over the network (their I/Q, retunable while connected; added 2026-10-01 at the user's request). No direct SDR drivers. The network clients are the KiwiSDR client and the transmitter's web stream audio input. |
 | Outputs | Live audio (with clock-drift compensation) and logs/metrics (CSV/JSON). |
-| Transmitter | Full transmitter: AAC/HE-AAC (FDK encoder), xHE-AAC (libxaac encoder), Opus, plus **EnCodec** (Meta's neural codec, via candle) as an experimental DecDRM-only extension. Carries every data service the receiver decodes. Programme audio from a file, a sound card, a test tone or an internet radio stream (Icecast/SHOUTCAST over HTTP/HTTPS, its titles as text messages). Output to WAV/FLAC file and sound card. Includes a channel simulator (spec channel models) for loopback testing. |
+| Transmitter | Full transmitter: AAC/HE-AAC (FDK encoder), xHE-AAC (libxaac encoder), Opus, plus a neural codec (via candle) as a DecDRM-only extension: **DAC** since 2026-10-02 (EnCodec before; see the milestone *DAC replaces EnCodec*). Carries every data service the receiver decodes. Programme audio from a file, a sound card, a test tone or an internet radio stream (Icecast/SHOUTCAST over HTTP/HTTPS, its titles as text messages). Output to WAV/FLAC file and sound card. Includes a channel simulator (spec channel models) for loopback testing. |
 | UI | Library crates + CLI + desktop GUI (**egui**). The GUI has RX/TX modes like Dream; the transmitter is also scriptable from the CLI with a TOML config. |
 | Platforms | Windows x86_64 (primary), Linux x86_64. |
 | Workflow | Max autonomy; commit per milestone; local git + GitHub repo `CasualArclamp/DecDRM`, private until 2026-10-01 and public since (so: no recordings, reference material, model weights, secrets or 3GPP code in it). |
@@ -33,7 +33,7 @@ and the milestone plan. Keep the milestone checklist current.
       ┌────────────┼──────────┬─────────┴───────┬────────────────┐
       │            │          │                 │                │
  decdrm-core   decdrm-codecs  decdrm-data    decdrm-io     (future) decdrm-xaac,
- PHY+FEC+mux   FDK-AAC, Opus  MOT/Journaline WAV/FLAC/cpal  decdrm-encodec
+ PHY+FEC+mux   FDK-AAC, Opus  MOT/Journaline WAV/FLAC/cpal  decdrm-dac
  (pure Rust)   (FFI)          EPG/BWS/TPEG   resampling
       ▲            ▲
       │      decdrm-fdk-sys, decdrm-opus-sys (vendored C in third_party/)
@@ -250,6 +250,60 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       *Delay–Doppler*. Checked against channel model 3 (four paths, spreads
       0.1–2 Hz, in place) and on KCBS (separate ionospheric paths). The waterfall also
       fits the DRM signal now, at the spectrum's full 2048-bin resolution.
+- [x] **DAC replaces EnCodec** (2026-10-02) — the user asked whether SemantiCodec
+      would beat EnCodec ("if so replace it"). It would not here: at most 1.40 kbit/s
+      with 16 kHz output, ViSQOL 3.48 against EnCodec's 3.58 at 3 kbit/s and 4.00 at 6
+      in its own paper, whole 10.24 s windows (about 20 s delay), a diffusion decoder
+      (75 M-parameter UNet, 50 DDIM steps × CFG, ~200 GMAC per second of audio), 2.5 GB
+      of weights. DAC (descript/dac_24khz, MIT code and weights) was proposed instead
+      and the user said to go ahead.
+      *Comparison* (`examples/codec_compare` at commit 71de0ac; five inputs: decoded
+      Opus music and HE-AAC speech from the DRM samples, xHE-AAC music, Windows TTS
+      speech; EnCodec streaming as DecDRM ran it, DAC whole-signal), mean
+      multi-resolution mel distance EnCodec → DAC: 1.5 kbit/s 0.291 → 0.245, 3: 0.260 →
+      0.209, 6: 0.233 → 0.170, 12: 0.211 → 0.129, 24: 0.198 → 0.093; log-spectral
+      distance, mel-cepstral distortion and SI-SDR agree at every rate (the two music
+      clips tie up to 6 kbit/s). DAC at 3 kbit/s ≈ EnCodec at 12; DAC at 6 beats EnCodec
+      at 24. Lost 40 ms groups concealed by latent interpolation for both: at 12 kbit/s
+      with 20 % lost DAC 0.203, EnCodec without losses 0.211 (DAC degrades more, from a
+      better start). Listening excerpts were written to `out/codec_compare` (not in
+      git). Speed (Ryzen 7 9800X3D): DAC decode RTF 0.24 on 16 threads, 0.42 on 4, 0.83
+      on 1; encode 0.15 / 0.41; EnCodec 0.07 on one core.
+      *Done:* crate `decdrm-encodec` renamed `decdrm-dac` (feature `dac`), keeping the
+      DRM side (tiers, framing, CRCs, repetition, concealment, planning) and replacing
+      the model: `model.rs` streams DAC exactly — time-major activations, each layer
+      keeping the rows it still needs and emitting what its look-ahead allows (decoder
+      lag 3141 samples, encoder look-ahead 2493, so a stream starts with 2560 samples
+      of silence and then gives one frame per 320 samples), `flush` for the end
+      padding; tested against `model/reference.rs` (candle's own convolutions over the
+      whole signal): identical codes, decoded audio within 1e-4 in odd chunk sizes.
+      candle's convolutions were the bottleneck (single-threaded im2col gather and
+      transposes, a direct loop for padded transposed convolutions), so only the matrix
+      products go through candle and the rest are parallel passes (rayon): decode RTF
+      0.78 → 0.24 on 16 threads. The decoder primes its output with the look-ahead as
+      silence and delays the concealment gains with the samples. New CRC policy
+      `Adaptive` (default): decode every code as received unless at least 90 % of the
+      super frame's regions failed (garbage), then trust enhancement + interpolation.
+      With DAC, decoding a burst's few wrong codes beat concealing the frames (6 kbit/s,
+      no repetition, bursts 10⁻³/bit: 1.28 dB / −29.4 against 1.72 / −27.5 for the old
+      default), garbage super frames are still better concealed (30 %: 5.61 / −28.1
+      against 6.86 / −27.2 ignoring the CRCs); adaptive behaves as the first under
+      bursts and as the second for garbage. With the base layer sent twice the
+      policies come close.
+      Signalled as audio
+      coding 10 with `\0DAC1` (`AudioCodec::Dac`); the old `\0ENC1` services are
+      recognised as `AudioCodec::Encodec` and shown "no longer supported"; station
+      files with `codec = "encodec"` get an error naming DAC. Weights: 299 MB,
+      `decdrm models download dac`; decoder half 209 MB loaded alone by receivers.
+      Tests: crate units, round trip through the framing (delay 5693 samples = lead-in +
+      look-ahead − 8, LSD 1.0–3.7 dB), streaming = whole signal (3600 of 3600 codes,
+      decoder difference 0), tiers (LSD 8.7 → 1.4 dB from 1.5 to 24 kbit/s), bursts
+      (CRCs: 43 of 43 corrupted regions caught; trusting enhancement layers LSD 1.04 vs
+      1.59 dropping them), concealment fades; station loopbacks mode B 12 kbit/s and mode
+      D 6 kbit/s with no frame concealed; under noise (mode B, 64-QAM, protection 1,
+      12 kbit/s with codebooks 0–7 twice, against HE-AAC on the whole 20 kbit/s):
+      15.5 dB 0 % concealed (HE-AAC 0.4 %), 15.0 dB 1.4 % (37 %), 14.5 dB 44 % (100 %) —
+      as with EnCodec, since the framing decides it.
 - [x] **MDI / RSCI / DCP** (2026-10-02) — the user's choice of next feature: both
       input roles (the receiver ← MDI/RSCI, the transmitter ← MDI as a modulator),
       full RSCI status (Dream parity), GUI and RCI control (no CLI flags), the ETSI

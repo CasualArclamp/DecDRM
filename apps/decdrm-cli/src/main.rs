@@ -30,7 +30,7 @@ enum Cmd {
     Tx(tx::TxArgs),
     /// List sound-card input and output devices.
     Devices,
-    /// Neural codec model weights (EnCodec): download, show status.
+    /// Neural codec model weights (DAC): download, show status.
     Models(models::ModelsArgs),
     /// Broadcast schedule: which DRM stations are on the air now (EiBi or Dream lists;
     /// `--update` downloads them).
