@@ -65,6 +65,10 @@ pub struct Args {
     /// timed recording.
     #[arg(long, value_name = "FILE", requires = "start")]
     pub record: Option<PathBuf>,
+    /// Start with the RF monitor on (with `--start`): hear the input signal instead of
+    /// the decoded audio.
+    #[arg(long, requires = "start")]
+    pub monitor: bool,
     /// Do not use any sound-card output in this run: no audio playback, and no
     /// transmitting to a sound card (the saved settings are left unchanged).
     #[arg(long)]

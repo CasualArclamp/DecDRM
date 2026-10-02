@@ -392,7 +392,12 @@ pub fn show(ui: &mut Ui, rx: &RxSession, volume: &mut f32, record_dir: &mut Opti
             ui.label(RichText::new("Codec").weak());
             ui.label(if a.codec.is_empty() { "–" } else { &a.codec });
             ui.label(RichText::new("Output").weak());
-            ui.label(if a.playing { "playing" } else { "off" });
+            if a.monitor {
+                ui.label(RichText::new("RF monitor").color(MONITOR))
+                    .on_hover_text("The sound card plays the receiver's input, not the decoded audio");
+            } else {
+                ui.label(if a.playing { "playing" } else { "off" });
+            }
             ui.end_row();
             ui.label(RichText::new("Frames").weak());
             ui.label(
@@ -412,15 +417,59 @@ pub fn show(ui: &mut Ui, rx: &RxSession, volume: &mut f32, record_dir: &mut Opti
     clicked
 }
 
+/// Colour of the RF monitor while it is on.
+const MONITOR: Color32 = Color32::from_rgb(240, 170, 40);
+
 const RECORD_HELP: &str = "Record the audio you hear to a WAV file (or FLAC: smaller, also lossless) until you press \
      Stop: as decoded, at the station's sample rate and channels, whatever the volume. If the audio format changes \
      (another service), the recording carries on in a new file, name-2.wav.";
 
-/// The Record / Stop recording button and the recording's state.
+/// The audio's buttons: record, and the RF monitor.
 fn record_row(ui: &mut Ui, rx: &RxSession, record_dir: &mut Option<PathBuf>) {
     let running = rx.is_running() && !rx.is_stopping();
     let rec = rx.snap.audio.recording.as_ref();
-    ui.horizontal_wrapped(|ui| match rec.filter(|r| r.active && running) {
+    ui.horizontal_wrapped(|ui| {
+        record_button(ui, rx, rec, running, record_dir);
+        monitor_toggle(ui, rx, running);
+    });
+}
+
+/// The RF monitor: hear the signal itself, the receiver's input, instead of the
+/// decoded audio.
+fn monitor_toggle(ui: &mut Ui, rx: &RxSession, running: bool) {
+    let a = &rx.snap.audio;
+    let mdi = rx.snap.input.mdi.is_some();
+    let usable = running && a.playing && !mdi;
+    let text = RichText::new("\u{1F4E1}  RF monitor");
+    let text = if a.monitor { text.color(Color32::BLACK) } else { text };
+    let mut button = egui::Button::new(text).selected(a.monitor);
+    if a.monitor {
+        button = button.fill(MONITOR);
+    }
+    let response = ui
+        .add_enabled(usable, button)
+        .on_hover_text(if a.monitor {
+            "Playing the receiver's input, the radio signal itself; click to hear the decoded audio again"
+        } else {
+            "Hear the radio signal itself: the sound card plays the receiver's input as it comes in, instead of the \
+             decoded audio (I/Q with I on the left and Q on the right, a mono signal on both sides; in diversity \
+             reception the first KiwiSDR). The decoding goes on, and a recording keeps the decoded audio."
+        })
+        .on_disabled_hover_text(if mdi {
+            "MDI and RSCI carry the decoded multiplex, not the radio signal"
+        } else if running {
+            "Turn on Audio in the source bar (and start again) to hear the signal"
+        } else {
+            "Start receiving first"
+        });
+    if response.clicked() {
+        rx.set_monitor(!a.monitor);
+    }
+}
+
+/// The Record / Stop recording button and the recording's state.
+fn record_button(ui: &mut Ui, rx: &RxSession, rec: Option<&RecordingStatus>, running: bool, record_dir: &mut Option<PathBuf>) {
+    match rec.filter(|r| r.active && running) {
         Some(r) => {
             let stop = egui::Button::new(RichText::new("\u{25A0}  Stop recording").color(Color32::WHITE)).fill(HOT);
             if ui.add(stop).on_hover_text("End the recording and complete the file").clicked() {
@@ -446,7 +495,7 @@ fn record_row(ui: &mut Ui, rx: &RxSession, record_dir: &mut Option<PathBuf>) {
                 finished_recording(ui, r);
             }
         }
-    });
+    }
 }
 
 /// The last recording: saved where, or why it stopped; a button opens its folder.

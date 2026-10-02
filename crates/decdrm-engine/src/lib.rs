@@ -69,6 +69,8 @@ pub struct EngineConfig {
     pub publish_interval: Duration,
     /// Remote control: accept RCI commands (TS 102 349) here — tune, select a service.
     pub rci_listen: Option<decdrm_mdi::net::UdpOrigin>,
+    /// Start with the RF monitor on (see [`Command::SetMonitor`]).
+    pub monitor: bool,
 }
 
 impl Default for EngineConfig {
@@ -85,6 +87,7 @@ impl Default for EngineConfig {
             log: None,
             publish_interval: Duration::from_millis(100),
             rci_listen: None,
+            monitor: false,
         }
     }
 }
@@ -114,6 +117,12 @@ pub enum Command {
     StartRecording(std::path::PathBuf),
     /// End the recording, completing its file.
     StopRecording,
+    /// The RF monitor: play the receiver's input instead of the decoded audio (`true`),
+    /// or the decoded audio again — to hear the signal itself. The input plays as it
+    /// comes in: I/Q with I on the left and Q on the right, a mono signal on both sides
+    /// (in diversity reception the first input). Decoding goes on, and a recording
+    /// keeps the decoded audio. [`AudioStatus::monitor`] shows it.
+    SetMonitor(bool),
     Stop,
 }
 
@@ -237,6 +246,7 @@ fn worker(
     // File playback paces the decoder to the sound card; live input relies on the
     // player's drift compensation.
     let mut audio = audio_out::AudioOut::new(cfg.play_audio, cfg.output_device.clone(), info.is_file, cfg.record_audio.clone())?;
+    audio.set_monitor(cfg.monitor);
     audio.set_volume(cfg.volume);
     let mut saver = cfg.data_dir.clone().map(data_store::DataStore::new);
     let mut logger = cfg.log.as_ref().map(logger::Logger::create).transpose()?;
@@ -332,6 +342,12 @@ fn worker(
                     source.send_rci(&[decdrm_mdi::RciCommand::Service(id)]);
                 }
                 Command::SetVolume(gain) => audio.set_volume(gain),
+                Command::SetMonitor(on) => {
+                    if on != audio.monitoring() {
+                        audio.set_monitor(on);
+                        log(if on { "RF monitor on: the input plays".into() } else { "RF monitor off".into() }, &mut snap);
+                    }
+                }
                 Command::StartRecording(path) => match audio.start_recording(path.clone()) {
                     Ok(()) => log(format!("recording the audio to {}", path.display()), &mut snap),
                     Err(e) => log(format!("{e:#}"), &mut snap),
@@ -389,6 +405,11 @@ fn worker(
                 if let Some(frames) = branches.iter().find(|f| !f.is_empty()) {
                     let rms = (frames.iter().map(|v| v * v).sum::<f32>() / frames.len() as f32).sqrt();
                     snap.input.level_dbfs = Some(20.0 * rms.max(1e-9).log10());
+                }
+                if let Some(frames) = branches.first().filter(|f| !f.is_empty())
+                    && let Err(e) = audio.push_monitor(frames, session.input_channels(0))
+                {
+                    log(format!("audio output error: {e:#}"), &mut snap);
                 }
                 let mut events = Vec::new();
                 for (b, frames) in branches.iter().enumerate().filter(|(_, f)| !f.is_empty()) {
@@ -531,6 +552,7 @@ fn publish(
     snap.audio.frames_bad = st.frames_concealed;
     snap.audio.playing = audio.is_playing();
     snap.audio.recording = audio.recording();
+    snap.audio.monitor = audio.monitoring();
     if let Some((buffered, ppm)) = audio.status() {
         snap.audio.buffer_ms = buffered.as_secs_f32() * 1000.0;
         snap.audio.drift_ppm = ppm;

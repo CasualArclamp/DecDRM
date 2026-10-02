@@ -1,5 +1,6 @@
 //! Audio outputs of the engine: live playback (drift-compensated) and recording, plus
-//! the spectrum of the decoded audio for user interfaces.
+//! the spectrum of the decoded audio for user interfaces. The RF monitor plays the
+//! receiver's input instead of the decoded audio.
 
 use crate::snapshot::{AudioSpectrum, RecordingStatus};
 use anyhow::{Context, Result};
@@ -29,6 +30,9 @@ pub struct AudioOut {
     /// Format of the latest audio: a recording started now opens its file at once.
     format: Option<AudioFormat>,
     analyser: AudioAnalyser,
+    /// RF monitor: the sound card plays the input ([`Self::push_monitor`]); the decoded
+    /// audio is still recorded and analysed.
+    monitor: bool,
 }
 
 /// A recording of the decoded audio as it is decoded: the service's sample rate and
@@ -156,7 +160,14 @@ impl AudioOut {
         } else {
             None
         };
-        Ok(Self { player, blocking, recorder: record.map(Recorder::new), format: None, analyser: AudioAnalyser::new() })
+        Ok(Self {
+            player,
+            blocking,
+            recorder: record.map(Recorder::new),
+            format: None,
+            analyser: AudioAnalyser::new(),
+            monitor: false,
+        })
     }
 
     pub fn is_playing(&self) -> bool {
@@ -170,25 +181,51 @@ impl AudioOut {
         }
     }
 
-    /// Queue decoded audio (interleaved, `channels` = 1 or 2). A recording that cannot
-    /// be written ends with the error, which is returned once; playback goes on.
+    /// The RF monitor: play the receiver's input instead of the decoded audio (or the
+    /// decoded audio again). The audio already queued on the sound card plays out first.
+    pub fn set_monitor(&mut self, on: bool) {
+        self.monitor = on;
+    }
+
+    /// Whether the RF monitor is on.
+    pub fn monitoring(&self) -> bool {
+        self.monitor
+    }
+
+    /// Queue audio on the sound card: paced to it for file playback, else dropping
+    /// what would make the queue too deep.
+    fn play(&mut self, samples: &[f32], sample_rate: u32, channels: usize) -> Result<()> {
+        match self.player.as_mut() {
+            Some(p) if self.blocking => p.push_blocking(samples, sample_rate, channels)?,
+            // (The number of frames queued is of no interest here.)
+            Some(p) => drop(p.push(samples, sample_rate, channels)?),
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// The RF monitor's sound: the receiver's input frames as they come in (48 kHz,
+    /// interleaved; 2 channels for I/Q or a stereo input), played while the monitor is
+    /// on.
+    pub fn push_monitor(&mut self, frames: &[f32], channels: usize) -> Result<()> {
+        if self.monitor { self.play(frames, decdrm_core::params::SAMPLE_RATE, channels) } else { Ok(()) }
+    }
+
+    /// Queue decoded audio (interleaved, `channels` = 1 or 2); while the RF monitor is
+    /// on it is only recorded and analysed. A recording that cannot be written ends
+    /// with the error, which is returned once; playback goes on.
     pub fn push(&mut self, samples: &[f32], sample_rate: u32, channels: usize) -> Result<()> {
         self.analyser.push(samples, sample_rate, channels);
         let fmt = AudioFormat::new(sample_rate, channels);
         self.format = Some(fmt);
-        let played = match self.player.as_mut() {
-            Some(p) if self.blocking => p.push_blocking(samples, sample_rate, channels),
-            // (The number of frames queued is of no interest here.)
-            Some(p) => p.push(samples, sample_rate, channels).map(drop),
-            None => Ok(()),
-        };
+        let played = if self.monitor { Ok(()) } else { self.play(samples, sample_rate, channels) };
         if let Some(r) = self.recorder.as_mut().filter(|r| r.active)
             && let Err(e) = r.write(samples, fmt)
         {
             r.fail(&e);
             return Err(e.context("the recording stopped"));
         }
-        Ok(played?)
+        played
     }
 
     /// Record the decoded audio to `path` (WAV, or FLAC with a `.flac` name), ending a
@@ -399,6 +436,25 @@ mod tests {
         assert_eq!(frames(&path), Some(24_000));
         assert_eq!(frames(&part), Some(4800));
         assert_eq!(std::fs::read(dir.path().join("rec-2.wav")).unwrap(), b"someone else's");
+    }
+
+    /// With the RF monitor on, a recording still holds the decoded audio, not the input.
+    #[test]
+    fn monitor_keeps_the_recording_on_the_decoded_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rec.wav");
+        let mut out = AudioOut::new(false, None, false, Some(path.clone())).unwrap();
+        out.set_monitor(true);
+        assert!(out.monitoring());
+        // 100 ms of I/Q input: played (with a sound card), not recorded.
+        out.push_monitor(&tone(10, 0.5, 4800, 2), 2).unwrap();
+        out.push(&tone(10, 0.5, 2400, 1), 24_000, 1).unwrap();
+        out.set_monitor(false);
+        out.push(&tone(10, 0.5, 2400, 1), 24_000, 1).unwrap();
+        out.stop_recording().unwrap();
+        let r = out.recording().unwrap();
+        assert!((r.seconds - 0.2).abs() < 1e-9, "{r:?}");
+        assert_eq!(decdrm_io::FileReader::open(&path).unwrap().total_frames(), Some(4800));
     }
 
     /// Started before any audio, the file opens with the first audio; a file that

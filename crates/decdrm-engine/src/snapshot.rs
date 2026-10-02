@@ -192,6 +192,9 @@ pub struct AudioStatus {
     pub drift_ppm: f64,
     /// The recording of the decoded audio in progress, or the last one.
     pub recording: Option<RecordingStatus>,
+    /// The RF monitor is on: the sound card plays the receiver's input instead of the
+    /// decoded audio.
+    pub monitor: bool,
 }
 
 /// A recording of the decoded audio (see `Command::StartRecording`).

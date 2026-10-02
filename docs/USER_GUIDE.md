@@ -382,6 +382,20 @@ Timed recordings from the command line: `decdrm-gui --start --record show.wav
 --exit-after 3600` (with the saved source, e.g. a KiwiSDR), or the CLI's `decdrm rx …
 --out audio.wav --duration 3600`.
 
+**RF monitor.** The *RF monitor* button beside *Record…* lets you hear the radio signal
+itself: while it is on (amber, and *Output* reads *RF monitor*), the sound card plays
+the receiver's input as it comes in instead of the decoded audio.
+- I/Q plays with I on the left and Q on the right; a mono signal on both sides.
+- In diversity reception it plays the first KiwiSDR.
+- The DRM signal sounds like a steady hiss; fading, interference and a neighbouring
+  station are easy to hear.
+- Decoding goes on underneath, and a recording keeps the decoded audio.
+- It needs *Audio* on, and does nothing for MDI/RSCI input, which carries no radio
+  signal.
+
+Click again for the decoded audio; the audio already queued (about half a second)
+plays out first. `decdrm-gui --start --monitor` starts with it on.
+
 ## Services, data and logs
 
 ### Services and audio

@@ -196,6 +196,9 @@ impl DecDrmApp {
                 // The engine opens the file with the first audio.
                 app.rx.start_recording(std::path::absolute(path).unwrap_or_else(|_| path.clone()));
             }
+            if args.monitor {
+                app.rx.set_monitor(true);
+            }
         }
         if args.transmit {
             app.tx_page.transmit(&app.settings, &mut app.tx, !app.mute);

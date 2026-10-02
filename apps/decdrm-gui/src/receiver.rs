@@ -307,6 +307,14 @@ impl RxSession {
         }
     }
 
+    /// The RF monitor: play the receiver's input instead of the decoded audio (see
+    /// [`Command::SetMonitor`]); the snapshot's `audio.monitor` follows it.
+    pub fn set_monitor(&self, on: bool) {
+        if let Some(e) = &self.engine {
+            e.command(Command::SetMonitor(on));
+        }
+    }
+
     /// Ask the engine to decode / show service `short_id`, and show the expected
     /// result right away (see [`selection_preview`]); the next snapshot confirms it.
     pub fn select_service(&mut self, short_id: u8) {

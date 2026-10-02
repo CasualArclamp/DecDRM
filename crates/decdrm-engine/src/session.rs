@@ -340,6 +340,11 @@ impl Session {
         }
     }
 
+    /// Channels of branch `branch`'s input frames: 1 for a real signal, 2 for I/Q.
+    pub fn input_channels(&self, branch: usize) -> usize {
+        self.rx.channels(branch)
+    }
+
     /// Diversity reception: the combiner's counts and how it mixes the branches, each
     /// branch's status and constellation.
     pub fn diversity(&self) -> Option<crate::snapshot::DiversityView> {

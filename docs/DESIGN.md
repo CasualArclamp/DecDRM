@@ -250,6 +250,17 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       *Delay–Doppler*. Checked against channel model 3 (four paths, spreads
       0.1–2 Hz, in place) and on KCBS (separate ionospheric paths). The waterfall also
       fits the DRM signal now, at the spectrum's full 2048-bin resolution.
+- [x] **RF monitor** (2026-10-02) — the user asked for a button that passes the I/Q
+      through to the output to hear it. *Done:* `Command::SetMonitor` /
+      `EngineConfig::monitor`: `AudioOut` plays the first branch's input frames (48 kHz,
+      as they come in: I left and Q right, mono on both sides) instead of the decoded
+      audio, which is still recorded and analysed; file playback stays paced by the
+      sound card; snapshot `audio.monitor`. GUI: *RF monitor* toggle beside *Record…*
+      (amber while on; *Output: RF monitor*; disabled without audio and for MDI/RSCI),
+      `decdrm-gui --start --monitor`. Tests: the recording keeps the decoded audio with
+      the monitor on; through VB-Audio cable A (ignored test, inaudible) an I/Q file of
+      1 kHz on I and 3 kHz on Q came back 1 kHz left and 3 kHz right at the input's
+      level, paced in real time.
 - [x] **DAC replaces EnCodec** (2026-10-02) — the user asked whether SemantiCodec
       would beat EnCodec ("if so replace it"). It would not here: at most 1.40 kbit/s
       with 16 kHz output, ViSQOL 3.48 against EnCodec's 3.58 at 3 kbit/s and 4.00 at 6
