@@ -55,7 +55,8 @@ encoding) and libopus.
   propagation path at its delay and Doppler shift), status LEDs, Dream-style service
   bars (codec, SBR/PS, bit rate, protection, data applications), text,
   slideshow, Journaline browser, broadcast website, EPG, broadcast clock, alternative
-  frequencies, and a transmitter tab.
+  frequencies, recording of the audio (WAV/FLAC), and a transmitter tab whose
+  Journaline pages can be edited while on the air.
 - KiwiSDR client: DecDRM tunes a KiwiSDR on the internet and decodes its I/Q directly
   (`decdrm rx --kiwi HOST --freq KHZ`; in the GUI a *KiwiSDR* source with a list of the
   public Kiwis whose owners allow apps, and a double-click in the *Schedule* tab). It

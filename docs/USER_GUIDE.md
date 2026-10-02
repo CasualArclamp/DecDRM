@@ -302,6 +302,25 @@ and the **volume** slider. The slider acts at once, even on audio already queued
 leaves recordings and the audio spectrum unchanged. It uses a squared law, so 50 % is
 about −12 dB; in the CLI, use `--volume PERCENT` with `--play`.
 
+**Recording the audio.** *Record…* under the volume slider saves what you hear until
+*Stop recording*:
+- a WAV file, or FLAC (smaller, also lossless) if you pick that type or a `.flac` name;
+- the audio as decoded: the station's sample rate and channels (48 kHz mono for a
+  typical HE-AAC service), 16-bit, whatever the volume;
+- the dialog offers the service's name with the date and time (UTC), in the folder
+  you used last.
+
+While it records, the time and the file show beside the button; afterwards *Saved … in
+…*, and *Show* opens the folder. A recording also ends with the input, with *Stop* and
+when you quit. If the audio format changes (another service, a reconfigured station),
+it carries on in a new file, `name-2.wav`, as a WAV file has one format. Signal losses
+are not filled with silence. The file is completed every 5 seconds, so a crash or a
+power cut loses at most the last few seconds.
+
+Timed recordings from the command line: `decdrm-gui --start --record show.wav
+--exit-after 3600` (with the saved source, e.g. a KiwiSDR), or the CLI's `decdrm rx …
+--out audio.wav --duration 3600`.
+
 ## Services, data and logs
 
 ### Services and audio
@@ -446,6 +465,17 @@ multiplex: streams, bit rates, codec settings and what goes where.
   Each application requests a `bitrate`, rounded up to whole packets. Applications can
   share one packet stream (`stream = "name"`); `part = "A"` and `hierarchical = true`
   place streams in the better-protected part or the hierarchical layer.
+- **Journaline pages can change on the air.** While the station transmits, DecDRM
+  checks the page file every second. It loads a change once the file has stayed the
+  same for a second, so an edit goes out one to two seconds after you save it:
+  - new and changed pages go out first, with the next revision index, so receivers
+    show them at once;
+  - pages you delete stop;
+  - a page file with a mistake (a syntax error, a link to a missing page) changes
+    nothing on the air: the log says what is wrong, and the next save is tried.
+
+  The other settings (bit rates, services, the slideshow folder…) take effect at the
+  next start.
 - **The audio streams** get whatever capacity the data leaves, and the encoders' bit
   rates follow from that.
 - **`[afs]`:** alternative frequencies:
@@ -479,6 +509,8 @@ The GUI's *Transmitter* page edits the station file:
 - *Validate* marks problems at their line;
 - starts and stops the transmission, optionally with *Stop after* a duration;
 - shows the multiplex, per-service bit rates, levels and the transmitted spectrum;
+- shows each Journaline application's pages and updates, with *Update* to load the
+  page file at once (it is loaded by itself anyway, see above);
 - the *Station* view is a form for the file (the *TOML* view shows the text). *Part A*
   on an audio service or data application moves that stream into the more strongly
   protected part (*Protection, part A*), outlined in the multiplex bar. The part A row

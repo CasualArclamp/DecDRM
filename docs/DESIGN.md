@@ -250,6 +250,41 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       *Delay–Doppler*. Checked against channel model 3 (four paths, spreads
       0.1–2 Hz, in place) and on KCBS (separate ionospheric paths). The waterfall also
       fits the DRM signal now, at the spectrum's full 2048-bin resolution.
+- [x] **Live Journaline updates** (2026-10-02) — GitHub issue #1: the page file
+      edited while transmitting reaches the air without a restart.
+      *Done:* `JournalineEncoder::replace_all` (decdrm-data) makes the carousel carry
+      a new page set atomically (everything encoded first): the same content keeps its
+      revision, new content gets the next one (mod 8), pages that are gone stop;
+      once the carousel is on the air, new and changed pages are sent next, ahead of
+      the cycle (the cycle then goes on where it was). The station keeps a second
+      handle to each Journaline carousel (`Arc<Mutex<_>>`, the packet multiplexer
+      owns the boxed source) and a `JournalineWatch` per page file: checked once a
+      second (modification time and length), loaded once unchanged for a check, so a
+      file still being saved is not read; a page file that does not validate changes
+      nothing and is reported in the log (once per change).
+      `Station::reload_journaline()` loads at once; `AppStatus::journaline` (pages,
+      updates, the last error). GUI: the Transmitter tab's services card shows them,
+      with an *Update* button; CLI status lines show the pages and updates. Tests:
+      carousel units (order, revisions, removal while queued, all or nothing), the
+      watch with simulated time, a loopback in which the receiver sees the changed
+      menu and page (revision 1) and the new page, the GUI worker's Update path.
+- [x] **Audio recording in the GUI** (2026-10-02) — GitHub issue #2 (Dream's *Save
+      audio as WAV*).
+      *Done:* engine `Command::StartRecording(path)` / `StopRecording`; `AudioOut`'s
+      recorder keeps the decoded format (WAV or FLAC by the name, 16-bit), opens at
+      once when audio is coming (else with the first audio), carries on in `name-2.wav`
+      … (never an existing file) when the format changes, checkpoints every 5 s
+      (`FileWriter::flush`: hound rewrites the WAV sizes, so a crash loses at most 5
+      s), and ends with its error (logged once) if a write fails; its state
+      (`RecordingStatus`: files, seconds, format, active, error) is in the snapshot,
+      and the last one stays after it ends. GUI: *Record…* / *Stop recording* under
+      the volume (dialog with `<service> <date> <time> UTC.wav` in the last folder),
+      the time and file while recording, *Saved … in …* with *Show* afterwards;
+      `decdrm-gui --start --record FILE` for timed recordings with `--exit-after`. The
+      CLI's `--out` uses the same recorder (numbered parts instead of a time stamp).
+      Tests: recorder units (format changes, existing files, errors, waiting for
+      audio), the WAV checkpoint read while still being written, the commands end to
+      end on a station signal received in real time (the 1 kHz tone in the file).
 - [x] **Diversity reception** (2026-10-01) — one station through two KiwiSDRs far
       apart, combined before decoding (the user's choice of next feature; Dream has
       no such thing).
