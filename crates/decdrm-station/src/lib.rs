@@ -42,6 +42,7 @@ pub mod config;
 mod data;
 mod error;
 mod fac;
+pub mod mdi;
 pub mod plan;
 mod output;
 mod sdc;

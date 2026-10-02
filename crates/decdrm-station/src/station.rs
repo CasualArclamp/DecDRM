@@ -215,6 +215,9 @@ pub struct Station {
     clock_buf: (Vec<Cplx>, Vec<Cplx>),
     samples: Vec<f32>,
     stop: StopHandle,
+    /// Keep each frame's content as MDI ([`Self::capture_mdi`]).
+    capture_mdi: bool,
+    last_mdi: Option<decdrm_mdi::MdiFrame>,
 }
 
 // Compile-time check that a station can be moved to a worker thread (e.g. by a GUI).
@@ -339,6 +342,8 @@ impl Station {
             clock_buf: (Vec::new(), Vec::new()),
             samples: Vec::new(),
             stop,
+            capture_mdi: false,
+            last_mdi: None,
         };
         station.update_status();
         Ok(station)
@@ -406,6 +411,20 @@ impl Station {
         }
     }
 
+    /// Keep the content of each frame as an MDI frame ([`Self::last_mdi`]): what a
+    /// content server would send a modulator for it (TS 102 820).
+    pub fn capture_mdi(&mut self, on: bool) {
+        self.capture_mdi = on;
+        if !on {
+            self.last_mdi = None;
+        }
+    }
+
+    /// The last frame as MDI, with [`Self::capture_mdi`] on.
+    pub fn last_mdi(&self) -> Option<&decdrm_mdi::MdiFrame> {
+        self.last_mdi.as_ref()
+    }
+
     /// Number of output channels (1 real, 2 I/Q) at 48 kHz.
     pub fn output_channels(&self) -> usize {
         self.output.channels()
@@ -443,6 +462,12 @@ impl Station {
             None
         };
         let fac = self.fac.next_fac();
+        if self.capture_mdi {
+            let sent = self.tx.fac_for_next_frame(&fac);
+            let dlfc = self.status.frames as u32;
+            self.last_mdi =
+                Some(crate::mdi::frame(&self.plan, dlfc, &sent, sdc.as_deref(), self.tx.sdc_capacity_bytes(), &frames));
+        }
         self.baseband.clear();
         self.tx.transmit_frame_into(&fac, &msc, sdc.as_deref(), &mut self.baseband)?;
         // Rust note: `signal` borrows either buffer; the borrow checker accepts the

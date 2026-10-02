@@ -1,0 +1,16 @@
+[package]
+name = "decdrm-mdi"
+description = "DRM Multiplex Distribution Interface (MDI, TS 102 820) and Receiver Status and Control Interface (RSCI, TS 102 349) over the Distribution and Communications Protocol (DCP, TS 102 821): AF and PFT packets, TAG items, recordings and UDP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The DRM CRC-16 (DCP uses the same one) and the FAC/SDC layouts.
+decdrm-core = { path = "../decdrm-core" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

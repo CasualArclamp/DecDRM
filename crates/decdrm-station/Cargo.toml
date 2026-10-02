@@ -19,6 +19,8 @@ decdrm-codecs = { path = "../decdrm-codecs" }
 decdrm-data = { path = "../decdrm-data" }
 decdrm-encodec = { path = "../decdrm-encodec" }
 decdrm-io = { path = "../decdrm-io" }
+# MDI: a station's frames as MDI, and the modulator for MDI from a content server.
+decdrm-mdi = { path = "../decdrm-mdi" }
 # Station configuration files (same versions as the GUI's settings file).
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1"

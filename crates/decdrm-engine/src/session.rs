@@ -9,15 +9,25 @@
 //! the text decoder, and every data application's stream through a `decdrm-data`
 //! decoder. EVS audio sent in a data application (KCBS, see `decdrm_evs::kcbs`) is
 //! recognised there and shown as audio, but not decoded.
+//!
+//! MDI or RSCI input ([`Session::new_mdi`], [`Session::push_mdi`]) skips the receiver:
+//! each frame brings the FAC, the SDC and the MSC streams as decoded elsewhere, and an
+//! RSCI receiver's status items stand in for the receiver's status and plots.
 
 use decdrm_codecs::{DrmAudioCoding, DrmAudioDecoder, PcmFrame, open_decoder};
 use decdrm_core::fac::{Fac, LANGUAGES, PROGRAMME_TYPES};
+use decdrm_core::params::RobustnessMode;
 use decdrm_core::mux::audio::AudioDeframer;
 use decdrm_core::mux::sdc::{ApplicationInfo, StreamLengths};
 use decdrm_core::mux::service::{AudioCodec, AudioMode, AudioParams, Changes, Ensemble, ServiceInfo};
 use decdrm_core::mux::text::{TextEvent, TextMessageDecoder};
-use decdrm_core::mux::{demultiplex, msc::LogicalFrame};
-use decdrm_core::rx::{DiversityReceiver, DiversityStats, MscConfig, MscFrame, Receiver, ReceiverConfig, ReceiverEvent, RxState, RxStatus, Visuals};
+use decdrm_core::mux::msc::{LogicalFrame, stream_positions};
+use decdrm_core::mux::demultiplex;
+use decdrm_core::rx::{
+    DiversityReceiver, DiversityStats, MscConfig, MscFrame, PdsAxis, Receiver, ReceiverConfig, ReceiverEvent, RxState, RxStatus,
+    SdcBlock, Visuals,
+};
+use decdrm_mdi::MdiFrame;
 use decdrm_data::datagroup::DataGroup;
 use decdrm_data::{AppDomain, DataDecoder, DataEvent, DataServiceConfig, UserApplication};
 use decdrm_evs::signalling::Bandwidth as EvsBandwidth;
@@ -105,10 +115,11 @@ impl EvsChannel {
 }
 
 /// The receiver of a session: one, or two combined (diversity reception, see
-/// `decdrm_core::rx::diversity`).
+/// `decdrm_core::rx::diversity`), or none (MDI/RSCI input).
 enum Rx {
     Single(Box<Receiver>),
     Diversity(Box<DiversityReceiver>),
+    Mdi(Box<MdiRx>),
 }
 
 impl Rx {
@@ -116,6 +127,7 @@ impl Rx {
         match self {
             Rx::Single(r) => r.push(frames),
             Rx::Diversity(d) => d.push(branch, frames),
+            Rx::Mdi(_) => Vec::new(),
         }
     }
 
@@ -123,6 +135,7 @@ impl Rx {
         match self {
             Rx::Single(r) => r.restart(),
             Rx::Diversity(d) => d.restart(),
+            Rx::Mdi(m) => **m = MdiRx::default(),
         }
     }
 
@@ -130,20 +143,32 @@ impl Rx {
         match self {
             Rx::Single(r) => r.set_msc_config(cfg),
             Rx::Diversity(d) => d.set_msc_config(cfg),
+            // The streams come demultiplexed.
+            Rx::Mdi(_) => {}
         }
     }
 
-    fn receiver(&self, branch: usize) -> &Receiver {
+    fn status(&self, branch: usize) -> &RxStatus {
         match self {
-            Rx::Single(r) => r,
-            Rx::Diversity(d) => d.branch(branch),
+            Rx::Single(r) => r.status(),
+            Rx::Diversity(d) => d.branch(branch).status(),
+            Rx::Mdi(m) => &m.status,
+        }
+    }
+
+    /// Input channels per sample frame (MDI: none).
+    fn channels(&self, branch: usize) -> usize {
+        match self {
+            Rx::Single(r) => r.config().channels.max(1),
+            Rx::Diversity(d) => d.branch(branch).config().channels.max(1),
+            Rx::Mdi(_) => 1,
         }
     }
 
     /// The branch the status and plots show: the one with the better SNR.
     fn shown(&self) -> usize {
         match self {
-            Rx::Single(_) => 0,
+            Rx::Single(_) | Rx::Mdi(_) => 0,
             Rx::Diversity(d) => {
                 let snr = |b: usize| d.branch(b).status().snr_db.unwrap_or(f64::NEG_INFINITY);
                 usize::from(snr(1) > snr(0))
@@ -154,8 +179,87 @@ impl Rx {
     /// Whether no branch but `branch` (which just lost it) is synchronised.
     fn all_lost(&self, branch: usize) -> bool {
         match self {
-            Rx::Single(_) => true,
+            Rx::Single(_) | Rx::Mdi(_) => true,
             Rx::Diversity(d) => d.branch(1 - branch.min(1)).status().state == RxState::Acquisition,
+        }
+    }
+}
+
+/// RSCI's power spectral density: the first value lies 7.875 kHz below the DRM
+/// signal's DC carrier, then one value per 187.5 Hz (TS 102 349; Dream's plot).
+const RSCI_PSD_START_HZ: f64 = -7875.0;
+const RSCI_PSD_STEP_HZ: f64 = 187.5;
+
+/// What stands in for the receiver with MDI/RSCI input: a status and plots made from
+/// the frames' items (the robustness mode, the FAC and SDC CRCs, an RSCI receiver's
+/// status), the spectrum and impulse response of an RSCI receiver.
+#[derive(Default)]
+struct MdiRx {
+    status: RxStatus,
+    visuals: Visuals,
+}
+
+impl MdiRx {
+    fn update(&mut self, f: &MdiFrame, fac_ok: Option<bool>) {
+        let st = &mut self.status;
+        if let Some(m) = f.robustness {
+            st.mode = Some(RobustnessMode::ALL[usize::from(m.min(3))]);
+        }
+        let r = &f.rsci;
+        st.state = match (r.flags, fac_ok) {
+            (Some(flags), _) if flags.sync != 0 => RxState::Acquisition,
+            (_, Some(true)) => RxState::Locked,
+            (Some(_), _) => RxState::Tracking,
+            (None, Some(false)) => RxState::Tracking,
+            (None, None) => st.state,
+        };
+        if f.is_rsci() {
+            st.mer_db = r.mer_db;
+            st.wmer_db = r.wmer_msc_db;
+            st.fac_mer_db = r.wmer_fac_db;
+            st.doppler_hz = r.doppler_hz.unwrap_or(0.0);
+            // The narrowest window holding at least 95 % of the energy, else the widest.
+            st.delay_ms = r
+                .delay
+                .iter()
+                .filter(|(p, _)| *p >= 95)
+                .map(|&(_, ms)| ms)
+                .reduce(f64::min)
+                .or_else(|| r.delay.iter().map(|&(_, ms)| ms).reduce(f64::max))
+                .unwrap_or(0.0);
+        }
+        let v = &mut self.visuals;
+        if let Some(psd) = &r.psd_db {
+            let n = psd.len() as f64;
+            v.spectrum_db = psd.clone();
+            // Bins from centre − span/2 in steps of span/n: the DC carrier at 0 Hz.
+            v.spectrum_span_hz = n * RSCI_PSD_STEP_HZ;
+            v.spectrum_centre_hz = RSCI_PSD_START_HZ + v.spectrum_span_hz / 2.0;
+            v.real_input = false;
+            v.dc_hz = Some(0.0);
+            v.signal_band_hz = st.mode.zip(st.occupancy).and_then(|(m, so)| {
+                decdrm_core::params::carrier_range(m, so)
+                    .map(|(a, b)| (f64::from(a) * m.carrier_spacing(), f64::from(b) * m.carrier_spacing()))
+            });
+            v.waterfall_rows.push(psd.iter().map(|&x| x as f32).collect());
+            let keep = decdrm_core::rx::WATERFALL_ROWS_KEPT;
+            if v.waterfall_rows.len() > keep {
+                v.waterfall_rows.drain(..v.waterfall_rows.len() - keep);
+            }
+            v.spectrum_seq += 1;
+            v.spectrum_row_s = 0.4;
+        }
+        if let Some(ir) = &r.impulse_response
+            && ir.db.len() >= 2
+        {
+            v.chain.pds = ir.db.iter().map(|db| 10f64.powf(db / 10.0)).collect();
+            v.chain.pds_axis = Some(PdsAxis {
+                start_ms: ir.start_ms,
+                step_ms: (ir.end_ms - ir.start_ms) / (ir.db.len() - 1) as f64,
+                guard_ms: (f64::NAN, f64::NAN),
+                pds_begin_ms: f64::NAN,
+                pds_end_ms: f64::NAN,
+            });
         }
     }
 }
@@ -188,6 +292,12 @@ impl Session {
         Self::with(Rx::Diversity(Box::new(DiversityReceiver::new(cfg))))
     }
 
+    /// MDI or RSCI input: frames of the multiplex as decoded elsewhere (see
+    /// [`Self::push_mdi`]).
+    pub fn new_mdi() -> Self {
+        Self::with(Rx::Mdi(Box::default()))
+    }
+
     fn with(rx: Rx) -> Self {
         Self {
             rx,
@@ -205,17 +315,20 @@ impl Session {
         }
     }
 
-    /// The receiver's status; in diversity reception the branch with the better SNR.
+    /// The receiver's status; in diversity reception the branch with the better SNR;
+    /// with MDI/RSCI input what its items say.
     pub fn status(&self) -> &RxStatus {
-        self.rx.receiver(self.rx.shown()).status()
+        self.rx.status(self.rx.shown())
     }
 
     /// Plot data; in diversity reception the branch with the better SNR, with the MSC
-    /// constellation of the combined cells.
+    /// constellation of the combined cells; with RSCI input the receiver's spectrum and
+    /// impulse response.
     pub fn visuals(&mut self) -> Visuals {
         let shown = self.rx.shown();
         match &mut self.rx {
             Rx::Single(r) => r.visuals(),
+            Rx::Mdi(m) => m.visuals.clone(),
             Rx::Diversity(d) => {
                 let mut v = d.branch_mut(shown).visuals();
                 let cells = d.last_cells();
@@ -230,7 +343,7 @@ impl Session {
     /// Diversity reception: the combiner's counts and each branch's status.
     pub fn diversity(&self) -> Option<(DiversityStats, [RxStatus; 2])> {
         match &self.rx {
-            Rx::Single(_) => None,
+            Rx::Single(_) | Rx::Mdi(_) => None,
             Rx::Diversity(d) => Some((d.stats(), [d.branch(0).status().clone(), d.branch(1).status().clone()])),
         }
     }
@@ -302,7 +415,7 @@ impl Session {
 
     /// Feed interleaved 48 kHz frames of input `branch` (0 or 1; one receiver: 0).
     pub fn push_branch(&mut self, branch: usize, frames: &[f32]) -> Vec<SessionEvent> {
-        let ch = self.rx.receiver(branch).config().channels.max(1);
+        let ch = self.rx.channels(branch);
         if branch == 0 {
             self.samples_in += (frames.len() / ch) as u64;
         }
@@ -314,9 +427,57 @@ impl Session {
     pub fn flush(&mut self) -> Vec<SessionEvent> {
         let events = match &mut self.rx {
             Rx::Diversity(d) => d.flush(),
-            Rx::Single(_) => Vec::new(),
+            Rx::Single(_) | Rx::Mdi(_) => Vec::new(),
         };
         self.handle(0, events)
+    }
+
+    /// One MDI or RSCI frame (a session made with [`Self::new_mdi`]): its FAC and SDC
+    /// go into the multiplex model as the receiver's would, its streams straight to the
+    /// decoders, its RSCI items into the status. Time advances by a frame (400 ms).
+    pub fn push_mdi(&mut self, f: &MdiFrame) -> Vec<SessionEvent> {
+        self.samples_in += 19_200;
+        let mut events = Vec::new();
+        let fac = f.fac_bits().map(|bits| Fac::parse(&bits));
+        if let Some(parsed) = &fac {
+            match parsed {
+                Some(fac) => events.push(ReceiverEvent::Fac(*fac)),
+                None => events.push(ReceiverEvent::FacError),
+            }
+        }
+        if let Some(s) = &f.sdc {
+            events.push(ReceiverEvent::Sdc(SdcBlock { afs_index: s.afs_index, data: s.data.clone(), crc_ok: s.crc_ok }));
+        }
+        if let Rx::Mdi(m) = &mut self.rx {
+            let st = &mut m.status;
+            match &fac {
+                Some(Some(fac)) => {
+                    st.fac_ok += 1;
+                    st.occupancy = Some(fac.channel.occupancy);
+                }
+                Some(None) => st.fac_bad += 1,
+                None => {}
+            }
+            if let Some(s) = &f.sdc {
+                if s.crc_ok {
+                    st.sdc_ok += 1;
+                } else {
+                    st.sdc_bad += 1;
+                }
+            }
+            m.update(f, fac.as_ref().map(Option::is_some));
+        }
+        let mut out = self.handle(0, events);
+        let Some(mux) = self.ens.multiplex() else { return out };
+        let hierarchical = self.ens.channel().is_some_and(|c| c.msc_mode.is_hierarchical());
+        let mut logical: Vec<Option<LogicalFrame>> = vec![None; mux.streams.len()];
+        for p in stream_positions(mux, hierarchical) {
+            if let (Some(slot), Some(Some(data))) = (logical.get_mut(usize::from(p.stream_id)), f.streams.get(usize::from(p.stream_id))) {
+                *slot = Some(LogicalFrame { stream_id: p.stream_id, data: data.clone(), part_a_len: p.len_a / 8, hierarchical: p.hierarchical });
+            }
+        }
+        self.on_logical(&logical, true, &mut out);
+        out
     }
 
     fn handle(&mut self, branch: usize, events: Vec<ReceiverEvent>) -> Vec<SessionEvent> {
@@ -324,7 +485,7 @@ impl Session {
         // Diversity reception names the branch an event came from.
         let who = match self.rx {
             Rx::Diversity(_) => format!("branch {}: ", branch + 1),
-            Rx::Single(_) => String::new(),
+            Rx::Single(_) | Rx::Mdi(_) => String::new(),
         };
         let mut out = Vec::new();
         for ev in events {
@@ -496,6 +657,13 @@ impl Session {
     fn on_msc(&mut self, frame: &MscFrame, out: &mut Vec<SessionEvent>) {
         let Some(mux) = self.ens.multiplex() else { return };
         let logical: Vec<Option<LogicalFrame>> = demultiplex(frame, mux);
+        self.on_logical(&logical, frame.complete, out);
+    }
+
+    /// The streams of one multiplex frame (indexed by stream id) to the decoders.
+    /// `complete`: false while the receiver's long interleaver still fills (the
+    /// content is unreliable then).
+    fn on_logical(&mut self, logical: &[Option<LogicalFrame>], complete: bool, out: &mut Vec<SessionEvent>) {
         // Content checks of this multiplex frame (passed, failed).
         let (mut good, mut bad) = (0u64, 0u64);
 
@@ -505,7 +673,7 @@ impl Session {
             let sf = a.deframer.push_frame(lf);
             // Mute while the long interleaver is still filling: CRC-8 alone lets the
             // occasional garbage frame through.
-            if frame.complete {
+            if complete {
                 if let Some(piece) = sf.text {
                     match a.text.push(piece) {
                         Some(TextEvent::Message(m)) => {
@@ -560,9 +728,9 @@ impl Session {
         // not decoded: they are captured like any other data).
         for d in &mut self.data {
             if let Some(Some(lf)) = logical.get(d.app.stream_id as usize) {
-                for event in d.decoder.push_frame_with_hint(&lf.data, frame.complete) {
+                for event in d.decoder.push_frame_with_hint(&lf.data, complete) {
                     if let DataEvent::Stats(st) = &event
-                        && frame.complete
+                        && complete
                     {
                         good += u64::from(st.last_frame_packets_ok);
                         bad += u64::from(st.last_frame_packets_bad);

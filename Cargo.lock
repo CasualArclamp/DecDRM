@@ -941,6 +941,7 @@ dependencies = [
  "decdrm-evs",
  "decdrm-io",
  "decdrm-kiwi",
+ "decdrm-mdi",
  "tempfile",
  "tracing",
 ]
@@ -1006,6 +1007,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "decdrm-mdi"
+version = "0.4.5"
+dependencies = [
+ "decdrm-core",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "decdrm-opus-sys"
 version = "0.4.5"
 dependencies = [
@@ -1031,6 +1041,7 @@ dependencies = [
  "decdrm-encodec",
  "decdrm-engine",
  "decdrm-io",
+ "decdrm-mdi",
  "flacenc",
  "image",
  "rustls",

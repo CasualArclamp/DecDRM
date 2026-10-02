@@ -18,13 +18,14 @@ pub mod source;
 pub use decdrm_core::rx::{InputFormat, RealChannel, ReceiverConfig};
 pub use decdrm_data;
 pub use decdrm_kiwi;
+pub use decdrm_mdi;
 pub use logger::{LogConfig, LogFormat};
 pub use session::{MscStats, Session, SessionEvent};
 pub use snapshot::{
     AppView, AudioCodingView, AudioSpectrum, AudioStatus, BroadcastTime, DiversityView, InputStatus, METRICS_INTERVAL_S,
-    MetricsSample, RECENT_METRICS, RecordingStatus, ServiceView, Snapshot,
+    MdiStatus, MetricsSample, RECENT_METRICS, RecordingStatus, ServiceView, Snapshot,
 };
-pub use source::{InputSpec, Source, SourceInfo};
+pub use source::{Input, InputSpec, MdiSpec, Source, SourceInfo};
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -100,7 +101,8 @@ pub enum Command {
     /// audio already queued on the sound card.
     SetVolume(f32),
     /// Retune a KiwiSDR input to this frequency, kHz, on the open connection; the
-    /// receiver starts afresh (another station). Other inputs ignore it.
+    /// receiver starts afresh (another station). An RSCI input sends it to its receiver
+    /// by RCI. Other inputs ignore it.
     Tune(f64),
     /// Record the decoded audio (what is played, before the volume) to this WAV file,
     /// or FLAC with a `.flac` name, ending a recording in progress. The station's own
@@ -226,6 +228,7 @@ fn worker(
             receiver_for(&specs[0], source.branch_info(0)),
             receiver_for(&specs[1], source.branch_info(1)),
         ]),
+        InputSpec::Mdi(_) => Session::new_mdi(),
         spec => Session::new(receiver_for(spec, &info)),
     };
     // File playback paces the decoder to the sound card; live input relies on the
@@ -241,7 +244,9 @@ fn worker(
 
     let mut snap = Snapshot::default();
     snap.input.info = info.clone();
-    if cfg.input.is_iq() && !info.is_file {
+    if cfg.input.is_mdi() {
+        log(format!("input: {}", info.name), &mut snap);
+    } else if cfg.input.is_iq() && !info.is_file {
         log(format!("input: {} (I/Q)", info.name), &mut snap);
     } else {
         log(format!("input: {} ({} Hz, {} ch)", info.name, info.sample_rate, info.channels), &mut snap);
@@ -276,6 +281,8 @@ fn worker(
                 Command::SelectService(id) => {
                     session.select_service(id);
                     snap.selected_service = session.selected_service();
+                    // An RSCI receiver decodes the service too (its audio status).
+                    source.send_rci(&[decdrm_mdi::RciCommand::Service(id)]);
                 }
                 Command::SetVolume(gain) => audio.set_volume(gain),
                 Command::StartRecording(path) => match audio.start_recording(path.clone()) {
@@ -301,13 +308,13 @@ fn worker(
                         last_audio_s = None;
                         log(format!("tuning to {freq_khz:.3} kHz"), &mut snap);
                     } else {
-                        log("only a KiwiSDR input can be retuned".into(), &mut snap);
+                        log("only a KiwiSDR input or an RSCI receiver with an RCI address can be retuned".into(), &mut snap);
                     }
                 }
             }
         }
 
-        let read = source.read_branches(chunk_frames);
+        let read = source.read_input(chunk_frames);
         for line in source.take_log() {
             log(line, &mut snap);
         }
@@ -331,7 +338,7 @@ fn worker(
         // The frames of every branch (one, or two for diversity reception); at the end
         // of the input, what diversity reception still holds back.
         let (events, ended) = match read {
-            Some(branches) => {
+            Some(Input::Samples(branches)) => {
                 if let Some(frames) = branches.iter().find(|f| !f.is_empty()) {
                     let rms = (frames.iter().map(|v| v * v).sum::<f32>() / frames.len() as f32).sqrt();
                     snap.input.level_dbfs = Some(20.0 * rms.max(1e-9).log10());
@@ -342,6 +349,7 @@ fn worker(
                 }
                 (events, false)
             }
+            Some(Input::Mdi(frames)) => (frames.iter().flat_map(|f| session.push_mdi(f)).collect(), false),
             None => (session.flush(), true),
         };
         let t = source.position_s();
@@ -400,8 +408,9 @@ fn worker(
             publish(shared, &mut snap, &mut session, &source, &audio, false);
             last_publish = Instant::now();
         }
-        if realtime && !audio.is_playing() {
-            // Pace to wall-clock time (with playback, the sound card paces us).
+        if realtime && !audio.is_playing() && !cfg.input.is_mdi() {
+            // Pace to wall-clock time (with playback, the sound card paces us; an MDI
+            // recording paces itself).
             let ahead = source.position_s() - started.elapsed().as_secs_f64();
             if ahead > 0.0 {
                 std::thread::sleep(Duration::from_secs_f64(ahead.min(0.2)));
@@ -467,6 +476,7 @@ fn publish(
     snap.input.finished = finished;
     snap.input.kiwi = source.kiwi_status();
     snap.input.kiwi2 = source.kiwi_status_of(1);
+    snap.input.mdi = source.mdi_status();
     snap.diversity = session.diversity().map(|(stats, branches)| DiversityView { stats, branches });
     let st = &session.audio_stats;
     snap.audio.codec = st.codec.clone();

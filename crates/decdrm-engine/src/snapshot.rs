@@ -49,6 +49,28 @@ pub struct InputStatus {
     pub kiwi: Option<decdrm_kiwi::KiwiStatus>,
     /// Diversity reception: the second KiwiSDR's connection.
     pub kiwi2: Option<decdrm_kiwi::KiwiStatus>,
+    /// An MDI/RSCI input's link and the RSCI receiver's status.
+    pub mdi: Option<MdiStatus>,
+}
+
+/// An MDI/RSCI input (see `InputSpec::Mdi`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MdiStatus {
+    /// Where it comes from: "UDP port 8000", "rec.rsA", ….
+    pub origin: String,
+    /// Protocol and revision of the first frame ("RSCI 3.0", "DMDI 0.0").
+    pub protocol: Option<String>,
+    /// UDP: the local address listened on, and the sender of the last packet.
+    pub local: Option<String>,
+    pub sender: Option<String>,
+    /// Packets, frames, losses, PFT recoveries.
+    pub stats: decdrm_mdi::DcpStats,
+    /// Where RCI commands go.
+    pub rci: Option<String>,
+    /// The RSCI receiver's latest status (empty for plain MDI).
+    pub rsci: decdrm_mdi::RsciStatus,
+    /// A recording: share read, 0…1.
+    pub progress: Option<f64>,
 }
 
 /// Diversity reception: the combiner's counts and each branch's receiver status.
