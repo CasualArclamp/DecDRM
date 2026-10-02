@@ -1,12 +1,12 @@
 //! Audio outputs of the engine: live playback (drift-compensated) and recording, plus
 //! the spectrum of the decoded audio for user interfaces.
 
-use crate::snapshot::AudioSpectrum;
+use crate::snapshot::{AudioSpectrum, RecordingStatus};
 use anyhow::{Context, Result};
 use decdrm_core::Cplx;
 use decdrm_core::dsp::fft::Fft;
 use decdrm_io::{AudioFormat, AudioPlayer, Container, Encoding, FileWriter, PlayerOptions};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// FFT length of the audio spectrum: 11.7 Hz bins at 24 kHz, 23.4 Hz at 48 kHz.
@@ -14,25 +14,135 @@ pub const AUDIO_FFT_LEN: usize = 2048;
 /// Time constant of the audio spectrum's exponential average, seconds.
 pub const AUDIO_AVERAGE_S: f64 = 0.3;
 
+/// Seconds of audio between two checkpoints of a recording ([`FileWriter::flush`]): a
+/// crash or a power cut loses at most this much of a WAV recording.
+pub const RECORDING_CHECKPOINT_S: f64 = 5.0;
+
 /// Where decoded audio goes.
 pub struct AudioOut {
     player: Option<AudioPlayer>,
     /// Pace pushes to the sound card (file playback) instead of dropping excess
     /// audio (live reception, where the drift loop keeps the queue on target).
     blocking: bool,
+    /// The recording, kept after it ends (for its final state).
     recorder: Option<Recorder>,
+    /// Format of the latest audio: a recording started now opens its file at once.
+    format: Option<AudioFormat>,
     analyser: AudioAnalyser,
 }
 
+/// A recording of the decoded audio as it is decoded: the service's sample rate and
+/// channels, 16-bit, WAV (or FLAC, by the file name's extension). A WAV or FLAC file
+/// has one format, so a change of format (another service, a reconfigured one)
+/// carries on in a new file: `name-2.wav`, `name-3.wav`, … (never one that exists).
+/// Signal losses are not filled in: the recording holds the audio that was decoded.
 struct Recorder {
+    /// The file asked for.
     path: PathBuf,
     writer: Option<FileWriter>,
-    format: Option<AudioFormat>,
+    /// Frames of the current file at its last checkpoint.
+    flushed: u64,
+    /// Files opened so far, the current one last.
+    files: Vec<PathBuf>,
+    /// Seconds of audio in the files before the current one.
+    done_s: f64,
+    active: bool,
+    error: Option<String>,
+}
+
+impl Recorder {
+    fn new(path: PathBuf) -> Self {
+        Self { path, writer: None, flushed: 0, files: Vec::new(), done_s: 0.0, active: true, error: None }
+    }
+
+    /// Write `samples` of format `fmt`, opening the first file, or the next one when
+    /// the format has changed.
+    fn write(&mut self, samples: &[f32], fmt: AudioFormat) -> Result<()> {
+        if self.writer.as_ref().is_none_or(|w| w.format() != fmt) {
+            self.open(fmt)?;
+        }
+        let Some(w) = self.writer.as_mut() else { return Ok(()) };
+        w.write(samples).with_context(|| format!("writing {}", w.path().display()))?;
+        if (w.frames_written() - self.flushed) as f64 >= RECORDING_CHECKPOINT_S * f64::from(fmt.sample_rate) {
+            w.flush().with_context(|| format!("writing {}", w.path().display()))?;
+            self.flushed = w.frames_written();
+        }
+        Ok(())
+    }
+
+    /// Complete the current file (if any) and open the next one for `fmt`.
+    fn open(&mut self, fmt: AudioFormat) -> Result<()> {
+        self.close()?;
+        let path = if self.files.is_empty() { self.path.clone() } else { next_part(&self.path, self.files.len() + 1) };
+        let container = Container::from_path(&path).unwrap_or(Container::Wav);
+        let writer = FileWriter::create(&path, fmt, container, Encoding::Int16)
+            .with_context(|| format!("cannot record to {}", path.display()))?;
+        self.files.push(path);
+        self.writer = Some(writer);
+        self.flushed = 0;
+        Ok(())
+    }
+
+    /// Complete the current file.
+    fn close(&mut self) -> Result<()> {
+        if let Some(w) = self.writer.take() {
+            self.done_s += w.frames_written() as f64 / f64::from(w.format().sample_rate);
+            let path = w.path().to_path_buf();
+            w.finalize().with_context(|| format!("completing {}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    /// End the recording: complete its file.
+    fn stop(&mut self) -> Result<()> {
+        self.active = false;
+        let closed = self.close();
+        if let Err(e) = &closed {
+            self.error = Some(format!("{e:#}"));
+        }
+        closed
+    }
+
+    /// End the recording because of `e` (the file is completed as far as possible).
+    fn fail(&mut self, e: &anyhow::Error) {
+        self.active = false;
+        self.error = Some(format!("{e:#}"));
+        if let Some(w) = self.writer.take() {
+            self.done_s += w.frames_written() as f64 / f64::from(w.format().sample_rate);
+            // Dropping a writer completes it on a best-effort basis.
+            drop(w);
+        }
+    }
+
+    fn status(&self) -> RecordingStatus {
+        let current = self.writer.as_ref().map_or(0.0, |w| w.frames_written() as f64 / f64::from(w.format().sample_rate));
+        RecordingStatus {
+            path: self.path.clone(),
+            files: self.files.clone(),
+            seconds: self.done_s + current,
+            format: self.writer.as_ref().map(|w| (w.format().sample_rate, w.format().channels)),
+            active: self.active,
+            error: self.error.clone(),
+        }
+    }
+}
+
+/// The file for part `n` (2, 3, …) of the recording asked for as `path`: `name-n.ext`,
+/// or the next number whose file does not exist yet.
+fn next_part(path: &Path, n: usize) -> PathBuf {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = path.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "wav".into());
+    (n..)
+        .map(|k| path.with_file_name(format!("{stem}-{k}.{ext}")))
+        .find(|p| !p.exists())
+        .expect("a free file name")
 }
 
 impl AudioOut {
     /// `play`: open the output device (`device` = name or `None` for default).
     /// `blocking`: file playback (pace the decoder to the sound card).
+    /// `record`: record the decoded audio to this file from the start (see
+    /// [`Self::start_recording`]).
     pub fn new(play: bool, device: Option<String>, blocking: bool, record: Option<PathBuf>) -> Result<Self> {
         let player = if play {
             let opts = PlayerOptions {
@@ -46,12 +156,7 @@ impl AudioOut {
         } else {
             None
         };
-        Ok(Self {
-            player,
-            blocking,
-            recorder: record.map(|path| Recorder { path, writer: None, format: None }),
-            analyser: AudioAnalyser::new(),
-        })
+        Ok(Self { player, blocking, recorder: record.map(Recorder::new), format: None, analyser: AudioAnalyser::new() })
     }
 
     pub fn is_playing(&self) -> bool {
@@ -65,39 +170,57 @@ impl AudioOut {
         }
     }
 
-    /// Queue decoded audio (interleaved, `channels` = 1 or 2).
+    /// Queue decoded audio (interleaved, `channels` = 1 or 2). A recording that cannot
+    /// be written ends with the error, which is returned once; playback goes on.
     pub fn push(&mut self, samples: &[f32], sample_rate: u32, channels: usize) -> Result<()> {
         self.analyser.push(samples, sample_rate, channels);
-        if let Some(p) = self.player.as_mut() {
-            if self.blocking {
-                p.push_blocking(samples, sample_rate, channels)?;
-            } else {
-                p.push(samples, sample_rate, channels)?;
-            }
+        let fmt = AudioFormat::new(sample_rate, channels);
+        self.format = Some(fmt);
+        let played = match self.player.as_mut() {
+            Some(p) if self.blocking => p.push_blocking(samples, sample_rate, channels),
+            // (The number of frames queued is of no interest here.)
+            Some(p) => p.push(samples, sample_rate, channels).map(drop),
+            None => Ok(()),
+        };
+        if let Some(r) = self.recorder.as_mut().filter(|r| r.active)
+            && let Err(e) = r.write(samples, fmt)
+        {
+            r.fail(&e);
+            return Err(e.context("the recording stopped"));
         }
-        if let Some(r) = self.recorder.as_mut() {
-            let fmt = AudioFormat::new(sample_rate, channels);
-            if r.format != Some(fmt) {
-                // A new format (e.g. after a service change) starts a new file.
-                if let Some(w) = r.writer.take() {
-                    w.finalize()?;
-                }
-                let path = if r.format.is_none() {
-                    r.path.clone()
-                } else {
-                    let stem = r.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                    let ext = r.path.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "wav".into());
-                    r.path.with_file_name(format!("{stem}-{}.{ext}", chrono_like_stamp()))
-                };
-                let container = Container::from_path(&path).unwrap_or(Container::Wav);
-                r.writer = Some(FileWriter::create(&path, fmt, container, Encoding::Int16)?);
-                r.format = Some(fmt);
-            }
-            if let Some(w) = r.writer.as_mut() {
-                w.write(samples)?;
-            }
+        Ok(played?)
+    }
+
+    /// Record the decoded audio to `path` (WAV, or FLAC with a `.flac` name), ending a
+    /// recording in progress first. The file is opened at once if audio is being
+    /// decoded, else with the first audio. An error (the file cannot be created) ends
+    /// the new recording at once and is returned.
+    pub fn start_recording(&mut self, path: PathBuf) -> Result<()> {
+        let ended = self.stop_recording();
+        let mut r = Recorder::new(path);
+        let opened = match self.format {
+            Some(fmt) => r.open(fmt),
+            None => Ok(()),
+        };
+        if let Err(e) = &opened {
+            r.fail(e);
         }
-        Ok(())
+        self.recorder = Some(r);
+        ended.and(opened)
+    }
+
+    /// End the recording in progress, completing its file; its final state stays
+    /// available ([`Self::recording`]).
+    pub fn stop_recording(&mut self) -> Result<()> {
+        match self.recorder.as_mut().filter(|r| r.active) {
+            Some(r) => r.stop(),
+            None => Ok(()),
+        }
+    }
+
+    /// The recording in progress, or the last one (its final state).
+    pub fn recording(&self) -> Option<RecordingStatus> {
+        self.recorder.as_ref().map(Recorder::status)
     }
 
     /// Queue depth and drift correction for the status display.
@@ -110,23 +233,13 @@ impl AudioOut {
         self.analyser.spectrum()
     }
 
-    /// Finish: let queued audio play out and close the recording.
+    /// Finish: let queued audio play out and complete the recording.
     pub fn finish(&mut self) -> Result<()> {
         if let Some(p) = self.player.as_mut() {
             p.drain(Duration::from_secs(3));
         }
-        if let Some(r) = self.recorder.as_mut()
-            && let Some(w) = r.writer.take()
-        {
-            w.finalize()?;
-        }
-        Ok(())
+        self.stop_recording()
     }
-}
-
-/// Seconds since the Unix epoch, for unique file names without a date crate.
-fn chrono_like_stamp() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// Smoothed power spectrum of the decoded audio, for display.
@@ -252,6 +365,69 @@ mod tests {
                 std::iter::repeat_n(v, channels)
             })
             .collect()
+    }
+
+    /// A recording: started while audio is decoded, the file opens at once; a change of
+    /// format continues in a numbered file (skipping one that exists); stopped, the
+    /// files are complete and the final state stays.
+    #[test]
+    fn recording_follows_the_format_and_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rec.wav");
+        std::fs::write(dir.path().join("rec-2.wav"), b"someone else's").unwrap();
+        let mut out = AudioOut::new(false, None, false, None).unwrap();
+        assert!(out.recording().is_none());
+        out.push(&tone(10, 0.5, 2400, 1), 24_000, 1).unwrap();
+        out.start_recording(path.clone()).unwrap();
+        let r = out.recording().unwrap();
+        assert!(r.active && path.exists(), "opened at once: {r:?}");
+        assert_eq!((r.files.len(), r.seconds, r.format), (1, 0.0, Some((24_000, 1))));
+        out.push(&tone(10, 0.5, 24_000, 1), 24_000, 1).unwrap();
+        out.push(&tone(10, 0.5, 4800, 2), 48_000, 2).unwrap();
+        let r = out.recording().unwrap();
+        let part = dir.path().join("rec-3.wav");
+        assert_eq!(r.files, [path.clone(), part.clone()]);
+        assert!((r.seconds - 1.1).abs() < 1e-9, "{}", r.seconds);
+        assert_eq!(r.format, Some((48_000, 2)));
+        out.stop_recording().unwrap();
+        out.push(&tone(10, 0.5, 4800, 2), 48_000, 2).unwrap();
+        let r = out.recording().unwrap();
+        assert!(!r.active && r.error.is_none() && r.format.is_none(), "{r:?}");
+        assert!((r.seconds - 1.1).abs() < 1e-9, "nothing after the stop: {}", r.seconds);
+        assert_eq!(r.describe(), "1.1 s of audio in rec.wav, rec-3.wav");
+        let frames = |p: &Path| decdrm_io::FileReader::open(p).unwrap().total_frames();
+        assert_eq!(frames(&path), Some(24_000));
+        assert_eq!(frames(&part), Some(4800));
+        assert_eq!(std::fs::read(dir.path().join("rec-2.wav")).unwrap(), b"someone else's");
+    }
+
+    /// Started before any audio, the file opens with the first audio; a file that
+    /// cannot be created ends the recording with the error.
+    #[test]
+    fn recording_waits_for_audio_and_reports_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("later.flac");
+        let mut out = AudioOut::new(false, None, false, Some(path.clone())).unwrap();
+        let r = out.recording().unwrap();
+        assert!(r.active && r.files.is_empty() && !path.exists());
+        out.push(&tone(10, 0.5, 12_000, 2), 24_000, 2).unwrap();
+        out.finish().unwrap();
+        assert_eq!(decdrm_io::FileReader::open(&path).unwrap().total_frames(), Some(12_000));
+        assert!(!out.recording().unwrap().active, "finish ends the recording");
+
+        let bad = dir.path().join("no such folder").join("x.wav");
+        let mut out = AudioOut::new(false, None, false, None).unwrap();
+        out.push(&tone(10, 0.5, 100, 1), 24_000, 1).unwrap();
+        assert!(out.start_recording(bad.clone()).is_err());
+        let r = out.recording().unwrap();
+        assert!(!r.active && r.error.as_deref().is_some_and(|e| e.contains("cannot record to")), "{r:?}");
+        out.push(&tone(10, 0.5, 100, 1), 24_000, 1).unwrap();
+        // The same error with the first audio when nothing was playing at the start.
+        let mut out = AudioOut::new(false, None, false, Some(bad)).unwrap();
+        let e = out.push(&tone(10, 0.5, 100, 1), 24_000, 1).unwrap_err();
+        assert!(format!("{e:#}").starts_with("the recording stopped: cannot record to"), "{e:#}");
+        assert!(out.push(&tone(10, 0.5, 100, 1), 24_000, 1).is_ok(), "reported once");
+        assert!(!out.recording().unwrap().active);
     }
 
     #[test]

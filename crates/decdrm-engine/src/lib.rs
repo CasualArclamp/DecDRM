@@ -22,7 +22,7 @@ pub use logger::{LogConfig, LogFormat};
 pub use session::{MscStats, Session, SessionEvent};
 pub use snapshot::{
     AppView, AudioCodingView, AudioSpectrum, AudioStatus, BroadcastTime, DiversityView, InputStatus, METRICS_INTERVAL_S,
-    MetricsSample, RECENT_METRICS, ServiceView, Snapshot,
+    MetricsSample, RECENT_METRICS, RecordingStatus, ServiceView, Snapshot,
 };
 pub use source::{InputSpec, Source, SourceInfo};
 
@@ -55,7 +55,8 @@ pub struct EngineConfig {
     pub output_device: Option<String>,
     /// Playback volume, a linear gain (1.0 = as decoded); see [`Command::SetVolume`].
     pub volume: f32,
-    /// Write decoded audio to this WAV/FLAC file.
+    /// Record the decoded audio to this WAV/FLAC file from the start (see
+    /// [`Command::StartRecording`]).
     pub record_audio: Option<std::path::PathBuf>,
     /// Directory for slideshow images, websites, EPG and raw data.
     pub data_dir: Option<std::path::PathBuf>,
@@ -101,6 +102,13 @@ pub enum Command {
     /// Retune a KiwiSDR input to this frequency, kHz, on the open connection; the
     /// receiver starts afresh (another station). Other inputs ignore it.
     Tune(f64),
+    /// Record the decoded audio (what is played, before the volume) to this WAV file,
+    /// or FLAC with a `.flac` name, ending a recording in progress. The station's own
+    /// sample rate and channels, 16-bit; a change of format carries on in `name-2.wav`,
+    /// …. [`AudioStatus::recording`] shows it.
+    StartRecording(std::path::PathBuf),
+    /// End the recording, completing its file.
+    StopRecording,
     Stop,
 }
 
@@ -251,7 +259,9 @@ fn worker(
         for c in cmd_rx.try_iter() {
             match c {
                 Command::Stop => {
-                    audio.finish()?;
+                    if let Some(line) = finish_audio(&mut audio)? {
+                        log(line, &mut snap);
+                    }
                     if let Some(l) = logger.as_mut() {
                         l.finish(source.position_s(), &session, &snap)?;
                     }
@@ -268,6 +278,19 @@ fn worker(
                     snap.selected_service = session.selected_service();
                 }
                 Command::SetVolume(gain) => audio.set_volume(gain),
+                Command::StartRecording(path) => match audio.start_recording(path.clone()) {
+                    Ok(()) => log(format!("recording the audio to {}", path.display()), &mut snap),
+                    Err(e) => log(format!("{e:#}"), &mut snap),
+                },
+                Command::StopRecording => {
+                    let stopped = audio.stop_recording();
+                    if let Some(r) = audio.recording() {
+                        log(format!("recording stopped: {}", r.describe()), &mut snap);
+                    }
+                    if let Err(e) = stopped {
+                        log(format!("recording: {e:#}"), &mut snap);
+                    }
+                }
                 Command::Tune(freq_khz) => {
                     if source.tune(freq_khz) {
                         session.new_station();
@@ -294,7 +317,9 @@ fn worker(
                 // The input ended with an error (e.g. the KiwiSDR closed the connection):
                 // publish the final state first, so the last snapshot is not up to a
                 // publish interval behind, then report it.
-                audio.finish()?;
+                if let Some(line) = finish_audio(&mut audio)? {
+                    log(line, &mut snap);
+                }
                 if let Some(l) = logger.as_mut() {
                     l.finish(source.position_s(), &session, &snap)?;
                 }
@@ -353,7 +378,9 @@ fn worker(
             }
         }
         if ended {
-            audio.finish()?;
+            if let Some(line) = finish_audio(&mut audio)? {
+                log(line, &mut snap);
+            }
             if let Some(l) = logger.as_mut() {
                 l.finish(source.position_s(), &session, &snap)?;
             }
@@ -381,6 +408,14 @@ fn worker(
             }
         }
     }
+}
+
+/// Let queued audio play out and complete a recording in progress; returns the log
+/// line for that recording.
+fn finish_audio(audio: &mut audio_out::AudioOut) -> Result<Option<String>> {
+    let recording = audio.recording().is_some_and(|r| r.active);
+    audio.finish()?;
+    Ok(audio.recording().filter(|_| recording).map(|r| format!("recording saved: {}", r.describe())))
 }
 
 /// The audio spectrum to publish at input position `now_s`: blank unless audio was
@@ -438,6 +473,7 @@ fn publish(
     snap.audio.frames_ok = st.frames_ok;
     snap.audio.frames_bad = st.frames_concealed;
     snap.audio.playing = audio.is_playing();
+    snap.audio.recording = audio.recording();
     if let Some((buffered, ppm)) = audio.status() {
         snap.audio.buffer_ms = buffered.as_secs_f32() * 1000.0;
         snap.audio.drift_ppm = ppm;

@@ -93,7 +93,8 @@ struct RxArgs {
     /// Playback volume for --play, percent (0-100; a squared law, 50 is about -12 dB).
     #[arg(long, value_name = "PERCENT", default_value_t = 100.0)]
     volume: f32,
-    /// Write the decoded audio to a WAV/FLAC file.
+    /// Write the decoded audio to a WAV/FLAC file (as decoded, 16-bit; a change of the
+    /// audio format carries on in FILE-2.wav, …).
     #[arg(long, value_name = "FILE")]
     out: Option<PathBuf>,
     /// Save slideshow images, websites, EPG and other data objects here.

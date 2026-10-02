@@ -261,8 +261,6 @@ impl RxSession {
         }
     }
 
-    /// Ask the engine to decode / show service `short_id`, and show the expected
-    /// result right away (see [`selection_preview`]); the next snapshot confirms it.
     /// Set the playback volume of the running receiver (linear gain).
     pub fn set_volume(&self, gain: f32) {
         if let Some(e) = &self.engine {
@@ -270,6 +268,23 @@ impl RxSession {
         }
     }
 
+    /// Record the decoded audio to `path` (WAV, or FLAC by the name; see
+    /// [`Command::StartRecording`]); the snapshot's `audio.recording` follows it.
+    pub fn start_recording(&self, path: PathBuf) {
+        if let Some(e) = &self.engine {
+            e.command(Command::StartRecording(path));
+        }
+    }
+
+    /// End the recording, completing its file.
+    pub fn stop_recording(&self) {
+        if let Some(e) = &self.engine {
+            e.command(Command::StopRecording);
+        }
+    }
+
+    /// Ask the engine to decode / show service `short_id`, and show the expected
+    /// result right away (see [`selection_preview`]); the next snapshot confirms it.
     pub fn select_service(&mut self, short_id: u8) {
         if let Some(e) = &self.engine {
             e.command(Command::SelectService(short_id));

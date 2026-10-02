@@ -941,6 +941,7 @@ dependencies = [
  "decdrm-evs",
  "decdrm-io",
  "decdrm-kiwi",
+ "tempfile",
  "tracing",
 ]
 

@@ -175,7 +175,8 @@ impl DecDrmApp {
             schedule,
             kiwi_list,
             automation: Automation {
-                quit_at: exit_after.map(|s| now + Duration::from_secs_f64(s.clamp(0.0, 3600.0))),
+                // Up to a day: long enough for a timed recording (`--record`).
+                quit_at: exit_after.map(|s| now + Duration::from_secs_f64(s.clamp(0.0, 86_400.0))),
                 screenshot: args.screenshot.clone(),
                 requested_at: None,
             },
@@ -191,6 +192,10 @@ impl DecDrmApp {
         }
         if args.start {
             app.start();
+            if let Some(path) = &args.record {
+                // The engine opens the file with the first audio.
+                app.rx.start_recording(std::path::absolute(path).unwrap_or_else(|_| path.clone()));
+            }
         }
         if args.transmit {
             app.tx_page.transmit(&app.settings, &mut app.tx, !app.mute);
@@ -373,7 +378,7 @@ impl DecDrmApp {
     fn side_panel(&mut self, ui: &mut Ui) {
         panels::broadcast::clock(ui, self.rx.snap.time.as_ref());
         panels::broadcast::alternative_frequencies(ui, &self.rx.snap.afs);
-        let clicked = panels::services::show(ui, &self.rx, &mut self.settings.volume);
+        let clicked = panels::services::show(ui, &self.rx, &mut self.settings.volume, &mut self.settings.record_dir);
         // A moved volume slider goes to the running receiver at once.
         if self.applied_volume != Some(self.settings.volume) {
             self.rx.set_volume(crate::settings::volume_gain(self.settings.volume));

@@ -143,6 +143,39 @@ pub struct AudioStatus {
     pub playing: bool,
     pub buffer_ms: f32,
     pub drift_ppm: f64,
+    /// The recording of the decoded audio in progress, or the last one.
+    pub recording: Option<RecordingStatus>,
+}
+
+/// A recording of the decoded audio (see `Command::StartRecording`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RecordingStatus {
+    /// The file asked for.
+    pub path: std::path::PathBuf,
+    /// The files written, the current one last: the one asked for, then `name-2.wav`,
+    /// … after changes of the audio format (a file has one format). Empty until the
+    /// first audio.
+    pub files: Vec<std::path::PathBuf>,
+    /// Seconds of audio recorded, in all files.
+    pub seconds: f64,
+    /// Sample rate (Hz) and channels of the file being written.
+    pub format: Option<(u32, usize)>,
+    /// Still recording (false: stopped, or ended by `error`).
+    pub active: bool,
+    /// Why the recording ended early (e.g. the disk is full).
+    pub error: Option<String>,
+}
+
+impl RecordingStatus {
+    /// E.g. `83.4 s of audio in rec.wav, rec-2.wav`.
+    pub fn describe(&self) -> String {
+        let names: Vec<String> =
+            self.files.iter().map(|f| f.file_name().map_or_else(|| f.display().to_string(), |n| n.to_string_lossy().into_owned())).collect();
+        if names.is_empty() {
+            return "no audio recorded".into();
+        }
+        format!("{:.1} s of audio in {}", self.seconds, names.join(", "))
+    }
 }
 
 /// Smoothed power spectrum of the decoded audio (see `audio_out::AudioAnalyser`).

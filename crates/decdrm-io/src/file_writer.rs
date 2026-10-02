@@ -216,6 +216,19 @@ impl FileWriter {
         self.finish()
     }
 
+    /// A checkpoint for long recordings: writes everything buffered to the file and,
+    /// for WAV, the sizes in the header, so the file reads correctly up to here even if
+    /// the program then dies. FLAC keeps its last partial block in memory, and its
+    /// header's sample count and MD5 stay unset until [`finalize`](Self::finalize).
+    pub fn flush(&mut self) -> Result<()> {
+        let path = &self.path;
+        match self.inner.as_mut().ok_or(Error::Finalized)? {
+            Inner::Wav { writer, .. } => writer.flush()?,
+            Inner::Flac(flac) => flac.file.flush().map_err(|e| Error::io(path, e))?,
+        }
+        Ok(())
+    }
+
     /// Frames written so far.
     pub fn frames_written(&self) -> u64 {
         self.frames_written

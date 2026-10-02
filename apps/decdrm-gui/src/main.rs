@@ -59,6 +59,11 @@ pub struct Args {
     /// Start receiving right away.
     #[arg(long)]
     pub start: bool,
+    /// Record the decoded audio to this WAV/FLAC file from the start (with `--start`),
+    /// until *Stop recording*, the end of the input or quitting; with `--exit-after` a
+    /// timed recording.
+    #[arg(long, value_name = "FILE", requires = "start")]
+    pub record: Option<PathBuf>,
     /// Do not use any sound-card output in this run: no audio playback, and no
     /// transmitting to a sound card (the saved settings are left unchanged).
     #[arg(long)]
@@ -77,7 +82,7 @@ pub struct Args {
     /// directory (remembered like the other settings).
     #[arg(long, value_name = "DIR")]
     pub data_dir: Option<PathBuf>,
-    /// Quit after this many seconds.
+    /// Quit after this many seconds (at most a day).
     #[arg(long, value_name = "SECONDS")]
     pub exit_after: Option<f64>,
     /// Save a PNG screenshot of the window just before quitting (after `--exit-after`

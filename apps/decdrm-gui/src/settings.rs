@@ -360,6 +360,8 @@ pub struct Settings {
     pub output_device: Option<String>,
     /// Playback volume, percent (0–100; see [`volume_gain`]).
     pub volume: f32,
+    /// Folder of the last audio recording (the *Record…* dialog opens there).
+    pub record_dir: Option<PathBuf>,
     /// Save received data objects (slides, website files, programme guides) below this
     /// directory (the engine's `data_dir`); `None` saves nothing but the website files
     /// the browser needs (see `website`).
@@ -403,6 +405,7 @@ impl Default for Settings {
             play_audio: true,
             output_device: None,
             volume: 100.0,
+            record_dir: None,
             data_dir: None,
             theme: ThemeChoice::System,
             plot_tab: PlotTab::Overview,
@@ -653,6 +656,7 @@ mod tests {
             play_audio: false,
             output_device: Some("Speakers".into()),
             volume: 35.0,
+            record_dir: Some(PathBuf::from("recordings")),
             data_dir: Some(PathBuf::from("received")),
             theme: ThemeChoice::Light,
             plot_tab: PlotTab::History,

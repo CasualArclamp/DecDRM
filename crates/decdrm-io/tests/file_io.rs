@@ -208,6 +208,41 @@ fn drop_finalizes_best_effort() {
     }
 }
 
+/// `flush` is a checkpoint: a WAV file read while it is still being written holds
+/// everything up to the last flush, as it would after a crash.
+#[test]
+fn flush_makes_a_readable_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("live.wav");
+    let data = exact_signal(6000, 2, 16);
+    let fmt = AudioFormat::new(24_000, 2);
+    let mut w = FileWriter::create(&path, fmt, Container::Wav, Encoding::Int16).unwrap();
+    w.write(&data[..8000]).unwrap();
+    w.flush().unwrap();
+    // Written after the checkpoint: not in the header yet.
+    w.write(&data[8000..]).unwrap();
+    let (r, got) = read_back(&path);
+    assert_eq!(r.total_frames(), Some(4000));
+    assert_eq!(got, data[..8000]);
+    w.flush().unwrap();
+    let (r, got) = read_back(&path);
+    assert_eq!(r.total_frames(), Some(6000));
+    assert_eq!(got, data);
+    w.finalize().unwrap();
+    assert_eq!(read_back(&path).1, data);
+
+    // FLAC: a flush keeps the stream going; the finished file is complete.
+    let path = dir.path().join("live.flac");
+    let mut w = FileWriter::create(&path, fmt, Container::Flac, Encoding::Int16).unwrap();
+    w.write(&data[..8000]).unwrap();
+    w.flush().unwrap();
+    w.write(&data[8000..]).unwrap();
+    w.finalize().unwrap();
+    let (r, got) = read_back(&path);
+    assert_eq!(r.total_frames(), Some(6000));
+    assert_eq!(got, data);
+}
+
 #[test]
 fn damaged_files_do_not_panic() {
     let dir = tempfile::tempdir().unwrap();

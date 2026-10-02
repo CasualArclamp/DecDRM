@@ -1,12 +1,15 @@
 //! Services of the multiplex as four bars like Dream's service buttons (codec, SBR, PS,
 //! rates, bit rate, protection, text, data applications; click to select), the text
-//! message of the selected audio service and the audio decoder status.
+//! message of the selected audio service, the audio decoder status, the volume and the
+//! recording of the audio.
 
-use super::{heading, placeholder};
-use crate::indicators::fmt_error_rate;
+use super::meter::HOT;
+use super::{Palette, heading, placeholder};
+use crate::indicators::{fmt_error_rate, fmt_time};
 use crate::receiver::RxSession;
-use decdrm_engine::{AudioCodingView, ServiceView};
-use eframe::egui::{self, RichText, Ui};
+use decdrm_engine::{AudioCodingView, RecordingStatus, ServiceView};
+use eframe::egui::{self, Color32, RichText, Ui};
+use std::path::{Path, PathBuf};
 
 /// Name shown for a service: its SDC label, else its service id.
 pub fn service_name(s: &ServiceView) -> String {
@@ -337,10 +340,11 @@ fn service_bar(ui: &mut Ui, short_id: u8, service: Option<&ServiceView>, selecte
     response.clicked()
 }
 
-/// Draw the panel with the playback `volume` (percent) slider; returns the short id of
-/// a service the user clicked. (The caller acts on it: selecting needs
-/// `&mut RxSession`, and this function only reads it.)
-pub fn show(ui: &mut Ui, rx: &RxSession, volume: &mut f32) -> Option<u8> {
+/// Draw the panel with the playback `volume` (percent) slider and the recording
+/// controls (`record_dir`: the folder the dialog opens in); returns the short id of a
+/// service the user clicked. (The caller acts on it: selecting needs `&mut RxSession`,
+/// and this function only reads it.)
+pub fn show(ui: &mut Ui, rx: &RxSession, volume: &mut f32, record_dir: &mut Option<PathBuf>) -> Option<u8> {
     heading(ui, "Services");
     let mut clicked = None;
     ui.spacing_mut().item_spacing.y = 4.0;
@@ -403,7 +407,117 @@ pub fn show(ui: &mut Ui, rx: &RxSession, volume: &mut f32) -> Option<u8> {
             ui.end_row();
         });
     volume_slider(ui, volume);
+    record_row(ui, rx, record_dir);
     clicked
+}
+
+const RECORD_HELP: &str = "Record the audio you hear to a WAV file (or FLAC: smaller, also lossless) until you press \
+     Stop: as decoded, at the station's sample rate and channels, whatever the volume. If the audio format changes \
+     (another service), the recording carries on in a new file, name-2.wav.";
+
+/// The Record / Stop recording button and the recording's state.
+fn record_row(ui: &mut Ui, rx: &RxSession, record_dir: &mut Option<PathBuf>) {
+    let running = rx.is_running() && !rx.is_stopping();
+    let rec = rx.snap.audio.recording.as_ref();
+    ui.horizontal_wrapped(|ui| match rec.filter(|r| r.active && running) {
+        Some(r) => {
+            let stop = egui::Button::new(RichText::new("\u{25A0}  Stop recording").color(Color32::WHITE)).fill(HOT);
+            if ui.add(stop).on_hover_text("End the recording and complete the file").clicked() {
+                rx.stop_recording();
+            }
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+            ui.painter().circle_filled(rect.center(), 4.5, HOT);
+            let time = if r.format.is_some() { fmt_time(r.seconds) } else { "waiting for audio".into() };
+            ui.label(RichText::new(time).monospace().color(HOT));
+            ui.label(RichText::new(file_names(r)).weak()).on_hover_text(recording_details(r));
+        }
+        None => {
+            let record = ui
+                .add_enabled(running, egui::Button::new("\u{23FA}  Record\u{2026}"))
+                .on_hover_text(RECORD_HELP)
+                .on_disabled_hover_text("Start receiving first, then record what you hear");
+            if record.clicked()
+                && let Some(path) = pick_recording_file(rx, record_dir)
+            {
+                rx.start_recording(path);
+            }
+            if let Some(r) = rec {
+                finished_recording(ui, r);
+            }
+        }
+    });
+}
+
+/// The last recording: saved where, or why it stopped; a button opens its folder.
+fn finished_recording(ui: &mut Ui, r: &RecordingStatus) {
+    if let Some(e) = &r.error {
+        ui.add(egui::Label::new(RichText::new(format!("Recording stopped: {e}")).color(Palette::for_ui(ui).error)).wrap());
+    } else if !r.files.is_empty() {
+        ui.label(RichText::new(format!("Saved {} in {}", fmt_time(r.seconds), file_names(r))).weak())
+            .on_hover_text(recording_details(r));
+    }
+    if let Some(dir) = r.path.parent().filter(|_| !r.files.is_empty())
+        && ui.small_button("Show").on_hover_text(format!("Open {}", dir.display())).clicked()
+    {
+        // Rust note: `that_detached` returns at once, without waiting for the file manager.
+        let _ = open::that_detached(dir);
+    }
+}
+
+/// The recording's file names (later parts after a change of the audio format).
+fn file_names(r: &RecordingStatus) -> String {
+    let names: Vec<String> = if r.files.is_empty() { vec![r.path.clone()] } else { r.files.clone() }
+        .iter()
+        .map(|f| f.file_name().map_or_else(|| f.display().to_string(), |n| n.to_string_lossy().into_owned()))
+        .collect();
+    names.join(", ")
+}
+
+/// Hover text of a recording: its files, the format, and how format changes are kept.
+fn recording_details(r: &RecordingStatus) -> String {
+    let mut lines: Vec<String> = if r.files.is_empty() { vec![r.path.display().to_string()] } else { r.files.iter().map(|f| f.display().to_string()).collect() };
+    if let Some((rate, channels)) = r.format {
+        let container = if r.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flac")) { "FLAC" } else { "WAV" };
+        let ch = if channels == 1 { "mono" } else { "stereo" };
+        lines.push(format!("{container}, {:.0} kHz {ch}, 16-bit", f64::from(rate) / 1000.0));
+    }
+    lines.push("A change of the audio format (another service) carries on in a new file.".into());
+    lines.join("\n")
+}
+
+/// Ask where to record, offering [`recording_name`] in the folder used last.
+fn pick_recording_file(rx: &RxSession, record_dir: &mut Option<PathBuf>) -> Option<PathBuf> {
+    let service = rx.snap.selected_service.and_then(|id| rx.snap.services.iter().find(|s| s.short_id == id));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Record the audio to")
+        .add_filter("WAV", &["wav"])
+        .add_filter("FLAC (smaller, lossless)", &["flac"])
+        .set_file_name(recording_name(service.map(service_name).as_deref(), now));
+    if let Some(dir) = record_dir.as_deref().filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    // Rust note: the native dialog blocks this (UI) thread; the receiver keeps running
+    // on its own thread, so no audio is lost meanwhile (none is recorded either).
+    let mut path = dialog.save_file()?;
+    if path.extension().is_none() {
+        path.set_extension("wav");
+    }
+    *record_dir = path.parent().map(Path::to_path_buf);
+    Some(path)
+}
+
+/// File name offered for a recording: the service, the date and the time (UTC) of
+/// `unix_s`, e.g. `Radio Kuwait 2026-10-02 1530 UTC.wav`; characters that file names
+/// cannot have become `_`.
+pub fn recording_name(service: Option<&str>, unix_s: i64) -> String {
+    let label: String =
+        service.unwrap_or_default().chars().map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
+    let label = label.trim().trim_end_matches('.');
+    let label = if label.is_empty() { "DecDRM" } else { label };
+    let (y, m, d) = decdrm_data::time::civil_from_days(unix_s.div_euclid(86_400));
+    let minute = unix_s.rem_euclid(86_400) / 60;
+    format!("{label} {y:04}-{m:02}-{d:02} {:02}{:02} UTC.wav", minute / 60, minute % 60)
 }
 
 /// Playback volume in percent (a squared law, see `settings::volume_gain`), adjustable
@@ -425,6 +539,33 @@ mod tests {
     use super::*;
 
     use decdrm_engine::{AppView, AudioCodingView};
+
+    #[test]
+    fn recording_names() {
+        // 2026-10-02 15:30:59 UTC.
+        let t = 1_790_955_059;
+        assert_eq!(recording_name(Some("Radio Kuwait"), t), "Radio Kuwait 2026-10-02 1530 UTC.wav");
+        assert_eq!(recording_name(Some(" AC/DC: \"Live\"? "), t), "AC_DC_ _Live__ 2026-10-02 1530 UTC.wav");
+        assert_eq!(recording_name(Some("..."), t), "DecDRM 2026-10-02 1530 UTC.wav");
+        assert_eq!(recording_name(None, 0), "DecDRM 1970-01-01 0000 UTC.wav");
+    }
+
+    #[test]
+    fn recording_texts() {
+        let r = RecordingStatus {
+            path: PathBuf::from("rec").join("news.wav"),
+            files: vec![PathBuf::from("rec").join("news.wav"), PathBuf::from("rec").join("news-2.wav")],
+            seconds: 83.4,
+            format: Some((48_000, 2)),
+            active: true,
+            error: None,
+        };
+        assert_eq!(file_names(&r), "news.wav, news-2.wav");
+        let details = recording_details(&r);
+        assert!(details.contains("WAV, 48 kHz stereo, 16-bit"), "{details}");
+        let waiting = RecordingStatus { files: Vec::new(), format: None, ..r };
+        assert_eq!(file_names(&waiting), "news.wav");
+    }
 
     fn texts(s: &ServiceView) -> Vec<String> {
         tags(s).into_iter().map(|t| t.text).collect()
