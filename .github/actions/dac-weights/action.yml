@@ -1,0 +1,27 @@
+name: DAC weights
+description: >-
+  The weights of DecDRM's neural codec DAC (descript/dac_24khz at a fixed revision,
+  299 MB, MIT licence) in models/dac_24khz/model.safetensors: from the Actions cache,
+  else downloaded from Hugging Face, and in both cases checked against their SHA-256
+  (the same revision and digest as crates/decdrm-dac/src/weights.rs).
+
+runs:
+  using: composite
+  steps:
+    - id: cache
+      uses: actions/cache@v6
+      with:
+        path: models/dac_24khz/model.safetensors
+        key: dac-24khz-7452e3fc6972991da871ae1a1c9d3e8e219aa247cc0f757018867d6a7fe59aaf
+        # One cache entry for Linux and Windows runners.
+        enableCrossOsArchive: true
+    - name: Download the DAC weights
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        mkdir -p models/dac_24khz
+        curl -fL --retry 3 -o models/dac_24khz/model.safetensors \
+          https://huggingface.co/descript/dac_24khz/resolve/6ba020b5ba7d9d8076fb90db7e67f27e31980f6e/model.safetensors
+    - name: Check the DAC weights
+      shell: bash
+      run: echo "7452e3fc6972991da871ae1a1c9d3e8e219aa247cc0f757018867d6a7fe59aaf  models/dac_24khz/model.safetensors" | sha256sum -c -

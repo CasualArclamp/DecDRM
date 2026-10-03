@@ -1,0 +1,111 @@
+# Build and test on every push to main and every pull request, and on demand (Actions →
+# CI → Run workflow, or `gh workflow run ci.yml`). The repository is public, so GitHub's
+# runners cost nothing.
+#
+# - test (Linux, Windows): the workspace's tests, including the long loopback and
+#   diversity sweeps; clippy; scripts/smoke-test.sh (the CLI transmits and receives,
+#   the GUI decodes a file headless).
+# - dac (Linux): the DAC codec's tests with its real weights (cached, see
+#   .github/actions/dac-weights) and the smoke test with the weights built in.
+#
+# Not here: the sound-card tests (ignored; they need VB-Audio cables), the measurement
+# printouts (ignored), and whatever needs the user's recordings in samples/ (never
+# committed).
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: System packages (ALSA headers for cpal, CMake for libopus; Xvfb and Mesa for the GUI)
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          libasound2-dev pkg-config cmake xvfb xauth libgl1-mesa-dri libegl1 libxkbcommon-x11-0
+      - name: Mesa (software OpenGL for the GUI; the runners have no GPU)
+        if: runner.os == 'Windows'
+        uses: ssciwr/setup-mesa-dist-win@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --release --all-targets
+      - name: Test
+        run: cargo test --workspace --release
+      - name: Long tests (loopback sweeps over layouts, SNRs and fading channels; diversity sweep)
+        run: cargo test --release -p decdrm-core --test loopback --test diversity -- --ignored
+      - name: Clippy
+        run: cargo clippy --workspace --release --all-targets -- -D clippy::correctness
+      - name: Smoke test
+        shell: bash
+        run: scripts/smoke-test.sh target/release "$RUNNER_TEMP/smoke"
+      - name: Smoke test output (receiver logs, data objects, GUI screenshot)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-${{ runner.os }}
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: warn
+
+  dac:
+    name: DAC codec (real weights)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: System packages
+        run: >-
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          libasound2-dev pkg-config cmake xvfb xauth libgl1-mesa-dri libegl1 libxkbcommon-x11-0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dac
+      - uses: ./.github/actions/dac-weights
+      - name: Test (with the weights in models/)
+        run: >-
+          cargo test --release -p decdrm-dac -p decdrm-engine -p decdrm-station
+          --features decdrm-dac/dac,decdrm-engine/dac,decdrm-station/dac
+      - name: Build with the weights built in
+        run: cargo build --release -p decdrm-cli -p decdrm-gui --features decdrm-cli/embed-weights,decdrm-gui/embed-weights
+      - name: Smoke test (DAC from the built-in weights alone)
+        shell: bash
+        run: |
+          # Hide models/: the executables would find it on disk (see smoke-test.sh).
+          mv models models.hidden
+          trap 'mv models.hidden models' EXIT
+          scripts/smoke-test.sh target/release "$RUNNER_TEMP/smoke" --dac
+      - name: Smoke test output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-dac
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: warn

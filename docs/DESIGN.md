@@ -261,6 +261,25 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       the monitor on; through VB-Audio cable A (ignored test, inaudible) an I/Q file of
       1 kHz on I and 3 kHz on Q came back 1 kHz left and 3 kHz right at the input's
       level, paced in real time.
+- [x] **Testing and releases on GitHub Actions** (2026-10-03) — the user asked to move
+      the testing to GitHub Actions. The repository is public, so the runners are free;
+      the old Linux workflow ran only by hand, to save a private repository's minutes.
+      *Done:* `ci.yml`, on every push to main and every pull request (and by hand):
+      Linux and Windows build the workspace and run its tests, the long loopback and
+      diversity sweeps (ignored locally), clippy (correctness lints as errors) and
+      `scripts/smoke-test.sh`: `decdrm devices` without a sound card, the example station
+      transmitted and received without a concealed frame, and the GUI decoding it
+      headless (Xvfb on Linux, Mesa's software OpenGL on Windows), with the logs and a
+      screenshot as artifacts. A Linux job runs the DAC tests with the real weights
+      (`.github/actions/dac-weights`: from the cache, else downloaded from Hugging Face
+      at the fixed revision; SHA-256 checked), then the smoke test of a DAC station
+      decoded from weights built in. `release.yml`, on a pushed tag v*: the portable
+      Windows build of `scripts/build-portable.ps1`, then checks: versions against the
+      tag, no `vcruntime140` or `api-ms-win-crt` import (static C runtime), and the
+      smoke test with the built-in weights alone. Then a draft release with both exes
+      and their SHA-256; a published release is never replaced. Not on CI: the
+      sound-card tests, the measurement printouts and anything that needs the user's
+      recordings.
 - [x] **Non-standard FAC identity** (2026-10-03) — the user found a station on 1557 kHz
       (two Taiwanese KiwiSDRs in diversity; mode B, 9 kHz, 16-QAM MSC, 4-QAM SDC, one data
       service "AMDrm") whose SDC constellation kept switching between 4-QAM and 16-QAM. In

@@ -1,0 +1,124 @@
+# Portable Windows release of a tag. Pushing a tag v* (or Actions → Release → Run
+# workflow with an existing tag) builds decdrm-gui.exe and decdrm.exe as
+# scripts/build-portable.ps1 does (static C runtime, the DAC weights built in), checks
+# that their versions match the tag and that they need no C runtime DLL, runs
+# scripts/smoke-test.sh on them, and uploads them with their SHA-256 to a draft release
+# of the tag. Then write the release notes and publish it:
+#
+#   gh release edit vX.Y.Z --title "…" --notes-file notes.md --draft=false --latest
+#
+# A release that is already published is never touched: the job fails instead. A trial
+# run without a release: `gh workflow run release.yml -f tag=main -f upload=false`.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build (vX.Y.Z), or a branch for a trial run without upload
+        required: true
+      upload:
+        description: Upload the executables to a draft release of the tag
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows portable
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+          submodules: recursive
+      - name: Mesa (software OpenGL for the GUI smoke test; the runners have no GPU)
+        uses: ssciwr/setup-mesa-dist-win@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: ./.github/actions/dac-weights
+      - name: Build (static C runtime, DAC weights built in)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+          DECDRM_MODELS: ${{ github.workspace }}/models
+        run: >-
+          cargo build --release --target x86_64-pc-windows-msvc -p decdrm-gui -p decdrm-cli
+          --features decdrm-gui/embed-weights,decdrm-cli/embed-weights
+      - name: Check (versions, no C runtime DLL, smoke test with the built-in weights alone)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=target/x86_64-pc-windows-msvc/release
+          "$bin/decdrm" --version
+          if [[ $TAG == v* ]]; then
+            test "$("$bin/decdrm" --version)" = "decdrm ${TAG#v}"
+            test "$("$bin/decdrm-gui" --version)" = "decdrm-gui ${TAG#v}"
+          fi
+          for exe in decdrm decdrm-gui; do
+            if grep -a -q -i -e vcruntime140 -e api-ms-win-crt "$bin/$exe.exe"; then
+              echo "$exe.exe imports a C runtime DLL: not a static build" >&2
+              exit 1
+            fi
+          done
+          # Hide models/: the executables would find it on disk (see smoke-test.sh).
+          mv models models.hidden
+          trap 'mv models.hidden models' EXIT
+          scripts/smoke-test.sh "$bin" "$RUNNER_TEMP/smoke" --dac
+      - name: Smoke test output (receiver logs, data objects, GUI screenshot)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-release
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: warn
+      - name: Draft release
+        if: github.event_name == 'push' || inputs.upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bin=target/x86_64-pc-windows-msvc/release
+          cp "$bin/decdrm-gui.exe" "$bin/decdrm.exe" .
+          cat > notes.md <<'EOF'
+          Portable Windows executables for 64-bit Windows 10/11, nothing to install (static C runtime; the DAC codec's weights built in).
+
+          | File | What |
+          |---|---|
+          | `decdrm-gui.exe` | Desktop app: receiver (files, sound cards, KiwiSDRs, MDI/RSCI) and transmitter (also as an MDI modulator) |
+          | `decdrm.exe` | Command line: `decdrm rx` (also `--kiwi`, `--kiwi2`), `decdrm tx`, `decdrm schedule`, `decdrm devices`, `decdrm models` |
+
+          Windows SmartScreen may warn on first start because the files are unsigned ("More info" → "Run anyway").
+          EOF
+          {
+            echo
+            echo "Built from $(git rev-parse --short HEAD) by [GitHub Actions]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+            echo
+            echo "SHA-256:"
+            echo '```'
+            sha256sum decdrm-gui.exe decdrm.exe
+            echo '```'
+          } >> notes.md
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2> /dev/null); then
+            if [ "$draft" != true ]; then
+              echo "release $TAG is already published: not replacing its files" >&2
+              exit 1
+            fi
+            gh release upload "$TAG" decdrm-gui.exe decdrm.exe --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" --draft --verify-tag --title "DecDRM ${TAG#v} (Windows portable)" \
+              --notes-file notes.md decdrm-gui.exe decdrm.exe
+          fi
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"

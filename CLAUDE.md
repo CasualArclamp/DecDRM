@@ -62,6 +62,16 @@ milestone checklist (keep it current).
   `--example modescores` the mode-detection margins per layout/SNR.
 - Loopback suite incl. long sweeps:
   `cargo test --release -p decdrm-core --test loopback -- --include-ignored --nocapture`.
+- Testing runs on GitHub Actions (the user's choice, 2026-10-03): `ci.yml` on every push
+  to main and every PR — Linux and Windows build, all tests incl. the long loopback and
+  diversity sweeps, clippy, `scripts/smoke-test.sh`; a Linux job runs the DAC tests with
+  the real weights. Push, then `gh run watch` / `gh run list`; rerun by hand with
+  `gh workflow run ci.yml`. Locally only what a change needs (and the recordings in
+  `samples/`, which CI does not have).
+- Releases: push the version-bump commit's tag `vX.Y.Z`; `release.yml` builds the
+  portable Windows exes, checks and smoke-tests them and uploads them to a draft
+  release. Then write the notes and publish:
+  `gh release edit vX.Y.Z --title … --notes-file … --draft=false --latest`.
 
 ## Conventions
 - DSP in `f64` (`Real`, `Cplx`); PCM audio is `f32`. Working sample rate 48 kHz.
