@@ -58,12 +58,26 @@ struct Scenario {
     seconds: Real,
     /// Tell the receiver the MSC parameters (as the SDC would) and check the frames.
     decode_msc: bool,
+    /// Send this FAC identity in every frame (`Transmitter::set_fixed_fac_identity`).
+    fixed_identity: Option<u8>,
+    /// Frames whose FAC announces two audio services instead of one.
+    odd_facs: Vec<usize>,
     seed: u64,
 }
 
 impl Scenario {
     fn new(tx: TxConfig, link: Link, seconds: Real) -> Self {
-        Self { name: layout_name(&tx), tx, link, channel: None, seconds, decode_msc: false, seed: 1 }
+        Self {
+            name: layout_name(&tx),
+            tx,
+            link,
+            channel: None,
+            seconds,
+            decode_msc: false,
+            fixed_identity: None,
+            odd_facs: Vec::new(),
+            seed: 1,
+        }
     }
 }
 
@@ -145,6 +159,8 @@ struct Outcome {
     msc_incomplete: usize,
     /// MSC frames flagged complete that match nothing that was sent.
     msc_complete_wrong: usize,
+    /// `ReceiverEvent::FrameIdentity` reports (trusted or not), in order.
+    frame_identity: Vec<bool>,
     /// Receiver status at the end.
     snr_db: Option<Real>,
     sro_hz: Real,
@@ -211,6 +227,7 @@ fn mux_end_frame(j: usize) -> usize {
 
 fn run(sc: &Scenario) -> Outcome {
     let mut tx = Transmitter::new(sc.tx).expect("valid transmitter configuration");
+    tx.set_fixed_fac_identity(sc.fixed_identity);
     let layout = tx.layout();
     let mut out_stage = output_for(layout, sc.link);
     let mut chan = sc.channel.clone().map(|c| ChannelSimulator::new(layout, c));
@@ -235,7 +252,10 @@ fn run(sc: &Scenario) -> Outcome {
     let mut pcm: Vec<f32> = Vec::new();
 
     for f in 0..frames {
-        let fac = test_fac(&mut rng);
+        let mut fac = test_fac(&mut rng);
+        if sc.odd_facs.contains(&f) {
+            fac.channel.num_audio = 2;
+        }
         let msc = rng.bits(cap.total_bits());
         let sdc = (tx.frame_index() == 0).then(|| rng.bytes(tx.sdc_capacity_bytes()));
         sent_fac.push(tx.fac_for_next_frame(&fac));
@@ -260,6 +280,7 @@ fn run(sc: &Scenario) -> Outcome {
                 ReceiverEvent::SignalFound { dc_hz, inverted } => o.signal_found = Some((dc_hz, inverted)),
                 ReceiverEvent::ModeDetected(m) => o.modes.push(m),
                 ReceiverEvent::Restarted => o.restarts += 1,
+                ReceiverEvent::FrameIdentity { trusted } => o.frame_identity.push(trusted),
                 ReceiverEvent::Fac(fac) => {
                     o.first_fac_frame.get_or_insert(f);
                     let so = fac.channel.occupancy.value();
@@ -422,6 +443,9 @@ fn check_clean(sc: &Scenario, o: &Outcome) -> Vec<String> {
     if o.restarts > 0 {
         p.push(format!("{} restarts", o.restarts));
     }
+    if !o.frame_identity.is_empty() {
+        p.push(format!("FAC identity trust changed: {:?}", o.frame_identity));
+    }
     // The default level leaves 15 dB of headroom; an OFDM peak beyond that is rare
     // but not an error (one in ~10⁶ samples).
     let samples = (o.frames * SAMPLES_PER_FRAME * 2) as u64;
@@ -582,6 +606,70 @@ fn msc_bit_exact_long_interleaving() {
     msc_bit_exact(Interleaving::Long);
 }
 
+/// Problems of a loopback whose FAC identity never changes.
+fn check_fixed_identity(_sc: &Scenario, o: &Outcome) -> Vec<String> {
+    let mut p = Vec::new();
+    if o.first_fac_s().is_none_or(|t| t > MAX_ACQUISITION_S) {
+        p.push(format!("first FAC at {:?} s", o.first_fac_s()));
+    }
+    if o.fac.wrong > 0 || o.fac.breaks > 0 || o.fac_bad_after_lock > 0 {
+        p.push(format!("FACs: {} wrong, {} gaps, {} CRC errors after lock", o.fac.wrong, o.fac.breaks, o.fac_bad_after_lock));
+    }
+    // Until the receiver stops trusting the identity (a few frames) it may look for the
+    // SDC in the wrong frames.
+    if o.sdc_bad > 4 {
+        p.push(format!("{} SDC CRC errors", o.sdc_bad));
+    }
+    if o.sdc.count() < 4 || o.sdc.wrong > 0 || o.sdc.breaks > 0 {
+        p.push(format!("{} SDC blocks good, {} wrong, {} gaps", o.sdc.count(), o.sdc.wrong, o.sdc.breaks));
+    }
+    if o.msc.count() < 12 || o.msc.breaks > 0 || o.msc_complete_wrong > 0 {
+        p.push(format!(
+            "{} of {} MSC frames bit-exact (want ≥ 12), {} gaps, {} complete but wrong",
+            o.msc.count(),
+            o.msc_frames,
+            o.msc.breaks,
+            o.msc_complete_wrong
+        ));
+    }
+    if o.restarts > 0 {
+        p.push(format!("{} restarts", o.restarts));
+    }
+    if o.frame_identity != [false] {
+        p.push(format!("FAC identity trust changed {:?} (want once to untrusted)", o.frame_identity));
+    }
+    p
+}
+
+/// A transmitter that sends the same FAC identity in every frame instead of counting
+/// through the super frame (0, 1, 2): one on 1557 kHz always says "third frame"
+/// (2026-10). The receiver finds the super frame start from the SDC's CRC instead and
+/// decodes SDC and MSC as from any station. Mode B, 9 kHz, 16-QAM MSC, 4-QAM SDC, short
+/// interleaving, like that station.
+#[test]
+fn fixed_fac_identity() {
+    let scenarios: Vec<Scenario> = (0..4u8)
+        .map(|identity| {
+            let tx = TxConfig {
+                occupancy: SpectrumOccupancy::SO_2,
+                msc_mode: MscMode::Qam16Sm,
+                sdc_mode: SdcMode::Qam4,
+                interleaving: Interleaving::Short,
+                ..Default::default()
+            };
+            Scenario {
+                name: format!("identity {identity}"),
+                decode_msc: true,
+                fixed_identity: Some(identity),
+                seed: 40 + u64::from(identity),
+                ..Scenario::new(tx, Link::Iq(0.0), 12.0)
+            }
+        })
+        .collect();
+    let (report, failures) = run_all("Fixed FAC identity, B/SO2 I/Q", &scenarios, check_fixed_identity);
+    assert!(failures.is_empty(), "{report}\nfailing:\n  {}\n", failures.join("\n  "));
+}
+
 /// 64-QAM MSC over every layout (real IF), a slower complement to the B/SO3 tests.
 #[test]
 #[ignore = "long: 16 layouts × 12 s with MSC decoding"]
@@ -739,6 +827,26 @@ fn robustness_channel_models_5_6() {
 // ---------------------------------------------------------------------------------
 // Regression tests for receiver problems found with these loopbacks.
 // ---------------------------------------------------------------------------------
+
+/// A single FAC block announcing another configuration (two audio services instead of
+/// one), as a corrupted block that passes its 8-bit CRC by chance would: the receiver
+/// passes on the FACs around it but not it. Two in a row are a reconfiguration, passed
+/// on from the second, and so is the return to the old configuration.
+#[test]
+fn single_odd_fac_not_passed_on() {
+    let run_with = |odd: Vec<usize>| {
+        let sc = Scenario { odd_facs: odd, seed: 5, ..Scenario::new(TxConfig::default(), Link::Iq(0.0), 8.0) };
+        let o = run(&sc);
+        assert!(o.fac.indices.first().is_some_and(|&j| j < 8), "first FAC {:?}", o.fac.indices.first());
+        assert_eq!(o.fac.wrong, 0);
+        o.fac.indices
+    };
+    let got = run_with(vec![12]);
+    assert!(!got.contains(&12) && got.contains(&11) && got.contains(&13), "FACs passed on: {got:?}");
+    let got = run_with(vec![12, 13]);
+    assert!(!got.contains(&12) && got.contains(&13), "a confirmed reconfiguration: {got:?}");
+    assert!(!got.contains(&14) && got.contains(&15), "and back: {got:?}");
+}
 
 /// The receiver starts with an SO3 layout; when the first FAC announces another
 /// occupancy, `SymbolChain::reconfigure` rebuilds the channel estimator. It used to

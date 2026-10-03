@@ -278,8 +278,14 @@ pub struct Session {
     pub msc_stats: MscStats,
     text: Option<String>,
     samples_in: u64,
+    /// `samples_in` when the last multiplex frame was decoded.
+    last_msc_at: Option<u64>,
     last_channel: Option<decdrm_core::fac::ChannelParams>,
 }
+
+/// Diversity reception shows the combined cells of the last multiplex frame for this
+/// long (three frames), then, while none is decoded, the branch's cells as they come.
+const COMBINED_CELLS_SHOWN: u64 = 3 * 19_200;
 
 impl Session {
     pub fn new(cfg: ReceiverConfig) -> Self {
@@ -311,6 +317,7 @@ impl Session {
             msc_stats: MscStats::default(),
             text: None,
             samples_in: 0,
+            last_msc_at: None,
             last_channel: None,
         }
     }
@@ -322,17 +329,18 @@ impl Session {
     }
 
     /// Plot data; in diversity reception the branch with the better SNR, with the MSC
-    /// constellation of the combined cells; with RSCI input the receiver's spectrum and
-    /// impulse response.
+    /// constellation of the combined cells (while multiplex frames are decoded); with
+    /// RSCI input the receiver's spectrum and impulse response.
     pub fn visuals(&mut self) -> Visuals {
         let shown = self.rx.shown();
+        let combined = self.last_msc_at.is_some_and(|t| self.samples_in.saturating_sub(t) <= COMBINED_CELLS_SHOWN);
         match &mut self.rx {
             Rx::Single(r) => r.visuals(),
             Rx::Mdi(m) => m.visuals.clone(),
             Rx::Diversity(d) => {
                 let mut v = d.branch_mut(shown).visuals();
                 let cells = d.last_cells();
-                if !cells.is_empty() {
+                if combined && !cells.is_empty() {
                     v.chain.msc = cells.to_vec();
                 }
                 v
@@ -524,6 +532,14 @@ impl Session {
                 ReceiverEvent::Resynchronising => {
                     out.push(SessionEvent::Log(format!("{t:7.2}s {who}timing jump, resynchronising")));
                 }
+                ReceiverEvent::FrameIdentity { trusted } => out.push(SessionEvent::Log(if trusted {
+                    format!("{t:7.2}s {who}the FAC identity counts through the super frame again")
+                } else {
+                    format!(
+                        "{t:7.2}s {who}the FAC identity does not count through the super frame (non-standard \
+                         transmitter): the SDC shows where it starts"
+                    )
+                })),
                 ReceiverEvent::Fac(fac) => {
                     self.log_channel_change(&fac, t, &mut out);
                     let changes = self.ens.update_fac(&fac);
@@ -536,7 +552,10 @@ impl Session {
                         self.apply_changes(changes, t, &mut out);
                     }
                 }
-                ReceiverEvent::Msc(frame) => self.on_msc(&frame, &mut out),
+                ReceiverEvent::Msc(frame) => {
+                    self.last_msc_at = Some(self.samples_in);
+                    self.on_msc(&frame, &mut out);
+                }
                 // Diversity branches' cells: their receiver combines them.
                 ReceiverEvent::MscCells(_) => {}
             }

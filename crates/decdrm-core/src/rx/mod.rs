@@ -32,7 +32,7 @@ pub use scatter::DelayDoppler;
 pub use input::{InputFormat, RealChannel};
 
 use crate::dsp::resampler::FracResampler;
-use crate::fac::Fac;
+use crate::fac::{ChannelParams, Fac};
 use crate::fec::qam::MetricKind;
 use crate::params::{RobustnessMode, SAMPLE_RATE, SpectrumOccupancy};
 use crate::{Cplx, Real};
@@ -188,6 +188,10 @@ pub enum ReceiverEvent {
     /// timing and frame sync are re-acquired, keeping the frequency, robustness mode,
     /// sample-rate correction and MSC configuration.
     Resynchronising,
+    /// The FAC identities stopped (`trusted: false`) or started again (`true`) to count
+    /// through the super frame. Meanwhile the frames are counted and an SDC block's CRC
+    /// shows which one starts the super frame (a non-standard transmitter).
+    FrameIdentity { trusted: bool },
 }
 
 /// Snapshot of the receiver's plot data (see [`Receiver::visuals`]).
@@ -317,6 +321,10 @@ pub struct Receiver {
     sro_reports: usize,
     sro_prev: Option<Real>,
     msc_config: Option<chain::MscConfig>,
+    /// Channel configuration of the FACs passed on, and another one that a FAC brought
+    /// and a second FAC has to confirm (see `fac_confirmed`).
+    fac_config: Option<ChannelParams>,
+    fac_pending: Option<ChannelParams>,
     spectrum: InputSpectrum,
     status: RxStatus,
     events: Vec<ReceiverEvent>,
@@ -357,6 +365,8 @@ impl Receiver {
             sro_reports: 0,
             sro_prev: None,
             msc_config: None,
+            fac_config: None,
+            fac_pending: None,
             spectrum: InputSpectrum::new(),
             status: RxStatus::default(),
             events: Vec::new(),
@@ -439,6 +449,8 @@ impl Receiver {
         self.delayed_cnt = DELAYED_TRACKING_FACS;
         self.delayed_done = false;
         self.cp = TimingHealth::default();
+        self.fac_config = None;
+        self.fac_pending = None;
         let (ok, bad, sok, sbad) = (self.status.fac_ok, self.status.fac_bad, self.status.sdc_ok, self.status.sdc_bad);
         self.status = RxStatus { fac_ok: ok, fac_bad: bad, sdc_ok: sok, sdc_bad: sbad, sro_hz: self.sro_hz, ..Default::default() };
     }
@@ -626,6 +638,9 @@ impl Receiver {
                 chain::ChainEvent::Fac(fac) => {
                     self.status.fac_ok += 1;
                     self.on_good_fac();
+                    if !self.fac_confirmed(&fac) {
+                        continue;
+                    }
                     if let Some(chain) = self.chain.as_ref()
                         && chain.needs_reconfigure(&fac)
                     {
@@ -646,6 +661,7 @@ impl Receiver {
                     }
                     self.events.push(ReceiverEvent::Sdc(b));
                 }
+                chain::ChainEvent::FrameIdentity(trusted) => self.events.push(ReceiverEvent::FrameIdentity { trusted }),
                 chain::ChainEvent::Msc(m) => self.events.push(ReceiverEvent::Msc(m)),
                 chain::ChainEvent::MscCells { cells, index, gap, carriers, kmin } => {
                     let time_s = self.samples_in as Real / Real::from(SAMPLE_RATE);
@@ -667,6 +683,26 @@ impl Receiver {
                 self.events.push(ReceiverEvent::Restarted);
             }
         }
+    }
+
+    /// Whether to pass on a FAC with a good CRC: its channel configuration (layout,
+    /// modes, interleaving, number of services) is the current one, or a new one that
+    /// the good FAC before it brought as well. An 8-bit CRC lets about one corrupted FAC
+    /// block in 256 through, and acting on one would rebuild the receiver's decoders and
+    /// the services for a frame (one on 1557 kHz, 2026-10, said 16-QAM SDC and three
+    /// services instead of 4-QAM and one). A real reconfiguration takes effect a frame
+    /// later. The first FAC after acquisition passes at once.
+    fn fac_confirmed(&mut self, fac: &Fac) -> bool {
+        let c = fac.channel;
+        // The fields that change from frame to frame or count down do not count.
+        let cfg = ChannelParams { frame_index: 0, afs_valid: false, reconfiguration_index: 0, toggle: false, ..c };
+        if self.fac_config.is_some_and(|cur| cur != cfg) && self.fac_pending != Some(cfg) {
+            self.fac_pending = Some(cfg);
+            return false;
+        }
+        self.fac_config = Some(cfg);
+        self.fac_pending = None;
+        true
     }
 
     fn on_good_fac(&mut self) {

@@ -261,6 +261,36 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       the monitor on; through VB-Audio cable A (ignored test, inaudible) an I/Q file of
       1 kHz on I and 3 kHz on Q came back 1 kHz left and 3 kHz right at the input's
       level, paced in real time.
+- [x] **Non-standard FAC identity** (2026-10-03) — the user found a station on 1557 kHz
+      (two Taiwanese KiwiSDRs in diversity; mode B, 9 kHz, 16-QAM MSC, 4-QAM SDC, one data
+      service "AMDrm") whose SDC constellation kept switching between 4-QAM and 16-QAM. In
+      the user's video the SDC plot refreshed every 400 ms instead of every 1.2 s, showing
+      the SDC in one frame and MSC cells in the other two: every frame was taken for the
+      first of its super frame, so the station's FAC identity must have been 10 ("last
+      frame") in every frame. The receiver, like Dream (`FAC.cpp`, `OFDMCellMapping.cpp`),
+      followed the identity: it decoded an SDC block in every frame (one in three passed:
+      yellow SDC light, the label arrived) and restarted the super frame at every FAC, so no
+      multiplex frame was ever completed (grey MSC light). *Done:*
+      `SymbolChain::check_identity`: after three good FACs in a row whose identity
+      contradicts the frame count, the identity is no longer trusted. The frames are then
+      counted, and every frame's first symbols are tried as an SDC block until one passes its
+      CRC; that frame starts the super frame. After three failures in a row there, the other
+      frames are tried again while the MSC carries on. Six identities in a row that agree
+      with the count restore the trust. No multiplex frames while the frame index is in
+      doubt. `ReceiverEvent::FrameIdentity`, logged. Tests: loopback `fixed_fac_identity`
+      (identities 0–3 via `Transmitter::set_fixed_fac_identity`). Identity 2 gave 9 good and
+      19 bad SDC blocks and no multiplex frame in 12 s; identities 0, 1 and 3 gave no SDC at
+      all. Now each gives 23/23 multiplex frames bit-exact. Diversity
+      `combining_with_a_fixed_fac_identity`: 89 frames combined against 92 with a standard
+      identity. The 25 recordings and the loopback sweeps decode exactly as before, and none
+      triggers it. `decdrm-kiwi --example capture` records Kiwis' I/Q to WAV files.
+      *False FACs:* the same log showed one FAC with 16-QAM SDC and three services for a
+      single frame: corrupted bits that passed the 8-bit CRC, as one corrupted block in 256
+      does. `Receiver::fac_confirmed`: a FAC with another channel configuration (layout,
+      modes, interleaving, number of services) is passed on only once the next good FAC
+      brings it too, so a real reconfiguration takes effect a frame later (test
+      `single_odd_fac_not_passed_on`). Diversity: the MSC plot shows the combined cells only
+      while multiplex frames are decoded (it had stayed on a stale frame), else the branch's.
 - [x] **DAC replaces EnCodec** (2026-10-02) — the user asked whether SemantiCodec
       would beat EnCodec ("if so replace it"). It would not here: at most 1.40 kbit/s
       with 16 kHz output, ViSQOL 3.48 against EnCodec's 3.58 at 3 kbit/s and 4.00 at 6

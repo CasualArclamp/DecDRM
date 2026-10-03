@@ -77,8 +77,15 @@ struct Outcome {
 /// `seconds` of 16-QAM (protection 1, long interleaving) through DRM channel `model`
 /// at `snr_db` per branch; branch B starts `delay_s` later.
 fn run(model: u8, snr_db: Real, seconds: Real, delay_s: Real, seeds: (u64, u64)) -> Outcome {
+    run_with(model, snr_db, seconds, delay_s, seeds, None)
+}
+
+/// [`run`] with the transmitter's FAC identity fixed
+/// (`Transmitter::set_fixed_fac_identity`).
+fn run_with(model: u8, snr_db: Real, seconds: Real, delay_s: Real, seeds: (u64, u64), identity: Option<u8>) -> Outcome {
     let tx_cfg = TxConfig { msc_mode: MscMode::Qam16Sm, ..TxConfig::default() };
     let mut tx = Transmitter::new(tx_cfg).expect("transmitter");
+    tx.set_fixed_fac_identity(identity);
     let layout = tx.layout();
     // Two receivers far apart: independent fading and noise, clocks 20 ppm slow and
     // 35 ppm fast.
@@ -142,6 +149,21 @@ fn combining_beats_either_branch() {
     assert!(o.diversity >= best + 5, "combined {} vs best branch {best}", o.diversity);
     assert!(o.stats.combined > o.stats.single[0] + o.stats.single[1], "{:?}", o.stats);
     assert!(o.stats.lead_frames.is_some_and(|l| (1..=4).contains(&l)), "branch A leads by ~0.9 s: {:?}", o.stats.lead_frames);
+}
+
+/// A transmitter that sends the same FAC identity in every frame (as one on 1557 kHz,
+/// heard through two KiwiSDRs): each branch finds the super frame start from the SDC,
+/// and combining still gains.
+#[test]
+fn combining_with_a_fixed_fac_identity() {
+    let o = run_with(3, 13.0, 40.0, 0.9, (31, 32), Some(2));
+    println!(
+        "fixed identity, ch3 13 dB, 40 s: combined {} / A {} / B {} of {} frames; {:?}",
+        o.diversity, o.alone[0], o.alone[1], o.frames, o.stats
+    );
+    let best = o.alone[0].max(o.alone[1]);
+    assert!(o.diversity >= best + 5, "combined {} vs best branch {best}", o.diversity);
+    assert!(o.stats.combined > o.stats.single[0] + o.stats.single[1], "{:?}", o.stats);
 }
 
 /// Combined against alone over channels and SNRs.

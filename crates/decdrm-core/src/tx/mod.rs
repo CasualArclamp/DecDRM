@@ -147,6 +147,9 @@ pub struct Transmitter {
     ofdm: OfdmModulator,
     /// Index (0..=2) of the next frame within its super frame.
     frame_index: usize,
+    /// FAC identity sent in every frame instead of the frame index (see
+    /// [`Self::set_fixed_fac_identity`]).
+    fixed_identity: Option<u8>,
     frames_sent: u64,
     /// Data field of the current super frame (always `sdc_capacity_bytes` long).
     sdc_data: Vec<u8>,
@@ -220,6 +223,7 @@ impl Transmitter {
             interleaver,
             depth,
             frame_index: 0,
+            fixed_identity: None,
             frames_sent: 0,
             sdc_data: vec![0; sdc_bytes],
             sdc_cells: Vec::new(),
@@ -281,6 +285,13 @@ impl Transmitter {
         self.frame_index
     }
 
+    /// Send `identity` (0..=3) as the FAC identity of every frame instead of the frame's
+    /// position in its super frame (`None`: the standard identity). Imitates a
+    /// non-compliant transmitter, for testing receivers.
+    pub fn set_fixed_fac_identity(&mut self, identity: Option<u8>) {
+        self.fixed_identity = identity.map(|i| i & 3);
+    }
+
     /// Number of transmission frames produced so far.
     pub fn frames_sent(&self) -> u64 {
         self.frames_sent
@@ -295,13 +306,19 @@ impl Transmitter {
     /// The FAC exactly as it will be sent in the next frame: the caller's FAC with
     /// the frame index and the transmission parameters (occupancy, interleaving,
     /// MSC and SDC mode) taken from the transmitter. The AFS-valid flag is kept for
-    /// the first frame of a super frame and cleared otherwise.
+    /// the first frame of a super frame and cleared otherwise (or both follow
+    /// [`Self::set_fixed_fac_identity`]).
     pub fn fac_for_next_frame(&self, fac: &Fac) -> Fac {
         // `Fac` is `Copy`, so `*fac` makes a copy we can modify.
         let mut f = *fac;
         let ch = &mut f.channel;
         ch.frame_index = self.frame_index as u8;
         ch.afs_valid = fac.channel.afs_valid && self.frame_index == 0;
+        if let Some(id) = self.fixed_identity {
+            // Identity 3 is frame 0 with an invalid AFS index (see `Fac::to_bits`).
+            ch.frame_index = if id == 3 { 0 } else { id };
+            ch.afs_valid = id == 0;
+        }
         ch.occupancy = self.cfg.occupancy;
         ch.interleaving = self.cfg.interleaving;
         ch.msc_mode = self.cfg.msc_mode;

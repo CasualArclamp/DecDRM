@@ -751,6 +751,11 @@ Things to know:
 - Check the log for "unsupported" (CELP/HVXC, DAC in a build without it, or the
   EnCodec of DecDRM 0.4.6 and earlier).
 
+**The log says the FAC identity does not count through the super frame.** The
+transmitter numbers its frames wrongly (one on 1557 kHz marks every frame as the last of
+its super frame). DecDRM then counts the frames itself and finds where each super frame
+starts from the SDC; SDC and MSC decode a few seconds later as usual.
+
 **Audio drops out or stutters in live use.**
 - Check the log for resynchronisations, which come from network gaps in the SDR
   stream.

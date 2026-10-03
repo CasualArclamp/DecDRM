@@ -83,9 +83,23 @@ pub struct ChainVisuals {
 /// time.
 pub const CHAN_ROWS: usize = 64;
 
+/// Good FACs in a row whose identity contradicts the frame count before the identity
+/// is no longer trusted (`SymbolChain::check_identity`). A single false FAC, passing
+/// its 8-bit CRC by chance, makes two.
+const IDENTITY_MISSES: u8 = 3;
+/// Good FACs in a row agreeing with the count that restore the trust (two super
+/// frames; a transmitter stuck on one identity agrees in every third frame at most).
+const IDENTITY_HITS: u8 = 6;
+/// SDC blocks in a row failing at the frame found to start the super frame before
+/// the start is sought again (without a trusted identity).
+const SDC_MISSES: u8 = 3;
+
 pub(super) enum ChainEvent {
     Fac(Fac),
     FacError,
+    /// The FAC identity stopped (`false`) or started again (`true`) to give the frame
+    /// index (see `SymbolChain::check_identity`).
+    FrameIdentity(bool),
     Sdc(SdcBlock),
     Msc(MscFrame),
     /// A diversity branch's multiplex frame of equalised cells, instead of `Msc`:
@@ -127,7 +141,22 @@ pub(super) struct SymbolChain {
     /// spectrum occupancy changes so the estimator's delay line is not lost.
     recent: VecDeque<(Vec<Cplx>, i64, usize)>,
     // Demapper state.
+    /// Index within its super frame of the frame being demapped (see `demap`).
     frame_id: Option<usize>,
+    /// The FAC's identity field gives the frame index, as the standard has it; a
+    /// transmitter whose identities do not count through the super frame loses that
+    /// trust (see `check_identity`).
+    identity_trusted: bool,
+    /// Good FACs in a row whose identity contradicted the frame count (while trusted),
+    /// or agreed with it (while not).
+    identity_misses: u8,
+    identity_hits: u8,
+    /// Without a trusted identity: every frame's first symbols are tried as an SDC
+    /// block; an SDC block's CRC showed which frame starts the super frame; SDC blocks
+    /// failed there in a row since.
+    seek_sdc: bool,
+    sdc_found: bool,
+    sdc_misses: u8,
     fac_cells: Vec<EqCell>,
     last_fac_symbol: usize,
     fac_dec: MlcDecoder,
@@ -181,6 +210,12 @@ impl SymbolChain {
             cells: Vec::new(),
             recent: VecDeque::new(),
             frame_id: None,
+            identity_trusted: true,
+            identity_misses: 0,
+            identity_hits: 0,
+            seek_sdc: false,
+            sdc_found: false,
+            sdc_misses: 0,
             fac_cells: Vec::with_capacity(NUM_FAC_CELLS),
             last_fac_symbol,
             fac_dec,
@@ -467,17 +502,7 @@ impl SymbolChain {
                 self.fac_dec.decode(&self.fac_cells, &mut bits);
                 match Fac::parse(&bits) {
                     Some(fac) => {
-                        // The FAC tells which frame this is; the next one follows.
-                        let this = fac.channel.frame_index as usize;
-                        let resync = self.frame_id.is_some_and(|f| f != this);
-                        if resync || self.frame_id.is_none() {
-                            self.sdc_cells.clear();
-                            self.msc_cells.clear();
-                            self.msc_collecting = false;
-                            self.msc_gap = true;
-                            self.sf_synced = false;
-                        }
-                        self.frame_id = Some(this);
+                        self.check_identity(fac.channel.frame_index as usize, events);
                         events.push(ChainEvent::Fac(fac));
                     }
                     None => events.push(ChainEvent::FacError),
@@ -493,24 +518,55 @@ impl SymbolChain {
         {
             *f = (*f + 1) % FRAMES_PER_SUPERFRAME;
         }
-        let Some(f) = self.frame_id else { return };
+        let Some(mut f) = self.frame_id else { return };
+
+        // The SDC block fills the first symbols of frame 0. While the super frame start
+        // is sought (see `check_identity`), every frame's first symbols are tried as one:
+        // in the other frames the same carriers hold MSC cells, so only frame 0 passes
+        // the CRC.
+        let sdc_symbols = map.mode().sdc_symbols();
+        let seeking = !self.identity_trusted && self.seek_sdc;
+        if s < sdc_symbols && (f == 0 || seeking) {
+            if s == 0 {
+                self.sf_synced = true;
+                self.sdc_cells.clear();
+            }
+            if self.sf_synced {
+                for &c in map.sdc_carriers(s) {
+                    self.sdc_cells.push(cells[c as usize]);
+                }
+                if s == sdc_symbols - 1 && self.sdc_cells.len() == map.sdc_cells_per_superframe {
+                    let block = self.decode_sdc();
+                    self.sdc_cells.clear();
+                    if f != 0 {
+                        // A trial: a good CRC moves the super frame start to this frame
+                        // (whose cells so far were taken for another frame's MSC cells);
+                        // a bad one only says that no SDC block was here.
+                        if block.crc_ok {
+                            self.restart_superframe();
+                            self.frame_id = Some(0);
+                            f = 0;
+                            self.sdc_at_frame_0(true);
+                            events.push(ChainEvent::Sdc(block));
+                        }
+                    } else {
+                        if !self.identity_trusted {
+                            self.sdc_at_frame_0(block.crc_ok);
+                        }
+                        events.push(ChainEvent::Sdc(block));
+                    }
+                }
+            }
+        }
         // Until the FAC of the current frame confirms the frame index, the first
         // frames after acquisition are still usable because the index advanced.
         let sf_sym = f * ns + s;
-
-        if sf_sym == 0 {
-            self.sf_synced = true;
-            self.sdc_cells.clear();
-        }
-        if self.sf_synced && sf_sym < map.mode().sdc_symbols() {
-            for &c in map.sdc_carriers(sf_sym) {
-                self.sdc_cells.push(cells[c as usize]);
-            }
-            if sf_sym == map.mode().sdc_symbols() - 1 && self.sdc_cells.len() == map.sdc_cells_per_superframe {
-                let block = self.decode_sdc();
-                events.push(ChainEvent::Sdc(block));
-                self.sdc_cells.clear();
-            }
+        // Multiplex frames gathered with a doubtful frame index would be garbage: none
+        // while the FAC identity contradicts the count, or without a trusted identity
+        // until an SDC block showed the super frame start.
+        let msc_hold = if self.identity_trusted { self.identity_misses > 0 } else { !self.sdc_found };
+        if msc_hold {
+            return;
         }
 
         // The MSC cells of a super frame form three multiplex frames of N_MUX cells
@@ -545,6 +601,75 @@ impl SymbolChain {
                 }
             }
         }
+    }
+
+    /// The FAC says this is frame `this` of its super frame (ES 201 980 §6.3.3,
+    /// Identity: 00 or 11 the first FAC block, 01 the intermediate one, 10 the last).
+    /// The frame index follows it, as in Dream (`FAC.cpp`, `OFDMCellMapping.cpp`): an
+    /// index other than counted means the count was wrong, and the super frame starts
+    /// afresh. But a transmitter may send the same identity in every frame (one on
+    /// 1557 kHz does, 2026-10), which would put the SDC block in every frame and lose
+    /// every multiplex frame. After [`IDENTITY_MISSES`] contradictions in a row the
+    /// identity is no longer trusted: the frames are counted, and an SDC block's CRC
+    /// shows which one starts the super frame (see `demap`). [`IDENTITY_HITS`]
+    /// identities in a row that agree with the count restore the trust.
+    fn check_identity(&mut self, this: usize, events: &mut Vec<ChainEvent>) {
+        let agrees = self.frame_id == Some(this);
+        if self.identity_trusted {
+            if agrees {
+                self.identity_misses = 0;
+                return;
+            }
+            // (No frame index yet: the first FAC after acquisition.)
+            if self.frame_id.is_some() {
+                self.identity_misses += 1;
+            }
+            self.restart_superframe();
+            self.frame_id = Some(this);
+            if self.identity_misses >= IDENTITY_MISSES {
+                self.identity_trusted = false;
+                self.identity_hits = 0;
+                self.seek_sdc = true;
+                self.sdc_found = false;
+                self.sdc_misses = 0;
+                events.push(ChainEvent::FrameIdentity(false));
+            }
+        } else if agrees {
+            self.identity_hits += 1;
+            if self.identity_hits >= IDENTITY_HITS {
+                self.identity_trusted = true;
+                self.identity_misses = 0;
+                events.push(ChainEvent::FrameIdentity(true));
+            }
+        } else {
+            self.identity_hits = 0;
+        }
+    }
+
+    /// Without a trusted identity, an SDC block decoded at frame 0 (after a trial
+    /// moved frame 0 to it, or as counted): a good one confirms the super frame start,
+    /// [`SDC_MISSES`] bad ones in a row let the other frames be tried again (the frame
+    /// count, and with it the MSC, carries on meanwhile).
+    fn sdc_at_frame_0(&mut self, crc_ok: bool) {
+        if crc_ok {
+            self.seek_sdc = false;
+            self.sdc_found = true;
+            self.sdc_misses = 0;
+        } else {
+            self.sdc_misses = self.sdc_misses.saturating_add(1);
+            if self.sdc_misses >= SDC_MISSES {
+                self.seek_sdc = true;
+            }
+        }
+    }
+
+    /// The frame index was wrong: drop the SDC and MSC cells collected so far.
+    fn restart_superframe(&mut self) {
+        self.sdc_cells.clear();
+        self.msc_cells.clear();
+        self.msc_collecting = false;
+        self.msc_gap = true;
+        self.sf_synced = false;
     }
 
     fn decode_sdc(&mut self) -> SdcBlock {
