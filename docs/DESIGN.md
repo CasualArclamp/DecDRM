@@ -283,7 +283,13 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       all. Now each gives 23/23 multiplex frames bit-exact. Diversity
       `combining_with_a_fixed_fac_identity`: 89 frames combined against 92 with a standard
       identity. The 25 recordings and the loopback sweeps decode exactly as before, and none
-      triggers it. `decdrm-kiwi --example capture` records Kiwis' I/Q to WAV files.
+      triggers it. `decdrm-kiwi --example capture` records Kiwis' I/Q to WAV files. On 60 s
+      of the station from bv3un.ddns.net (2026-10-03 ~12:00 UTC, SNR 6–12 dB) every FAC
+      printed said frame 2. Before: SDC 33 good and 85 bad, 20 multiplex frames. Now: the
+      identity is distrusted after 1.2 s; SDC 33 good and 16 bad, 124 multiplex frames. Its
+      one data service has no application information in the SDC (no type 5 entity;
+      the FAC's application identifier is 1), so there is nothing to decode: a test
+      transmission.
       *False FACs:* the same log showed one FAC with 16-QAM SDC and three services for a
       single frame: corrupted bits that passed the 8-bit CRC, as one corrupted block in 256
       does. `Receiver::fac_confirmed`: a FAC with another channel configuration (layout,
