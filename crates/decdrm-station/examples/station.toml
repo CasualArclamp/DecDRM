@@ -76,6 +76,7 @@ stereo = false               # stereo coding (HE-AAC v2 is always parametric ste
                              # --features dac and `decdrm models download dac`):
                              # 1.5, 3, 6, 12 or 24 kbit/s; default: the highest that fits the stream
 # share = 1.0                # weight when several audio services split the capacity
+                             # (equal parts by default; e.g. 70 and 30 for a 70/30 split)
 # part = "B"                 # "A" puts the stream into the higher protected part
 # hierarchical = false       # HMsym/HMmix: carry this stream in the hierarchical part
 # The audio stream gets whatever the data applications leave; the encoder's bit rate

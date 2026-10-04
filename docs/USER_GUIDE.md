@@ -520,6 +520,8 @@ multiplex: streams, bit rates, codec settings and what goes where.
   - an **audio service** with `[service.audio]`:
     - `codec` = `aac`, `he-aac`, `he-aac-v2`, `xhe-aac`, `opus` or `dac`;
     - `core_rate`, `stereo`;
+    - `share`, the service's part of the audio capacity when there are several audio
+      services: a weight, so 70 and 30 split it 70/30 (default 1, equal parts);
     - `text = [...]`, text messages sent in turn;
     - `[service.audio.input]`, exactly one of `file` (any WAV/FLAC, `loop`), `device`
       (a sound card), `url` (an internet radio stream, see
@@ -552,7 +554,10 @@ multiplex: streams, bit rates, codec settings and what goes where.
   The other settings (bit rates, services, the slideshow folder…) take effect at the
   next start.
 - **The audio streams** get whatever capacity the data leaves, and the encoders' bit
-  rates follow from that.
+  rates follow from that. Several audio services split it by their `share`. In the
+  *Station* form each audio service has an *Audio share* slider in percent, with the
+  stream's bit rate from the last check beside it. Moving one keeps the other audio
+  services' proportions among themselves.
 - **`[afs]`:** alternative frequencies:
   - `[[afs.multiplex]]`: this multiplex elsewhere, in `khz`;
   - `[[afs.other]]`: a service on `drm`, `am`, `fm` (`mhz`) or `dab` (`channels`);

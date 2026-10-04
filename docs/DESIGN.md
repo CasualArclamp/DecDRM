@@ -261,6 +261,16 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       the monitor on; through VB-Audio cable A (ignored test, inaudible) an I/Q file of
       1 kHz on I and 3 kHz on Q came back 1 kHz left and 3 kHz right at the input's
       level, paced in real time.
+- [x] **Audio shares in the Transmitter form** (2026-10-04) — the user asked to change
+      how audio services split the capacity instead of 50/50. The station already
+      weighted them by `share`; the form did not show it. *Done:* with two or more
+      audio services (not counting one in the hierarchical layer), each gets an *Audio
+      share* slider (1–99 %) and its stream rate from the last check. Moving one writes
+      every audio service's `share` as percentages, the others keeping their proportions
+      among themselves, rounded to 0.1 (`rebalance`). An audio service added after
+      shares were set gets the others' mean share. Test `audio_shares`: 70/30, then a
+      third service at 20 % gives 56/24/20, and the station's plan splits the stream
+      rates in those ratios.
 - [x] **Testing and releases on GitHub Actions** (2026-10-03) — the user asked to move
       the testing to GitHub Actions. The repository is public, so the runners are free;
       the old Linux workflow ran only by hand, to save a private repository's minutes.

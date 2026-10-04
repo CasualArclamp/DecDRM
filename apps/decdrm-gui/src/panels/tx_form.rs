@@ -41,6 +41,8 @@ pub struct Segment {
     pub audio: bool,
     /// Carried in part A, the higher protected part.
     pub part_a: bool,
+    /// The audio service (position in the configuration) whose stream this is.
+    pub service: Option<usize>,
 }
 
 impl PlanBar {
@@ -56,7 +58,8 @@ impl PlanBar {
                 let (bytes, part_a) = (s.bytes(), s.lengths.part_a > 0);
                 match &s.content {
                     decdrm_station::StreamContent::Audio { service } => {
-                        Segment { label: format!("{} audio", label_of(*service)), bytes, audio: true, part_a }
+                        let label = format!("{} audio", label_of(*service));
+                        Segment { label, bytes, audio: true, part_a, service: Some(*service) }
                     }
                     decdrm_station::StreamContent::Data { apps, .. } => {
                         let names: Vec<String> = apps
@@ -64,12 +67,18 @@ impl PlanBar {
                             .filter_map(|a| cfg.services.get(a.service).and_then(|sv| sv.applications().nth(a.index)))
                             .map(|app| format!("{:?}", app.kind).to_lowercase())
                             .collect();
-                        Segment { label: names.join(" + "), bytes, audio: false, part_a }
+                        Segment { label: names.join(" + "), bytes, audio: false, part_a, service: None }
                     }
                 }
             })
             .collect();
         Self { capacity, segments }
+    }
+
+    /// Bit rate of the audio stream of service `service` (position), kbit/s.
+    pub fn audio_kbps(&self, service: usize) -> Option<f64> {
+        // Bytes per 400 ms frame: × 8 bits / 400 ms.
+        self.segments.iter().find(|s| s.service == Some(service)).map(|s| s.bytes as f64 * 8.0 / 400.0)
     }
 }
 
@@ -370,6 +379,87 @@ struct Parts {
     turned_on: bool,
 }
 
+/// How the audio services split the capacity the data applications leave (the
+/// station's `share` weights, see `decdrm_station::plan`), and a new share that a
+/// service's slider asked for while the services were drawn.
+struct Shares {
+    /// Weight of each service's audio stream; `None` for data services and for an audio
+    /// stream in the hierarchical layer, whose length the channel fixes.
+    weights: Vec<Option<f64>>,
+    /// Some audio service has an explicit `share`.
+    explicit: bool,
+    /// Service and its new share in percent.
+    request: Option<(usize, f64)>,
+}
+
+impl Shares {
+    fn of(list: &ArrayOfTables) -> Self {
+        let explicit = list.iter().filter_map(|s| s.get("audio")?.as_table_like()).any(|a| a.contains_key("share"));
+        Self { weights: list.iter().map(audio_weight).collect(), explicit, request: None }
+    }
+
+    /// Service `i`'s part of the audio capacity in percent, when two or more audio
+    /// services split it.
+    fn percent(&self, i: usize) -> Option<f64> {
+        let w = self.weights.get(i).copied().flatten()?;
+        let (n, total) = self.weights.iter().flatten().fold((0, 0.0), |(n, t), w| (n + 1, t + w));
+        (n >= 2).then(|| 100.0 * w / total)
+    }
+
+    /// Weight for an audio service added now: the others' mean, so it gets as much as
+    /// an average one (without explicit shares, the default 1).
+    fn for_new(&self) -> Option<f64> {
+        let (n, total) = self.weights.iter().flatten().fold((0, 0.0), |(n, t), w| (n + 1, t + w));
+        (self.explicit && n > 0).then(|| round_share(total / f64::from(n)))
+    }
+}
+
+/// The share weight of a service's audio stream (see [`Shares::weights`]).
+fn audio_weight(svc: &Table) -> Option<f64> {
+    let audio = svc.get("audio")?.as_table_like()?;
+    if get_bool(audio, "hierarchical").unwrap_or(false) {
+        return None;
+    }
+    Some(get_num(audio, "share").filter(|w| w.is_finite() && *w > 0.0).unwrap_or(1.0))
+}
+
+/// The weights, in percent, after service `k`'s share was set to `percent`: the other
+/// audio services keep their proportions among themselves (equal parts if they had
+/// none). Rounded to 0.1, at least 0.1 (a share must be positive).
+fn rebalance(weights: &[Option<f64>], k: usize, percent: f64) -> Vec<Option<f64>> {
+    let others: Vec<f64> = weights.iter().enumerate().filter(|&(j, _)| j != k).filter_map(|(_, w)| *w).collect();
+    let (n, sum) = (others.len() as f64, others.iter().sum::<f64>());
+    let rest = 100.0 - percent;
+    weights
+        .iter()
+        .enumerate()
+        .map(|(j, w)| {
+            w.map(|w| {
+                if j == k {
+                    round_share(percent)
+                } else if sum > 0.0 {
+                    round_share(rest * w / sum)
+                } else {
+                    round_share(rest / n)
+                }
+            })
+        })
+        .collect()
+}
+
+fn round_share(w: f64) -> f64 {
+    ((w * 10.0).round() / 10.0).max(0.1)
+}
+
+/// Write the weights into the services' audio tables.
+fn apply_shares(list: &mut ArrayOfTables, weights: &[Option<f64>]) {
+    for (svc, w) in list.iter_mut().zip(weights) {
+        if let (Some(w), Some(audio)) = (w, svc.get_mut("audio").and_then(Item::as_table_like_mut)) {
+            set(audio, "share", *w);
+        }
+    }
+}
+
 fn services(ui: &mut Ui, doc: &mut DocumentMut, ctx: &mut FormCtx) -> bool {
     let mut changed = false;
     let protection_b = doc.get("channel").and_then(Item::as_table_like).and_then(|ch| get_int(ch, "protection_b")).unwrap_or(1);
@@ -378,6 +468,7 @@ fn services(ui: &mut Ui, doc: &mut DocumentMut, ctx: &mut FormCtx) -> bool {
         doc.as_table_mut().insert("service", Item::ArrayOfTables(ArrayOfTables::new()));
     }
     let list = doc.get_mut("service").and_then(Item::as_array_of_tables_mut).expect("made above");
+    let mut shares = Shares::of(list);
     let mut remove_at = None;
     let count = list.len();
     for (i, svc) in list.iter_mut().enumerate() {
@@ -395,9 +486,13 @@ fn services(ui: &mut Ui, doc: &mut DocumentMut, ctx: &mut FormCtx) -> bool {
                 });
             });
             ui.add_space(4.0);
-            changed |= service(ui, svc, i, ctx, &mut parts);
+            changed |= service(ui, svc, i, ctx, &mut parts, &mut shares);
         });
         ui.add_space(8.0);
+    }
+    if let Some((k, percent)) = shares.request {
+        apply_shares(list, &rebalance(&shares.weights, k, percent));
+        changed = true;
     }
     if let Some(i) = remove_at {
         list.remove(i);
@@ -406,7 +501,11 @@ fn services(ui: &mut Ui, doc: &mut DocumentMut, ctx: &mut FormCtx) -> bool {
     if count < 4 {
         ui.horizontal(|ui| {
             if ui.button("+ Audio service").clicked() {
-                list.push(new_service(count, true));
+                let mut svc = new_service(count, true);
+                if let Some(w) = shares.for_new() {
+                    set(child(&mut svc, "audio"), "share", w);
+                }
+                list.push(svc);
                 changed = true;
             }
             if ui.button("+ Data service").clicked() {
@@ -461,7 +560,7 @@ fn new_service(n: usize, audio: bool) -> Table {
     t
 }
 
-fn service(ui: &mut Ui, svc: &mut Table, i: usize, ctx: &mut FormCtx, parts: &mut Parts) -> bool {
+fn service(ui: &mut Ui, svc: &mut Table, i: usize, ctx: &mut FormCtx, parts: &mut Parts, shares: &mut Shares) -> bool {
     let mut changed = false;
     let is_audio = svc.get("audio").is_some_and(Item::is_table_like);
     grid(ui, ("tx_form_service", i), |ui| {
@@ -547,7 +646,7 @@ fn service(ui: &mut Ui, svc: &mut Table, i: usize, ctx: &mut FormCtx, parts: &mu
     ui.add_space(6.0);
     if is_audio {
         let audio = child(svc, "audio");
-        changed |= audio_settings(ui, audio, i, ctx, parts);
+        changed |= audio_settings(ui, audio, i, ctx, parts, shares);
     } else if svc.get("data").is_some_and(Item::is_table_like) {
         ui.label(RichText::new("Main application").strong());
         let data = child(svc, "data");
@@ -614,7 +713,14 @@ impl InputKind {
     }
 }
 
-fn audio_settings(ui: &mut Ui, audio: &mut dyn TableLike, i: usize, ctx: &mut FormCtx, parts: &mut Parts) -> bool {
+fn audio_settings(
+    ui: &mut Ui,
+    audio: &mut dyn TableLike,
+    i: usize,
+    ctx: &mut FormCtx,
+    parts: &mut Parts,
+    shares: &mut Shares,
+) -> bool {
     let mut changed = false;
     let codec = get_str(audio, "codec").unwrap_or_else(|| "he-aac".into());
     let c = canon(&codec);
@@ -690,6 +796,23 @@ fn audio_settings(ui: &mut Ui, audio: &mut dyn TableLike, i: usize, ctx: &mut Fo
                 }
                 changed = true;
             }
+            ui.end_row();
+        }
+        if let Some(percent) = shares.percent(i) {
+            row_label(ui, "Audio share").on_hover_text(
+                "This service's part of the capacity the data applications leave; the other audio services keep \
+                 their proportions among themselves (the station file's `share`)",
+            );
+            ui.horizontal(|ui| {
+                let mut p = percent.round();
+                if ui.add(egui::Slider::new(&mut p, 1.0..=99.0).integer().suffix(" %")).changed() {
+                    shares.request = Some((i, p));
+                }
+                // The rate of the last check (moving the slider checks again).
+                if let Some(kbps) = ctx.bar.and_then(|b| b.audio_kbps(i)) {
+                    ui.label(RichText::new(format!("{kbps:.1} kbit/s stream")).weak());
+                }
+            });
             ui.end_row();
         }
         row_label(ui, "Protection");
@@ -1498,6 +1621,47 @@ hierarchical = true
         set(ch, "protection_a", 1i64);
         keep_part_a_stronger(ch);
         assert_eq!(get_int(ch, "protection_a"), Some(1));
+    }
+
+    #[test]
+    fn audio_shares() {
+        // 20 kHz of 64-QAM: room for three HE-AAC services next to the data.
+        let text = "[channel]\nmode = \"A\"\noccupancy = 5\nmsc_mode = \"64-QAM\"\n[output]\nfile = \"out.wav\"\n";
+        let mut doc: DocumentMut = text.parse().unwrap();
+        doc.as_table_mut().insert("service", Item::ArrayOfTables(ArrayOfTables::new()));
+        let list = doc.get_mut("service").and_then(Item::as_array_of_tables_mut).unwrap();
+        list.push(new_service(0, true));
+        list.push(new_service(1, false));
+        list.push(new_service(2, true));
+        // Two audio services, 50/50; a data service has no share.
+        let shares = Shares::of(list);
+        assert_eq!(shares.weights, [Some(1.0), None, Some(1.0)]);
+        assert_eq!((shares.percent(0), shares.percent(1)), (Some(50.0), None));
+        assert_eq!(shares.for_new(), None, "no explicit shares: a new service gets the default");
+        // 70/30.
+        apply_shares(list, &rebalance(&shares.weights, 0, 70.0));
+        let shares = Shares::of(list);
+        assert_eq!(shares.weights, [Some(70.0), None, Some(30.0)]);
+        // A third audio service gets an average share; the others keep theirs.
+        assert_eq!(shares.for_new(), Some(50.0));
+        let mut svc = new_service(3, true);
+        set(child(&mut svc, "audio"), "share", shares.for_new().unwrap());
+        list.push(svc);
+        // Setting the new one to 20 % keeps 70:30 between the first two.
+        let shares = Shares::of(list);
+        apply_shares(list, &rebalance(&shares.weights, 3, 20.0));
+        assert_eq!(Shares::of(list).weights, [Some(56.0), None, Some(24.0), Some(20.0)]);
+        // The station splits the audio capacity (what the data service leaves)
+        // accordingly.
+        let pages = concat!(env!("CARGO_MANIFEST_DIR"), "/../../crates/decdrm-station/examples/journaline.toml");
+        set(child(list.get_mut(1).unwrap(), "data"), "path", pages);
+        let cfg: decdrm_station::StationConfig = toml::from_str(&doc.to_string()).unwrap();
+        let plan = cfg.validate().unwrap();
+        let (a, b, c) = (plan.service_bitrate(0), plan.service_bitrate(2), plan.service_bitrate(3));
+        assert!((a / b - 56.0 / 24.0).abs() < 0.05 && (a / c - 56.0 / 20.0).abs() < 0.05, "{a} {b} {c}");
+        // Others with no weight left share the rest equally; a share stays positive.
+        assert_eq!(rebalance(&[Some(1.0), Some(0.0), None], 0, 99.95), [Some(100.0), Some(0.1), None]);
+        assert_eq!(rebalance(&[Some(2.0), Some(2.0), Some(2.0)], 1, 40.0), [Some(30.0), Some(40.0), Some(30.0)]);
     }
 
     #[test]
