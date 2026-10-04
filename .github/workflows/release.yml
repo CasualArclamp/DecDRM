@@ -107,7 +107,8 @@ jobs:
             echo
             echo "SHA-256:"
             echo '```'
-            sha256sum decdrm-gui.exe decdrm.exe
+            # (Git Bash's sha256sum marks binary mode with a star: "hash *file".)
+            sha256sum decdrm-gui.exe decdrm.exe | sed 's/ \*/  /'
             echo '```'
           } >> notes.md
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2> /dev/null); then
