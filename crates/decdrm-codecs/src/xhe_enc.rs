@@ -43,6 +43,10 @@
 //! decoders normalise the level by several dB). A unit test checks that FDK-AAC decodes the
 //! DRM stream to exactly the PCM it decodes from libxaac's own MPEG stream.
 //!
+//! [`audio_specific_config_from_drm`] goes the other way for any DRM service: it turns the
+//! Static Config back into a standard AudioSpecificConfig, so that a USAC decoder without
+//! DRM support (libxaac's) can decode the same access units.
+//!
 //! libxaac v0.1.13 needs build-time patches for DRM (see `decdrm-xaac-sys`): it accepted only
 //! 64 and 96 kbit/s for USAC, rejected the 9.6/19.2 kHz core rates, and at DRM's low rates
 //! coded the whole core band with a threshold in quiet below the 16-bit noise floor, which
@@ -100,7 +104,7 @@ use decdrm_xaac_sys as ffi;
 
 use crate::CodecError;
 use crate::bits::{BitBuf, BitReader};
-use crate::sdc::AudioInfo;
+use crate::sdc::{AudioCodingField, AudioInfo, AudioMode};
 
 /// The sampling rates DRM allows for xHE-AAC (§6.4.3.10, SDC entity 9 "audio sampling
 /// rate"). The encoder's input rate must be one of them; it is also the decoder's output
@@ -1254,7 +1258,7 @@ impl FillElement {
 }
 
 // ---------------------------------------------------------------------------------------
-// UsacConfig → xHE-AAC Static Config
+// UsacConfig ↔ xHE-AAC Static Config
 // ---------------------------------------------------------------------------------------
 
 /// `escapedValue(n1, n2, n3)` (ISO/IEC 23003-3).
@@ -1563,6 +1567,145 @@ fn drm_static_config(usac: &UsacConfigInfo) -> Result<Vec<u8>, CodecError> {
     Ok(w.as_bytes().to_vec())
 }
 
+/// The MPEG-4 AudioSpecificConfig (ISO/IEC 14496-3 §1.6.2.1) of a DRM xHE-AAC service,
+/// with its xHE-AAC Static Config (ES 201 980 §5.3.2, tables 4–8) as a standard UsacConfig
+/// (ISO/IEC 23003-3 §5.2). With it, a USAC decoder that does not know DRM (libxaac's) can
+/// decode the service's access units — each DRM audio frame without its CRC-16 — e.g. to
+/// cross-check FDK-AAC on a broadcast.
+///
+/// The reverse of the encoder's `drm_static_config`, for any DRM configuration: the
+/// channel element becomes element 0 with `tw_mdct` = 0 (which DRM leaves out), its MPS212
+/// configuration gets MPEG's syntax, and the extension elements and the config extension,
+/// whose syntax DRM keeps, are copied. The padding of the Static Config is dropped.
+pub fn audio_specific_config_from_drm(info: &AudioInfo) -> Result<Vec<u8>, CodecError> {
+    if info.coding != AudioCodingField::XheAac {
+        return Err(CodecError::InvalidConfig(format!(
+            "audio coding {:?} is not xHE-AAC",
+            info.coding
+        )));
+    }
+    let channel_configuration: u8 = match info.mode {
+        AudioMode::Mono => 1,
+        AudioMode::Stereo => 2,
+        mode => {
+            return Err(CodecError::InvalidConfig(format!(
+                "audio mode {mode:?} is not defined for xHE-AAC"
+            )));
+        }
+    };
+    let rate = info.sample_rate().ok_or_else(|| {
+        CodecError::InvalidConfig(format!("sampling rate code {}", info.sample_rate_code))
+    })?;
+    let mut r = BitReader::new(&info.xhe_aac_config);
+    let index = r.bits(2)? as u8 + 1; // coreSbrFrameLengthIndexDrm + 1
+    let sbr_present = index >= 2;
+
+    // The channel element's configuration (tables 6 and 7).
+    let mut element = BitBuf::new();
+    element.push_bit(0); // tw_mdct
+    element.push_bit(r.bit()?); // noiseFilling
+    if sbr_present {
+        SbrConfig::read(&mut r)?.write(&mut element);
+    }
+    if channel_configuration == 2 && sbr_present {
+        let stereo_config_index = r.bits(2)?;
+        element.push(u64::from(stereo_config_index), 2);
+        if stereo_config_index > 0 {
+            mps212_config_from_drm(&mut r, stereo_config_index, &mut element)?;
+        }
+    }
+    // The extension elements (table 5): UsacExtElementConfig() as in MPEG.
+    let num_ext = read_escaped(&mut r, 2, 4, 8)?;
+    let mut ext_elements = Vec::new();
+    for _ in 0..num_ext {
+        let start = r.position();
+        read_escaped(&mut r, 4, 8, 16)?; // usacExtElementType
+        let config_len = read_escaped(&mut r, 4, 8, 16)?;
+        if r.bit()? == 1 {
+            read_escaped(&mut r, 8, 16, 0)?; // usacExtElementDefaultLength − 1
+        }
+        r.bit()?; // usacExtElementPayloadFrag
+        r.skip(8 * config_len as usize)?;
+        ext_elements.push(r.slice(start, r.position()));
+    }
+    // usacConfigExtensionPresent and UsacConfigExtension(), also as in MPEG.
+    let start = r.position();
+    if r.bit()? == 1 {
+        for _ in 0..=read_escaped(&mut r, 2, 4, 8)? {
+            read_escaped(&mut r, 4, 8, 16)?; // usacConfigExtType
+            let len = read_escaped(&mut r, 4, 8, 16)?;
+            r.skip(8 * len as usize)?;
+        }
+    }
+    let config_extension = r.slice(start, r.position());
+
+    // The 4-bit samplingFrequencyIndex table is the start of the USAC one; DRM's
+    // 9.6/19.2/38.4 kHz are written explicitly.
+    let sf_index = USAC_SAMPLING_FREQUENCIES
+        .iter()
+        .position(|&f| f == rate)
+        .map(|i| i as u64);
+    let mut w = BitBuf::new();
+    w.push(31, 5); // audioObjectType 42: escape, then 42 − 32
+    w.push(42 - 32, 6);
+    match sf_index.filter(|&i| i < 13) {
+        Some(i) => w.push(i, 4),
+        None => {
+            w.push(0xF, 4);
+            w.push(u64::from(rate), 24);
+        }
+    }
+    w.push(u64::from(channel_configuration), 4);
+    // UsacConfig()
+    match sf_index {
+        Some(i) => w.push(i, 5), // usacSamplingFrequencyIndex
+        None => {
+            w.push(0x1F, 5);
+            w.push(u64::from(rate), 24);
+        }
+    }
+    w.push(u64::from(index), 3); // coreSbrFrameLengthIndex
+    w.push(u64::from(channel_configuration), 5); // channelConfigurationIndex
+    // UsacDecoderConfig(): the channel element first, as DRM orders the elements.
+    write_escaped(&mut w, num_ext, 4, 8, 16); // numElements − 1
+    w.push(u64::from(channel_configuration - 1), 2); // ID_USAC_SCE (0) or ID_USAC_CPE (1)
+    w.append(&element);
+    for e in &ext_elements {
+        w.push(3, 2); // ID_USAC_EXT
+        w.append(e);
+    }
+    w.append(&config_extension);
+    Ok(w.as_bytes().to_vec())
+}
+
+/// `xHEAACMps212Config()` (ES 201 980 §5.3.2 table 8) as MPEG's `Mps212Config()`:
+/// `bsTempShapeConfigDrm` = 1 stands for `bsTempShapeConfig` = 3 (TSD) and DRM has no
+/// `bsDecorrConfig` (0), as FDK-AAC's `SpatialDecParseMps212Config` reads it.
+fn mps212_config_from_drm(
+    r: &mut BitReader<'_>,
+    stereo_config_index: u32,
+    w: &mut BitBuf,
+) -> Result<(), CodecError> {
+    w.push(u64::from(r.bits(3)?), 3); // bsFreqRes
+    w.push(u64::from(r.bits(3)?), 3); // bsFixedGainDMX
+    w.push(u64::from(3 * r.bit()?), 2); // bsTempShapeConfig
+    w.push(0, 2); // bsDecorrConfig
+    w.push_bit(r.bit()?); // bsHighRateMode
+    w.push_bit(r.bit()?); // bsPhaseCoding
+    let phase_present = r.bit()?;
+    w.push_bit(phase_present); // bsOttBandsPhasePresent
+    if phase_present == 1 {
+        w.push(u64::from(r.bits(5)?), 5); // bsOttBandsPhase
+    }
+    // bsResidualCoding follows from stereoConfigIndex (ISO/IEC 23003-3 table 72).
+    if stereo_config_index > 1 {
+        w.push(u64::from(r.bits(5)?), 5); // bsResidualBands
+        w.push_bit(r.bit()?); // bsPseudoLr
+    }
+    // bsEnvQuantMode would follow bsTempShapeConfig = 2, which DRM cannot signal.
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1847,6 +1990,19 @@ mod tests {
         }
     }
 
+    /// Input frame `f` of `n` samples per channel: 440 Hz (left) or 660 Hz (right) plus
+    /// 1250 Hz.
+    fn tones(f: usize, n: usize, ch: usize, fs: f64) -> Vec<f32> {
+        (0..n * ch)
+            .map(|i| {
+                let t = (f * n + i / ch) as f64 / fs;
+                let fr = if i % ch == 0 { 440.0 } else { 660.0 };
+                (0.35 * (2.0 * std::f64::consts::PI * fr * t).sin()
+                    + 0.15 * (2.0 * std::f64::consts::PI * 1250.0 * t).sin()) as f32
+            })
+            .collect()
+    }
+
     /// The DRM access units carry libxaac's channel elements unchanged: FDK decodes the
     /// DRM stream (TT_DRM, configured from SDC type 9) to exactly the PCM it decodes from
     /// libxaac's own MPEG stream (raw transport, AudioSpecificConfig, AudioPreRoll).
@@ -1862,16 +2018,7 @@ mod tests {
         let (mut raw_pcm, mut drm_pcm) = (Vec::new(), Vec::new());
         let mut withheld = 0;
         for f in 0..frames {
-            let pcm: Vec<f32> = (0..n * ch)
-                .map(|i| {
-                    let t = (f * n + i / ch) as f64 / fs;
-                    let fr = if i % ch == 0 { 440.0 } else { 660.0 };
-                    (0.35 * (2.0 * std::f64::consts::PI * fr * t).sin()
-                        + 0.15 * (2.0 * std::f64::consts::PI * 1250.0 * t).sin())
-                        as f32
-                })
-                .collect();
-            let aus = enc.encode(&pcm).unwrap();
+            let aus = enc.encode(&tones(f, n, ch, fs)).unwrap();
             assert_eq!(aus.len(), 1);
             // libxaac's own access unit of this call (empty while it withholds frames).
             let out_bytes = enc.output_cfg.i_out_bytes.max(0) as usize;
@@ -1919,6 +2066,207 @@ mod tests {
                 "{rate} Hz {ch} ch {br}: {diff} of {n} samples differ"
             );
         }
+    }
+
+    /// The Static Config converted back is libxaac's UsacConfig (DecDRM's fill element in
+    /// place of the AudioPreRoll element), and FDK decodes the DRM access units as plain
+    /// MPEG USAC (raw transport, that AudioSpecificConfig) to exactly the PCM it decodes in
+    /// DRM mode.
+    #[test]
+    fn drm_config_converts_back_to_mpeg() {
+        for (rate, ch, br, ratio) in [
+            (24_000, 1, 12_000, XheSbrRatio::Ratio2To1),
+            (24_000, 2, 16_000, XheSbrRatio::Ratio2To1),
+            (32_000, 1, 12_000, XheSbrRatio::Ratio8To3),
+            (32_000, 2, 16_000, XheSbrRatio::Ratio8To3),
+            (48_000, 1, 16_000, XheSbrRatio::Ratio4To1),
+            (16_000, 1, 16_000, XheSbrRatio::None),
+            // Not in the 4-bit table: an explicit sampling frequency.
+            (19_200, 1, 10_000, XheSbrRatio::Ratio2To1),
+        ] {
+            let mut cfg = XheAacConfig::new(rate, ch, br);
+            cfg.sbr = XheSbrMode::Fixed(ratio);
+            let mut enc = XheAacEncoder::new(cfg).unwrap();
+            let info = enc.audio_info();
+            let asc = audio_specific_config_from_drm(&info).unwrap();
+            let ours = parse_audio_specific_config(&asc).unwrap();
+            let libxaac = parse_audio_specific_config(enc.usac_audio_specific_config()).unwrap();
+            assert_eq!(ours.sampling_frequency, libxaac.sampling_frequency);
+            assert_eq!(
+                ours.core_sbr_frame_length_index,
+                libxaac.core_sbr_frame_length_index
+            );
+            assert_eq!(ours.channel_configuration, libxaac.channel_configuration);
+            assert_eq!(ours.elements[0], libxaac.elements[1], "{rate} Hz {ch} ch");
+            assert!(matches!(
+                ours.elements[1..],
+                [UsacElement::Ext {
+                    ext_type: ID_EXT_ELE_FILL,
+                    ..
+                }]
+            ));
+            // FDK decodes no 19.2 kHz USAC stream in MPEG mode, not even libxaac's own (a
+            // parse error on every frame), so that rate is checked by configuration only.
+            if rate == 19_200 {
+                continue;
+            }
+
+            let mut drm_dec = FdkRef::new(decdrm_fdk_sys::TT_DRM, &info.to_type9_bytes());
+            let mut mpeg_dec = FdkRef::new(decdrm_fdk_sys::TT_MP4_RAW, &asc);
+            let (n, fs) = (enc.frame_len(), f64::from(rate));
+            let (mut samples, mut differ) = (0, 0);
+            for f in 0..20 {
+                for au in enc.encode(&tones(f, n, usize::from(ch), fs)).unwrap() {
+                    let mut drm = au.data.clone();
+                    drm.extend_from_slice(&[0x12, 0x34]); // the receiver passes the CRC along
+                    match (drm_dec.decode(&drm), mpeg_dec.decode(&au.data)) {
+                        (Some(a), Some(b)) => {
+                            assert_eq!(a.len(), b.len());
+                            samples += a.len();
+                            differ += a.iter().zip(&b).filter(|(x, y)| x != y).count();
+                        }
+                        (a, b) => assert_eq!(a.is_some(), b.is_some(), "frame {f}"),
+                    }
+                }
+            }
+            assert!(
+                samples >= 15 * n * usize::from(ch),
+                "{rate} Hz {ch} ch: {samples}"
+            );
+            assert_eq!(
+                differ, 0,
+                "{rate} Hz {ch} ch {ratio:?}: {differ} of {samples} samples differ"
+            );
+        }
+    }
+
+    /// CNR-1 on 13835 kHz (2026-10-06): mono, 32 kHz, 8:3 SBR with the harmonic
+    /// transposer, no extension elements. libxaac decoded the broadcast's access units
+    /// with this AudioSpecificConfig to the PCM FDK-AAC decodes in DRM mode.
+    #[test]
+    fn mpeg_config_of_a_broadcast() {
+        let info = AudioInfo::from_type9_bytes(&[0xC5, 0x00, 0x70, 0x9A, 0xE8]).unwrap();
+        assert_eq!(
+            audio_specific_config_from_drm(&info).unwrap(),
+            [0xF9, 0x4A, 0x25, 0x41, 0x01, 0x84, 0xD7, 0x40]
+        );
+        let aac = AudioInfo::aac(24_000, true, AudioMode::Mono).unwrap();
+        assert!(audio_specific_config_from_drm(&aac).is_err());
+    }
+
+    /// MPS212 in DRM syntax (table 8) becomes MPEG's `Mps212Config()`: without residual
+    /// (stereoConfigIndex 1, 4:1 SBR, TSD on) and with it (stereoConfigIndex 2, 2:1 SBR).
+    #[test]
+    fn mps212_config_converts_to_mpeg_syntax() {
+        for (index_drm, sci, rate) in [(3u32, 1u32, 48_000), (2, 2, 32_000)] {
+            let tsd = sci == 1;
+            let mut w = BitBuf::new();
+            w.push(u64::from(index_drm), 2); // coreSbrFrameLengthIndexDrm
+            w.push_bit(1); // noiseFilling
+            sbr(5).write(&mut w);
+            w.push(u64::from(sci), 2); // stereoConfigIndex
+            w.push(5, 3); // bsFreqRes: 7 parameter bands
+            w.push(2, 3); // bsFixedGainDMX
+            w.push_bit(u32::from(tsd)); // bsTempShapeConfigDrm
+            w.push_bit(1); // bsHighRateMode
+            w.push_bit(1); // bsPhaseCoding
+            w.push_bit(1); // bsOttBandsPhasePresent
+            w.push(6, 5); // bsOttBandsPhase
+            if sci > 1 {
+                w.push(4, 5); // bsResidualBands
+                w.push_bit(1); // bsPseudoLr
+            }
+            write_escaped(&mut w, 0, 2, 4, 8); // numExtElements
+            w.push_bit(0); // usacConfigExtensionPresent
+            let info = AudioInfo::xhe_aac(rate, true, w.as_bytes().to_vec()).unwrap();
+            let asc = audio_specific_config_from_drm(&info).unwrap();
+
+            let mut r = BitReader::new(&asc);
+            // Object type, sampling frequency index, channel configuration,
+            // usacSamplingFrequencyIndex.
+            r.skip(5 + 6 + 4 + 4 + 5).unwrap();
+            assert_eq!(r.bits(3).unwrap(), index_drm + 1, "coreSbrFrameLengthIndex");
+            assert_eq!(r.bits(5).unwrap(), 2, "channelConfigurationIndex");
+            assert_eq!(
+                read_escaped(&mut r, 4, 8, 16).unwrap(),
+                0,
+                "numElements - 1"
+            );
+            assert_eq!(r.bits(2).unwrap(), 1, "ID_USAC_CPE");
+            assert_eq!(r.bits(2).unwrap(), 0b01, "tw_mdct, noiseFilling");
+            assert_eq!(SbrConfig::read(&mut r).unwrap(), sbr(5));
+            assert_eq!(r.bits(2).unwrap(), sci, "stereoConfigIndex");
+            let fields = [3, 3, 2, 2, 1, 1, 1, 5].map(|n| r.bits(n).unwrap());
+            // bsFreqRes, bsFixedGainDMX, bsTempShapeConfig, bsDecorrConfig, bsHighRateMode,
+            // bsPhaseCoding, bsOttBandsPhasePresent, bsOttBandsPhase
+            assert_eq!(fields, [5, 2, if tsd { 3 } else { 0 }, 0, 1, 1, 1, 6]);
+            if sci > 1 {
+                assert_eq!(r.bits(5).unwrap(), 4, "bsResidualBands");
+                assert_eq!(r.bit().unwrap(), 1, "bsPseudoLr");
+            }
+            assert_eq!(r.bit().unwrap(), 0, "usacConfigExtensionPresent");
+            assert!(r.remaining() < 8, "only padding may follow");
+            // FDK-AAC accepts both forms.
+            drop(FdkRef::new(decdrm_fdk_sys::TT_DRM, &info.to_type9_bytes()));
+            drop(FdkRef::new(decdrm_fdk_sys::TT_MP4_RAW, &asc));
+        }
+    }
+
+    /// Extension elements and the config extension are copied bit for bit; 9.6 kHz needs
+    /// an explicit sampling frequency in the AudioSpecificConfig.
+    #[test]
+    fn mpeg_config_copies_extensions() {
+        let fill = |w: &mut BitBuf| {
+            write_escaped(w, ID_EXT_ELE_FILL, 4, 8, 16); // usacExtElementType
+            write_escaped(w, 0, 4, 8, 16); // usacExtElementConfigLength
+            w.push_bit(1); // usacExtElementDefaultLengthPresent
+            write_escaped(w, 99, 8, 16, 0); // usacExtElementDefaultLength - 1
+            w.push_bit(0); // usacExtElementPayloadFrag
+        };
+        let drc = |w: &mut BitBuf| {
+            write_escaped(w, 4, 4, 8, 16); // ID_EXT_ELE_UNI_DRC
+            write_escaped(w, 3, 4, 8, 16); // usacExtElementConfigLength
+            w.push_bit(0); // usacExtElementDefaultLengthPresent
+            w.push_bit(1); // usacExtElementPayloadFrag
+            w.push(0xAB_CDEF, 24); // the configuration bytes
+        };
+        let config_extension = |w: &mut BitBuf| {
+            w.push_bit(1); // usacConfigExtensionPresent
+            write_escaped(w, 0, 2, 4, 8); // numConfigExtensions - 1
+            write_escaped(w, 0, 4, 8, 16); // ID_CONFIG_EXT_FILL
+            write_escaped(w, 2, 4, 8, 16); // usacConfigExtLength
+            w.push(0xA5A5, 16);
+        };
+        let mut drm = BitBuf::new();
+        drm.push(0, 2); // coreSbrFrameLengthIndexDrm: no SBR
+        drm.push_bit(1); // noiseFilling
+        write_escaped(&mut drm, 2, 2, 4, 8); // numExtElements
+        fill(&mut drm);
+        drc(&mut drm);
+        config_extension(&mut drm);
+        let info = AudioInfo::xhe_aac(9_600, false, drm.as_bytes().to_vec()).unwrap();
+
+        let mut mpeg = BitBuf::new();
+        mpeg.push(31, 5);
+        mpeg.push(42 - 32, 6);
+        mpeg.push(0xF, 4); // explicit sampling frequency
+        mpeg.push(9_600, 24);
+        mpeg.push(1, 4); // channelConfiguration
+        mpeg.push(0x1B, 5); // usacSamplingFrequencyIndex: 9.6 kHz
+        mpeg.push(1, 3); // coreSbrFrameLengthIndex
+        mpeg.push(1, 5); // channelConfigurationIndex
+        write_escaped(&mut mpeg, 2, 4, 8, 16); // numElements - 1
+        mpeg.push(0, 2); // ID_USAC_SCE
+        mpeg.push(0b01, 2); // tw_mdct, noiseFilling
+        mpeg.push(3, 2); // ID_USAC_EXT
+        fill(&mut mpeg);
+        mpeg.push(3, 2);
+        drc(&mut mpeg);
+        config_extension(&mut mpeg);
+        assert_eq!(
+            audio_specific_config_from_drm(&info).unwrap(),
+            mpeg.as_bytes()
+        );
     }
 
     #[test]

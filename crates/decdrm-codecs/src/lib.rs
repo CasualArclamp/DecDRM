@@ -84,7 +84,7 @@ pub use sdc::{AudioCodingField, AudioInfo, AudioMode, OpusSignalling};
 pub use xhe_enc::{
     XHE_AAC_MAX_FRAMES_PER_SUPER_FRAME, XHE_AAC_MAX_SUPER_FRAME_BYTES, XHE_AAC_SAMPLE_RATES,
     XheAacConfig, XheAacEncoder, XheAccessUnit, XheBudget, XheCodingMode, XheEncoderStats,
-    XheSbrMode, XheSbrRatio, xaac_version,
+    XheSbrMode, XheSbrRatio, audio_specific_config_from_drm, xaac_version,
 };
 
 /// A block of decoded audio.

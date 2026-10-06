@@ -261,6 +261,24 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       the monitor on; through VB-Audio cable A (ignored test, inaudible) an I/Q file of
       1 kHz on I and 3 kHz on Q came back 1 kHz left and 3 kHz right at the input's
       level, paced in real time.
+- [x] **xHE-AAC decoder cross-check** (2026-10-06) — the user heard glitchy xHE-AAC from
+      CNR-1 (Qiqihar: 13790 kHz until 10:00 UTC, then 13835 kHz; via bv3un.ddns.net) at a
+      good SNR without errors. 60 s on 13835 kHz: mono, 32 kHz, 8:3 SBR with the harmonic
+      transposer (eSBR), 11.6 kbit/s; 888 frames, every CRC-16 good, none missing. The
+      second opinion came from libxaac's decoder (`third_party/libxaac`, its test program
+      built with CMake), which knows USAC but not DRM. *Done:*
+      `audio_specific_config_from_drm` (decdrm-codecs) turns an xHE-AAC Static Config back
+      into a standard AudioSpecificConfig: `tw_mdct` = 0 inserted, the channel element
+      first and the extension elements after it, MPS212 in MPEG syntax
+      (`bsTempShapeConfigDrm` 1 → `bsTempShapeConfig` 3, `bsDecorrConfig` 0, as FDK reads
+      it), the config extension copied. `examples/xhedump` (decdrm-engine) writes a
+      recording's frames, FDK's output and libxaac's input (`.usac` + `.meta`). libxaac
+      decodes CNR-1 like FDK (median difference per frame −48 dB after a 160-sample delay;
+      FMGold, stereo 4:1 SBR with MPS212: −65 dB), so the glitches are in the broadcast.
+      ffmpeg 9.0.1 has no eSBR. Tests: CNR-1's config as a fixed vector; FDK decodes
+      DecDRM's own xHE-AAC frames as plain MPEG USAC with the converted config bit-exactly
+      as in DRM mode (mono and stereo; no SBR, 8:3, 2:1, 4:1); the MPS212 and extension
+      syntax by hand. FDK's MPEG path decodes no 19.2 kHz stream, not even libxaac's own.
 - [x] **Audio shares in the Transmitter form** (2026-10-04) — the user asked to change
       how audio services split the capacity instead of 50/50. The station already
       weighted them by `share`; the form did not show it. *Done:* with two or more
