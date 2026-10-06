@@ -12,7 +12,8 @@ milestone checklist (keep it current).
   `mux/` (SDC, service info, MSC demux, audio super frames, text messages), `dsp/`.
 - `crates/decdrm-codecs` (+ `decdrm-fdk-sys`, `decdrm-opus-sys`, `decdrm-xaac-sys`) —
   FDK-AAC / libopus / libxaac (xHE-AAC encoder, patched at build time) FFI.
-- `crates/decdrm-io` — WAV/FLAC, resampling, sound card (cpal), drift-compensated player.
+- `crates/decdrm-io` — WAV/FLAC, resampling, sound card (cpal), drift-compensated player,
+  SBR band smoother (`sbr_smooth`, the session's *Smooth SBR* option).
 - `crates/decdrm-data` — packet mode, MOT, Journaline, EPG, BWS, TPEG.
 - `crates/decdrm-engine` — worker thread: source → `Session` (receiver + multiplex +
   audio/text/data pipelines) → audio out / data store; `Snapshot`s for the UIs.

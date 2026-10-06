@@ -127,6 +127,9 @@ decdrm rx --device "CABLE-A Output" --play
 # straight from a KiwiSDR on the internet (DecDRM tunes it and takes its I/Q)
 decdrm rx --kiwi kiwisdr.example.org --freq 6140 --play
 
+# a station whose encoder switches its SBR band (the treble) on and off frame by frame
+decdrm rx --kiwi kiwisdr.example.org --freq 13835 --play --smooth-sbr
+
 # which DRM stations are on the air now (--update first downloads EiBi's schedule)
 decdrm schedule --update
 

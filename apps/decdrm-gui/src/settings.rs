@@ -399,6 +399,9 @@ pub struct Settings {
     pub volume: f32,
     /// Folder of the last audio recording (the *Record…* dialog opens there).
     pub record_dir: Option<PathBuf>,
+    /// Stations whose SBR band is smoothed (the Audio panel's *Smooth SBR*), by DRM
+    /// service ID.
+    pub smooth_sbr_services: Vec<u32>,
     /// Save received data objects (slides, website files, programme guides) below this
     /// directory (the engine's `data_dir`); `None` saves nothing but the website files
     /// the browser needs (see `website`).
@@ -448,6 +451,7 @@ impl Default for Settings {
             output_device: None,
             volume: 100.0,
             record_dir: None,
+            smooth_sbr_services: Vec::new(),
             data_dir: None,
             theme: ThemeChoice::System,
             plot_tab: PlotTab::Overview,
@@ -717,6 +721,7 @@ mod tests {
             output_device: Some("Speakers".into()),
             volume: 35.0,
             record_dir: Some(PathBuf::from("recordings")),
+            smooth_sbr_services: vec![1, 0xD0D003],
             data_dir: Some(PathBuf::from("received")),
             theme: ThemeChoice::Light,
             plot_tab: PlotTab::History,
@@ -754,6 +759,7 @@ mod tests {
         assert!(text.contains("tx_output = \"device\""), "{text}");
         assert!(text.contains("plot_tab = \"history\""), "{text}");
         assert!(text.contains("volume = 35.0"), "{text}");
+        assert!(text.contains("smooth_sbr_services = ["), "{text}");
         assert!(text.contains("[schedule]"), "{text}");
         assert_eq!(parse(&text).unwrap(), s);
         let partial = parse("[schedule]\nfreq = \"6140\"\n").unwrap();

@@ -261,6 +261,34 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       the monitor on; through VB-Audio cable A (ignored test, inaudible) an I/Q file of
       1 kHz on I and 3 kHz on Q came back 1 kHz left and 3 kHz right at the input's
       level, paced in real time.
+- [x] **Corrupt xHE-AAC frames concealed; Smooth SBR** (2026-10-07) — from the overnight
+      CNR survey (2026-10-06/07: 6030 and 13835 kHz on Korean, Japanese and Taiwanese
+      Kiwis, decoded by FDK-AAC and an instrumented libxaac). (1) The session handed
+      xHE-AAC frames whose CRC-16 failed to FDK-AAC, which does not check it, and counted
+      them as good; on fading channels that gave bursts up to 37 dB above the programme
+      (scored against clean captures of the same broadcast, also with white noise added).
+      *Done:* such frames are concealed (§5.3.3) and counted as concealed; the price is more
+      short mutes at marginal SNR, where FDK fades back in over 5 frames (its concealment
+      method cannot change that: energy interpolation is refused for xHE-AAC, spectral
+      muting is no better than the default). Test `xhe_frame_failing_its_crc_is_concealed`
+      damages one frame's CRC with its access unit intact. (2) CNR-1 on 13790/13835 kHz
+      sounds glitchy because its encoder makes the SBR band jump by more than 18 dB between
+      consecutive 64 ms frames about once a second (and drops speech to digital silence for
+      144–192 ms now and then); 6030 keeps its SBR band quiet and steady. The user asked for
+      an option. *Done:* `decdrm_io::HighBandSmoother` — linear-phase FIR split at the SBR
+      crossover (`AudioParams::sbr_crossover_hz`: the core's Nyquist frequency), high-band
+      level in 16 ms blocks, a lower envelope rising and falling by at most 3 dB per block
+      with 4 blocks of look-ahead, gains from each block's centre to the smaller neighbour
+      at its edges, attenuation only; ≈100 ms of delay, the output as long as the input.
+      On a 13835 recording: audible high-band jumps 53 → 3.5 a minute, the band ≈11 dB
+      quieter, the audio below 5 kHz unchanged (−66 dB). 8 or 4 ms blocks did worse (noisier
+      levels, larger steps where frames straddle blocks); centre-to-centre interpolation
+      let a band switched on inside a block through (27 dB steps). `Session::set_smooth_sbr`,
+      `Command::SetSmoothSbr`, `EngineConfig::smooth_sbr`, `decdrm rx --smooth-sbr`; the GUI's
+      *Smooth SBR* button (Audio panel) is remembered per station by service ID
+      (`smooth_sbr_services` in the settings). Tests: the smoother (steady audio only
+      delayed, a 40 dB gated band smoothed and never raised, stereo and any chunking, flush),
+      `sbr_crossovers`, `sbr_smoothing_delays_and_keeps_frame_lengths`.
 - [x] **xHE-AAC decoder cross-check** (2026-10-06) — the user heard glitchy xHE-AAC from
       CNR-1 (Qiqihar: 13790 kHz until 10:00 UTC, then 13835 kHz; via bv3un.ddns.net) at a
       good SNR without errors. 60 s on 13835 kHz: mono, 32 kHz, 8:3 SBR with the harmonic

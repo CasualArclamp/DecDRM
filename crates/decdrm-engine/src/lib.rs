@@ -71,6 +71,8 @@ pub struct EngineConfig {
     pub rci_listen: Option<decdrm_mdi::net::UdpOrigin>,
     /// Start with the RF monitor on (see [`Command::SetMonitor`]).
     pub monitor: bool,
+    /// Start with the SBR band smoother on (see [`Command::SetSmoothSbr`]).
+    pub smooth_sbr: bool,
 }
 
 impl Default for EngineConfig {
@@ -88,6 +90,7 @@ impl Default for EngineConfig {
             publish_interval: Duration::from_millis(100),
             rci_listen: None,
             monitor: false,
+            smooth_sbr: false,
         }
     }
 }
@@ -123,6 +126,11 @@ pub enum Command {
     /// (in diversity reception the first input). Decoding goes on, and a recording
     /// keeps the decoded audio. [`AudioStatus::monitor`] shows it.
     SetMonitor(bool),
+    /// Smooth the SBR band of the decoded audio (`true`) or not: its level may change by
+    /// at most 3 dB per 16 ms, for stations whose encoder switches the band on and off.
+    /// HE-AAC and xHE-AAC with SBR only; adds about 100 ms of delay. See
+    /// [`Session::set_smooth_sbr`]; [`AudioStatus::smooth_sbr`] shows it.
+    SetSmoothSbr(bool),
     Stop,
 }
 
@@ -248,6 +256,7 @@ fn worker(
     let mut audio = audio_out::AudioOut::new(cfg.play_audio, cfg.output_device.clone(), info.is_file, cfg.record_audio.clone())?;
     audio.set_monitor(cfg.monitor);
     audio.set_volume(cfg.volume);
+    session.set_smooth_sbr(cfg.smooth_sbr);
     let mut saver = cfg.data_dir.clone().map(data_store::DataStore::new);
     let mut logger = cfg.log.as_ref().map(logger::Logger::create).transpose()?;
     let log = |line: String, snap: &mut Snapshot| {
@@ -263,6 +272,9 @@ fn worker(
         log(format!("input: {} (I/Q)", info.name), &mut snap);
     } else {
         log(format!("input: {} ({} Hz, {} ch)", info.name, info.sample_rate, info.channels), &mut snap);
+    }
+    if cfg.smooth_sbr {
+        log("SBR band smoothing on".into(), &mut snap);
     }
 
     // Remote control: RCI commands become engine commands.
@@ -346,6 +358,12 @@ fn worker(
                     if on != audio.monitoring() {
                         audio.set_monitor(on);
                         log(if on { "RF monitor on: the input plays".into() } else { "RF monitor off".into() }, &mut snap);
+                    }
+                }
+                Command::SetSmoothSbr(on) => {
+                    if on != session.smooth_sbr() {
+                        session.set_smooth_sbr(on);
+                        log(if on { "SBR band smoothing on".into() } else { "SBR band smoothing off".into() }, &mut snap);
                     }
                 }
                 Command::StartRecording(path) => match audio.start_recording(path.clone()) {
@@ -553,6 +571,8 @@ fn publish(
     snap.audio.playing = audio.is_playing();
     snap.audio.recording = audio.recording();
     snap.audio.monitor = audio.monitoring();
+    snap.audio.smooth_sbr = session.smooth_sbr();
+    snap.audio.sbr_crossover_hz = session.sbr_crossover_hz();
     if let Some((buffered, ppm)) = audio.status() {
         snap.audio.buffer_ms = buffered.as_secs_f32() * 1000.0;
         snap.audio.drift_ppm = ppm;

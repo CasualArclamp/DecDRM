@@ -15,6 +15,7 @@
 //! RSCI receiver's status items stand in for the receiver's status and plots.
 
 use decdrm_codecs::{DrmAudioCoding, DrmAudioDecoder, PcmFrame, open_decoder};
+use decdrm_io::HighBandSmoother;
 use decdrm_core::fac::{Fac, LANGUAGES, PROGRAMME_TYPES};
 use decdrm_core::params::RobustnessMode;
 use decdrm_core::mux::audio::AudioDeframer;
@@ -76,6 +77,28 @@ struct AudioPipeline {
     deframer: AudioDeframer,
     decoder: Box<dyn DrmAudioDecoder>,
     text: TextMessageDecoder,
+    /// The SBR band smoother while it is on (see [`Session::set_smooth_sbr`]).
+    smoother: Option<HighBandSmoother>,
+}
+
+impl AudioPipeline {
+    /// Decoded audio on its way out: through the SBR band smoother when `smooth` is on and
+    /// the stream has SBR (made anew when the audio format changes).
+    fn post(&mut self, mut pcm: PcmFrame, smooth: bool) -> PcmFrame {
+        let crossover = self.params.sbr_crossover_hz().filter(|_| smooth);
+        let Some(crossover) = crossover else {
+            self.smoother = None;
+            return pcm;
+        };
+        let ch = usize::from(pcm.channels);
+        if self.smoother.as_ref().is_none_or(|s| s.sample_rate() != pcm.sample_rate || s.channels() != ch) {
+            self.smoother = HighBandSmoother::new(pcm.sample_rate, ch, crossover);
+        }
+        if let Some(s) = self.smoother.as_mut() {
+            pcm.samples = s.process(&pcm.samples);
+        }
+        pcm
+    }
 }
 
 struct DataPipeline {
@@ -276,6 +299,8 @@ pub struct Session {
     evs: Vec<EvsChannel>,
     pub audio_stats: AudioStats,
     pub msc_stats: MscStats,
+    /// See [`Session::set_smooth_sbr`].
+    smooth_sbr: bool,
     text: Option<String>,
     samples_in: u64,
     /// `samples_in` when the last multiplex frame was decoded.
@@ -314,6 +339,7 @@ impl Session {
             data: Vec::new(),
             evs: Vec::new(),
             audio_stats: AudioStats::default(),
+            smooth_sbr: false,
             msc_stats: MscStats::default(),
             text: None,
             samples_in: 0,
@@ -454,7 +480,36 @@ impl Session {
             Rx::Diversity(d) => d.flush(),
             Rx::Single(_) | Rx::Mdi(_) => Vec::new(),
         };
-        self.handle(0, events)
+        let mut out = self.handle(0, events);
+        // The SBR band smoother still holds its delay's worth of audio.
+        if let Some(s) = self.audio.as_mut().and_then(|a| a.smoother.as_mut()) {
+            let samples = s.flush();
+            let (sample_rate, channels) = (s.sample_rate(), s.channels() as u16);
+            out.push(SessionEvent::Audio(PcmFrame { sample_rate, channels, samples, concealed: false }));
+        }
+        out
+    }
+
+    /// Smooth the SBR band of the decoded audio (HE-AAC and xHE-AAC with SBR; other audio
+    /// passes unchanged): its level may change by at most 3 dB per 16 ms, for stations whose
+    /// encoder switches the band on and off (see [`decdrm_io::sbr_smooth`]). Adds about
+    /// 100 ms of delay; switching it on or off skips or repeats that much audio once.
+    pub fn set_smooth_sbr(&mut self, on: bool) {
+        self.smooth_sbr = on;
+        if !on && let Some(a) = self.audio.as_mut() {
+            a.smoother = None;
+        }
+    }
+
+    /// The SBR band smoother is switched on (see [`Self::set_smooth_sbr`]).
+    pub fn smooth_sbr(&self) -> bool {
+        self.smooth_sbr
+    }
+
+    /// Where the SBR band of the current audio starts, Hz; `None` without SBR (nothing to
+    /// smooth).
+    pub fn sbr_crossover_hz(&self) -> Option<f64> {
+        self.audio.as_ref().and_then(|a| a.params.sbr_crossover_hz())
     }
 
     /// One MDI or RSCI frame (a session made with [`Self::new_mdi`]): its FAC and SDC
@@ -732,7 +787,7 @@ impl Session {
                     for _ in 0..sf.nominal_frames.unwrap_or(0) {
                         if let Ok(pcm) = a.decoder.conceal() {
                             self.audio_stats.frames_concealed += 1;
-                            out.push(SessionEvent::Audio(pcm));
+                            out.push(SessionEvent::Audio(a.post(pcm, self.smooth_sbr)));
                         }
                     }
                 }
@@ -755,13 +810,13 @@ impl Session {
                                 good += 1;
                                 self.audio_stats.frames_ok += 1;
                             }
-                            out.push(SessionEvent::Audio(pcm));
+                            out.push(SessionEvent::Audio(a.post(pcm, self.smooth_sbr)));
                         }
                         Err(_) => {
                             bad += 1;
                             self.audio_stats.frames_concealed += 1;
                             if let Ok(pcm) = a.decoder.conceal() {
-                                out.push(SessionEvent::Audio(pcm));
+                                out.push(SessionEvent::Audio(a.post(pcm, self.smooth_sbr)));
                             }
                         }
                     }
@@ -983,6 +1038,7 @@ fn build_audio(short_id: u8, params: &AudioParams, stream: StreamLengths) -> Res
         deframer,
         decoder,
         text: TextMessageDecoder::new(),
+        smoother: None,
     })
 }
 
@@ -1092,58 +1148,118 @@ mod tests {
         }
     }
 
+    /// A 24 kHz mono xHE-AAC stream from DecDRM's encoder (12 kbit/s: 600-byte super
+    /// frames) carrying a 440 Hz tone, and a session decoding it.
+    struct XheStream {
+        enc: decdrm_codecs::XheAacEncoder,
+        framer: decdrm_core::mux::audio::XheAacFramer,
+        len: usize,
+        /// Samples encoded so far.
+        t: usize,
+    }
+
+    impl XheStream {
+        fn new() -> (Session, Self) {
+            use decdrm_codecs::{XheAacConfig, XheAacEncoder};
+            let len = 600;
+            let enc = XheAacEncoder::new(XheAacConfig::with_super_frame_bytes(24_000, 1, len)).unwrap();
+            let info = enc.audio_info();
+            let params = AudioParams {
+                stream_id: 0,
+                codec: AudioCodec::XheAac,
+                sbr: false,
+                mode: AudioMode::Mono,
+                sample_rate_hz: 24_000,
+                text_flag: false,
+                enhancement: false,
+                surround_mode: 0,
+                codec_config: info.xhe_aac_config.clone(),
+                type9_bytes: info.to_type9_bytes(),
+            };
+            let mut session = Session::new(ReceiverConfig::default());
+            session.audio = Some(build_audio(0, &params, StreamLengths { part_a: 0, part_b: len }).unwrap());
+            (session, Self { enc, framer: Default::default(), len, t: 0 })
+        }
+
+        /// The next audio super frame.
+        fn next_super_frame(&mut self) -> Vec<u8> {
+            let n = self.enc.frame_len();
+            while !self.framer.ready(self.len) {
+                let pcm: Vec<f32> = (self.t..self.t + n)
+                    .map(|i| (0.3 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 24_000.0).sin()) as f32)
+                    .collect();
+                self.t += n;
+                for au in self.enc.encode(&pcm).unwrap() {
+                    self.framer.push_access_unit(&au.data, au.bit_reservoir_level);
+                }
+            }
+            self.framer.next_super_frame(self.len).unwrap()
+        }
+    }
+
+    fn logical(data: Vec<u8>) -> [Option<LogicalFrame>; 1] {
+        [Some(LogicalFrame { stream_id: 0, data, part_a_len: 0, hierarchical: false })]
+    }
+
     /// §5.3.3: an xHE-AAC frame whose CRC-16 fails is concealed, not decoded (FDK-AAC does
     /// not check it). Only the CRC of one frame is damaged, its access unit is intact: FDK
     /// would decode it without complaint, so only the session's check can catch it.
     #[test]
     fn xhe_frame_failing_its_crc_is_concealed() {
-        use decdrm_codecs::{XheAacConfig, XheAacEncoder};
-        use decdrm_core::mux::audio::XheAacFramer;
-        let len = 600; // bytes per 400 ms: 12 kbit/s
-        let mut enc = XheAacEncoder::new(XheAacConfig::with_super_frame_bytes(24_000, 1, len)).unwrap();
-        let info = enc.audio_info();
-        let params = AudioParams {
-            stream_id: 0,
-            codec: AudioCodec::XheAac,
-            sbr: false,
-            mode: AudioMode::Mono,
-            sample_rate_hz: 24_000,
-            text_flag: false,
-            enhancement: false,
-            surround_mode: 0,
-            codec_config: info.xhe_aac_config.clone(),
-            type9_bytes: info.to_type9_bytes(),
-        };
-        let mut session = Session::new(ReceiverConfig::default());
-        session.audio = Some(build_audio(0, &params, StreamLengths { part_a: 0, part_b: len }).unwrap());
-        let mut framer = XheAacFramer::new();
-        let n = enc.frame_len();
-        let (mut t, mut damaged, mut events) = (0usize, false, Vec::new());
+        let (mut session, mut stream) = XheStream::new();
+        let (mut damaged, mut events) = (false, Vec::new());
         for _ in 0..12 {
-            while !framer.ready(len) {
-                let pcm: Vec<f32> = (t..t + n)
-                    .map(|i| (0.3 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 24_000.0).sin()) as f32)
-                    .collect();
-                t += n;
-                for au in enc.encode(&pcm).unwrap() {
-                    framer.push_access_unit(&au.data, au.bit_reservoir_level);
-                }
-            }
-            let mut data = framer.next_super_frame(len).unwrap();
+            let mut data = stream.next_super_frame();
+            let len = data.len();
             // The directory's last element is border 0; the byte before it is the last CRC
             // byte of the frame that ends there.
             let border = usize::from(u16::from_be_bytes([data[len - 2], data[len - 1]]) >> 4);
-            if !damaged && t > 10 * n && (1..0xFFE).contains(&border) {
+            if !damaged && stream.t > 10 * stream.enc.frame_len() && (1..0xFFE).contains(&border) {
                 data[2 + border - 1] ^= 0x01;
                 damaged = true;
             }
-            let lf = LogicalFrame { stream_id: 0, data, part_a_len: 0, hierarchical: false };
-            session.on_logical(&[Some(lf)], true, &mut events);
+            session.on_logical(&logical(data), true, &mut events);
         }
         assert!(damaged);
         let concealed = events.iter().filter(|e| matches!(e, SessionEvent::Audio(p) if p.concealed)).count();
         assert_eq!((session.audio_stats.frames_concealed, concealed), (1, 1));
         assert!(session.audio_stats.frames_ok >= 40, "{}", session.audio_stats.frames_ok);
+    }
+
+    /// The SBR band smoother: this stream's crossover is 6 kHz (2:1 SBR at 24 kHz). Switched
+    /// on, every decoded frame keeps its length and the audio comes out delayed by the
+    /// smoother's latency (a 440 Hz tone has no SBR band to speak of, so otherwise as is);
+    /// switched off, the audio passes untouched.
+    #[test]
+    fn sbr_smoothing_delays_and_keeps_frame_lengths() {
+        let run = |smooth: bool| {
+            let (mut session, mut stream) = XheStream::new();
+            session.set_smooth_sbr(smooth);
+            let mut events = Vec::new();
+            for _ in 0..12 {
+                session.on_logical(&logical(stream.next_super_frame()), true, &mut events);
+            }
+            let pcm: Vec<PcmFrame> = events
+                .into_iter()
+                .filter_map(|e| match e {
+                    SessionEvent::Audio(p) => Some(p),
+                    _ => None,
+                })
+                .collect();
+            (session, pcm)
+        };
+        let (plain_session, plain) = run(false);
+        let (smooth_session, smooth) = run(true);
+        assert_eq!(plain_session.sbr_crossover_hz(), Some(6_000.0));
+        assert!(smooth_session.smooth_sbr() && !plain_session.smooth_sbr());
+        let lengths = |v: &[PcmFrame]| v.iter().map(|p| p.samples.len()).collect::<Vec<_>>();
+        assert_eq!(lengths(&plain), lengths(&smooth));
+        let a: Vec<f32> = plain.iter().flat_map(|p| p.samples.iter().copied()).collect();
+        let b: Vec<f32> = smooth.iter().flat_map(|p| p.samples.iter().copied()).collect();
+        let lat = HighBandSmoother::new(24_000, 1, 6_000.0).unwrap().latency();
+        assert!(b.len() > lat + 24_000 && b[..lat].iter().all(|v| *v == 0.0));
+        let err = (lat + 4_800..b.len()).map(|i| (b[i] - a[i - lat]).abs()).fold(0.0f32, f32::max);
+        assert!(err < 0.01, "largest difference {err}");
     }
 
     /// Dream's service-bar facts: codec features, output rate, bit rates from the stream

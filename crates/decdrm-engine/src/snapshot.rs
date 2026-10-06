@@ -195,6 +195,12 @@ pub struct AudioStatus {
     /// The RF monitor is on: the sound card plays the receiver's input instead of the
     /// decoded audio.
     pub monitor: bool,
+    /// The SBR band smoother is switched on (see `Command::SetSmoothSbr`); it acts on audio
+    /// with SBR only.
+    pub smooth_sbr: bool,
+    /// Where the SBR band of the current audio starts, Hz (`None`: no SBR, nothing to
+    /// smooth).
+    pub sbr_crossover_hz: Option<f64>,
 }
 
 /// A recording of the decoded audio (see `Command::StartRecording`).

@@ -12,6 +12,7 @@
 //! | Capture from a sound card / virtual audio cable | [`InputStream`] |
 //! | Play raw samples to a sound card | [`OutputStream`] |
 //! | Play decoded audio with clock-drift compensation | [`AudioPlayer`] |
+//! | Smooth the SBR band of decoded audio (encoders that switch it on and off) | [`HighBandSmoother`] |
 //!
 //! # Sample conventions
 //!
@@ -51,6 +52,7 @@ mod file_reader;
 mod file_writer;
 mod player;
 mod resample;
+pub mod sbr_smooth;
 pub mod stream;
 
 use std::fmt;
@@ -65,6 +67,7 @@ pub use file_reader::FileReader;
 pub use file_writer::{Container, Encoding, FileWriter};
 pub use player::{AudioPlayer, PlayerOptions, PlayerStatus};
 pub use resample::{resample, Resampler, ResamplerQuality, To48k};
+pub use sbr_smooth::HighBandSmoother;
 pub use stream::{
     InputOptions, InputStats, InputStream, OutputOptions, OutputState, OutputStats, OutputStream,
 };

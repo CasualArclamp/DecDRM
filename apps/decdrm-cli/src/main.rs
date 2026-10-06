@@ -93,6 +93,11 @@ struct RxArgs {
     /// Playback volume for --play, percent (0-100; a squared law, 50 is about -12 dB).
     #[arg(long, value_name = "PERCENT", default_value_t = 100.0)]
     volume: f32,
+    /// Smooth the SBR band of HE-AAC/xHE-AAC audio: its level may change by at most 3 dB
+    /// per 16 ms, for stations whose encoder switches the band on and off (adds ~0.1 s of
+    /// delay; played and written audio alike).
+    #[arg(long)]
+    smooth_sbr: bool,
     /// Write the decoded audio to a WAV/FLAC file (as decoded, 16-bit; a change of the
     /// audio format carries on in FILE-2.wav, …).
     #[arg(long, value_name = "FILE")]
@@ -217,6 +222,7 @@ fn rx(a: RxArgs) -> Result<()> {
         volume: decdrm_engine::volume_gain(a.volume),
         record_audio: a.out.clone(),
         data_dir: a.data_dir.clone(),
+        smooth_sbr: a.smooth_sbr,
         log: a.log.clone().map(|p| LogConfig { interval_s: a.log_interval, ..LogConfig::new(p) }),
         ..EngineConfig::default()
     });

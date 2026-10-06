@@ -382,7 +382,13 @@ impl DecDrmApp {
     fn side_panel(&mut self, ui: &mut Ui) {
         panels::broadcast::clock(ui, self.rx.snap.time.as_ref());
         panels::broadcast::alternative_frequencies(ui, &self.rx.snap.afs);
-        let clicked = panels::services::show(ui, &self.rx, &mut self.settings.volume, &mut self.settings.record_dir);
+        let clicked = panels::services::show(
+            ui,
+            &self.rx,
+            &mut self.settings.volume,
+            &mut self.settings.record_dir,
+            &mut self.settings.smooth_sbr_services,
+        );
         // A moved volume slider goes to the running receiver at once.
         if self.applied_volume != Some(self.settings.volume) {
             self.rx.set_volume(crate::settings::volume_gain(self.settings.volume));
@@ -437,6 +443,7 @@ impl eframe::App for DecDrmApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now = Instant::now();
         self.rx.poll(now);
+        self.rx.sync_smooth_sbr(&self.settings.smooth_sbr_services);
         self.tx.poll(now);
         if self.schedule.poll() {
             ctx.request_repaint();

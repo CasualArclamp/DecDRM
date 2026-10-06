@@ -396,6 +396,17 @@ the receiver's input as it comes in instead of the decoded audio.
 Click again for the decoded audio; the audio already queued (about half a second)
 plays out first. `decdrm-gui --start --monitor` starts with it on.
 
+**Smooth SBR.** Some stations' encoders switch the SBR band — the treble above the core
+coder's bandwidth, e.g. above 6 kHz on CNR-1's 13835 kHz — on and off from one frame to
+the next, which sounds glitchy even though every frame arrives intact (every decoder
+reproduces it). *Smooth SBR*, beside *RF monitor*, lets that band's level change by at
+most 3 dB per 16 ms: the switching goes, the treble stays, about 10 dB quieter.
+- It is remembered per station (by the DRM service ID) and switched on again whenever
+  that station is decoded.
+- Only for audio with SBR (HE-AAC, xHE-AAC with SBR); otherwise the button is greyed out.
+- It adds about 0.1 s of delay; switching it on or off skips or repeats that much once.
+- Recordings get what you hear. In the CLI: `decdrm rx … --smooth-sbr`.
+
 ## Services, data and logs
 
 ### Services and audio

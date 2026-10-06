@@ -328,6 +328,25 @@ impl AudioParams {
     pub fn output_sample_rate_hz(&self) -> u32 {
         if self.sbr { 2 * self.sample_rate_hz } else { self.sample_rate_hz }
     }
+
+    /// Where the SBR band starts, Hz: the core coder's Nyquist frequency (the SBR start
+    /// band of the header may lie a little lower). AAC with SBR: half the core rate.
+    /// xHE-AAC: the output rate times 3/16, 1/4 or 1/8 for 8:3, 2:1 or 4:1 SBR
+    /// (`coreSbrFrameLengthIndexDrm` in the first bits of the Static Config, §5.3.2).
+    /// `None` without SBR.
+    pub fn sbr_crossover_hz(&self) -> Option<f64> {
+        let fs = f64::from(self.sample_rate_hz);
+        match self.codec {
+            AudioCodec::Aac if self.sbr => Some(fs / 2.0),
+            AudioCodec::XheAac => match self.codec_config.first()? >> 6 {
+                1 => Some(fs * 3.0 / 16.0),
+                2 => Some(fs / 4.0),
+                3 => Some(fs / 8.0),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 /// Dream's `CAudioParam::EnqueueType9` applied to interpreted parameters: audio coding,
@@ -1038,6 +1057,31 @@ mod tests {
     use crate::fec::mlc::MscProtection;
     use crate::mux::sdc::{DrmFrequency, Label, LanguageCountry, encode_sdc_data};
     use crate::params::SpectrumOccupancy;
+
+    /// The SBR crossover from the signalled parameters; the xHE-AAC configs are CNR-1's on
+    /// 13835 kHz (8:3) and 6030 kHz (4:1).
+    #[test]
+    fn sbr_crossovers() {
+        let p = |codec, sbr, rate, config: &[u8]| AudioParams {
+            stream_id: 0,
+            codec,
+            sbr,
+            mode: AudioMode::Mono,
+            sample_rate_hz: rate,
+            text_flag: false,
+            enhancement: false,
+            surround_mode: 0,
+            codec_config: config.to_vec(),
+            type9_bytes: Vec::new(),
+        };
+        assert_eq!(p(AudioCodec::Aac, true, 24_000, &[]).sbr_crossover_hz(), Some(12_000.0));
+        assert_eq!(p(AudioCodec::Aac, false, 24_000, &[]).sbr_crossover_hz(), None);
+        assert_eq!(p(AudioCodec::XheAac, false, 32_000, &[0x70, 0x9A, 0xE8]).sbr_crossover_hz(), Some(6_000.0));
+        assert_eq!(p(AudioCodec::XheAac, false, 38_400, &[0xE3, 0x26, 0xEA]).sbr_crossover_hz(), Some(4_800.0));
+        assert_eq!(p(AudioCodec::XheAac, false, 24_000, &[0x80]).sbr_crossover_hz(), Some(6_000.0));
+        assert_eq!(p(AudioCodec::XheAac, false, 24_000, &[0x08]).sbr_crossover_hz(), None, "no SBR");
+        assert_eq!(p(AudioCodec::Opus, false, 48_000, &[]).sbr_crossover_hz(), None);
+    }
 
     fn fac(short_id: u8, service_id: u32, reconf: u8, num_audio: u8, num_data: u8, msc_mode: MscMode) -> Fac {
         Fac {

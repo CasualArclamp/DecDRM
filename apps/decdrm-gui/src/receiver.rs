@@ -148,6 +148,9 @@ pub struct RxSession {
     rci_tunable: bool,
     /// Live sound-card input (slideshow trigger times use the wall clock).
     live: bool,
+    /// The SBR band smoothing last asked of the engine: for which service (DRM service
+    /// ID), on or off (see [`Self::sync_smooth_sbr`]).
+    smooth_sent: Option<(u32, bool)>,
     epoch: Instant,
 }
 
@@ -174,6 +177,7 @@ impl Default for RxSession {
             kiwi: None,
             rci_tunable: false,
             live: false,
+            smooth_sent: None,
             epoch: Instant::now(),
         }
     }
@@ -210,6 +214,7 @@ impl RxSession {
         });
         self.log.push(format!("── start: {label}"));
         self.source_label = label;
+        self.smooth_sent = None;
         self.engine = Some(Engine::start(cfg));
     }
 
@@ -312,6 +317,26 @@ impl RxSession {
     pub fn set_monitor(&self, on: bool) {
         if let Some(e) = &self.engine {
             e.command(Command::SetMonitor(on));
+        }
+    }
+
+    /// DRM service ID of the service being decoded, once the FAC has named it.
+    pub fn selected_service_id(&self) -> Option<u32> {
+        let id = self.snap.selected_service?;
+        self.snap.services.iter().find(|s| s.short_id == id).map(|s| s.service_id)
+    }
+
+    /// SBR band smoothing per station: on for the services in `services` (DRM service
+    /// IDs, the settings' list), off for the others. Tells the engine whenever the
+    /// decoded service or its entry changes (see [`Command::SetSmoothSbr`]).
+    pub fn sync_smooth_sbr(&mut self, services: &[u32]) {
+        let Some(id) = self.selected_service_id() else { return };
+        let wanted = (id, services.contains(&id));
+        if self.smooth_sent != Some(wanted)
+            && let Some(e) = &self.engine
+        {
+            e.command(Command::SetSmoothSbr(wanted.1));
+            self.smooth_sent = Some(wanted);
         }
     }
 

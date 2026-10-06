@@ -341,11 +341,18 @@ fn service_bar(ui: &mut Ui, short_id: u8, service: Option<&ServiceView>, selecte
     response.clicked()
 }
 
-/// Draw the panel with the playback `volume` (percent) slider and the recording
-/// controls (`record_dir`: the folder the dialog opens in); returns the short id of a
+/// Draw the panel with the playback `volume` (percent) slider, the recording controls
+/// (`record_dir`: the folder the dialog opens in) and the SBR band smoothing switch
+/// (`smooth`: the stations it is on for, by DRM service ID); returns the short id of a
 /// service the user clicked. (The caller acts on it: selecting needs `&mut RxSession`,
 /// and this function only reads it.)
-pub fn show(ui: &mut Ui, rx: &RxSession, volume: &mut f32, record_dir: &mut Option<PathBuf>) -> Option<u8> {
+pub fn show(
+    ui: &mut Ui,
+    rx: &RxSession,
+    volume: &mut f32,
+    record_dir: &mut Option<PathBuf>,
+    smooth: &mut Vec<u32>,
+) -> Option<u8> {
     heading(ui, "Services");
     let mut clicked = None;
     ui.spacing_mut().item_spacing.y = 4.0;
@@ -413,7 +420,7 @@ pub fn show(ui: &mut Ui, rx: &RxSession, volume: &mut f32, record_dir: &mut Opti
             ui.end_row();
         });
     volume_slider(ui, volume);
-    record_row(ui, rx, record_dir);
+    record_row(ui, rx, record_dir, smooth);
     clicked
 }
 
@@ -424,14 +431,46 @@ const RECORD_HELP: &str = "Record the audio you hear to a WAV file (or FLAC: sma
      Stop: as decoded, at the station's sample rate and channels, whatever the volume. If the audio format changes \
      (another service), the recording carries on in a new file, name-2.wav.";
 
-/// The audio's buttons: record, and the RF monitor.
-fn record_row(ui: &mut Ui, rx: &RxSession, record_dir: &mut Option<PathBuf>) {
+/// The audio's buttons: record, the RF monitor and the SBR band smoothing.
+fn record_row(ui: &mut Ui, rx: &RxSession, record_dir: &mut Option<PathBuf>, smooth: &mut Vec<u32>) {
     let running = rx.is_running() && !rx.is_stopping();
     let rec = rx.snap.audio.recording.as_ref();
     ui.horizontal_wrapped(|ui| {
         record_button(ui, rx, rec, running, record_dir);
         monitor_toggle(ui, rx, running);
+        smooth_toggle(ui, rx, running, smooth);
     });
+}
+
+/// SBR band smoothing for the station being decoded, remembered per station (`smooth`:
+/// DRM service IDs; `RxSession::sync_smooth_sbr` tells the engine).
+fn smooth_toggle(ui: &mut Ui, rx: &RxSession, running: bool, smooth: &mut Vec<u32>) {
+    let id = rx.selected_service_id();
+    let crossover = rx.snap.audio.sbr_crossover_hz;
+    let on = id.is_some_and(|id| smooth.contains(&id));
+    let button = egui::Button::new("\u{3030}  Smooth SBR").selected(on);
+    let response = ui
+        .add_enabled(running && id.is_some() && crossover.is_some(), button)
+        .on_hover_text(format!(
+            "Smooth the SBR band (above {:.1} kHz) of this station: its level may change by at most 3 dB per \
+             16 ms. For stations whose encoder switches the band on and off from frame to frame, which sounds \
+             glitchy (CNR-1 on 13790/13835 kHz). Remembered for this station; adds about 0.1 s of delay.",
+            crossover.unwrap_or(0.0) / 1000.0
+        ))
+        .on_disabled_hover_text(if running {
+            "Only for audio with SBR (HE-AAC, xHE-AAC with SBR)"
+        } else {
+            "Start receiving first"
+        });
+    if response.clicked()
+        && let Some(id) = id
+    {
+        if on {
+            smooth.retain(|s| *s != id);
+        } else {
+            smooth.push(id);
+        }
+    }
 }
 
 /// The RF monitor: hear the signal itself, the receiver's input, instead of the
