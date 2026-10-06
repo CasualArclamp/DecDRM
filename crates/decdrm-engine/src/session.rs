@@ -737,7 +737,16 @@ impl Session {
                     }
                 }
                 for f in &sf.frames {
-                    match a.decoder.decode(&f.data, f.crc_byte) {
+                    // An xHE-AAC frame whose CRC-16 fails is concealed (§5.3.3), not
+                    // decoded: FDK-AAC does not check that CRC, and decoding a corrupt frame
+                    // can give a burst far louder than the programme (seen on 6030 kHz: up
+                    // to 19 dB above it).
+                    let result = if a.params.codec == AudioCodec::XheAac && f.crc_ok == Some(false) {
+                        a.decoder.conceal().map(|pcm| PcmFrame { concealed: true, ..pcm })
+                    } else {
+                        a.decoder.decode(&f.data, f.crc_byte)
+                    };
+                    match result {
                         Ok(pcm) => {
                             if pcm.concealed {
                                 bad += 1;
@@ -1081,6 +1090,60 @@ mod tests {
             packet_length: 45,
             application_data: user_app.to_be_bytes().to_vec(),
         }
+    }
+
+    /// §5.3.3: an xHE-AAC frame whose CRC-16 fails is concealed, not decoded (FDK-AAC does
+    /// not check it). Only the CRC of one frame is damaged, its access unit is intact: FDK
+    /// would decode it without complaint, so only the session's check can catch it.
+    #[test]
+    fn xhe_frame_failing_its_crc_is_concealed() {
+        use decdrm_codecs::{XheAacConfig, XheAacEncoder};
+        use decdrm_core::mux::audio::XheAacFramer;
+        let len = 600; // bytes per 400 ms: 12 kbit/s
+        let mut enc = XheAacEncoder::new(XheAacConfig::with_super_frame_bytes(24_000, 1, len)).unwrap();
+        let info = enc.audio_info();
+        let params = AudioParams {
+            stream_id: 0,
+            codec: AudioCodec::XheAac,
+            sbr: false,
+            mode: AudioMode::Mono,
+            sample_rate_hz: 24_000,
+            text_flag: false,
+            enhancement: false,
+            surround_mode: 0,
+            codec_config: info.xhe_aac_config.clone(),
+            type9_bytes: info.to_type9_bytes(),
+        };
+        let mut session = Session::new(ReceiverConfig::default());
+        session.audio = Some(build_audio(0, &params, StreamLengths { part_a: 0, part_b: len }).unwrap());
+        let mut framer = XheAacFramer::new();
+        let n = enc.frame_len();
+        let (mut t, mut damaged, mut events) = (0usize, false, Vec::new());
+        for _ in 0..12 {
+            while !framer.ready(len) {
+                let pcm: Vec<f32> = (t..t + n)
+                    .map(|i| (0.3 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 24_000.0).sin()) as f32)
+                    .collect();
+                t += n;
+                for au in enc.encode(&pcm).unwrap() {
+                    framer.push_access_unit(&au.data, au.bit_reservoir_level);
+                }
+            }
+            let mut data = framer.next_super_frame(len).unwrap();
+            // The directory's last element is border 0; the byte before it is the last CRC
+            // byte of the frame that ends there.
+            let border = usize::from(u16::from_be_bytes([data[len - 2], data[len - 1]]) >> 4);
+            if !damaged && t > 10 * n && (1..0xFFE).contains(&border) {
+                data[2 + border - 1] ^= 0x01;
+                damaged = true;
+            }
+            let lf = LogicalFrame { stream_id: 0, data, part_a_len: 0, hierarchical: false };
+            session.on_logical(&[Some(lf)], true, &mut events);
+        }
+        assert!(damaged);
+        let concealed = events.iter().filter(|e| matches!(e, SessionEvent::Audio(p) if p.concealed)).count();
+        assert_eq!((session.audio_stats.frames_concealed, concealed), (1, 1));
+        assert!(session.audio_stats.frames_ok >= 40, "{}", session.audio_stats.frames_ok);
     }
 
     /// Dream's service-bar facts: codec features, output rate, bit rates from the stream

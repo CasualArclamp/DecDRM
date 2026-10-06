@@ -392,7 +392,8 @@ impl FdkDrmDecoder {
 impl DrmAudioDecoder for FdkDrmDecoder {
     /// Decodes one access unit. AAC frames need `crc = Some(aac_crc_bits)` (FDK checks it
     /// and conceals on mismatch, reporting `concealed = true`); for xHE-AAC `crc` is
-    /// ignored (xHE-AAC frames carry no per-frame CRC in DRM).
+    /// ignored: FDK does not check the frame's CRC-16 (§5.3.1.2), the deframer does
+    /// (`AudioFrame::crc_ok`), and the caller conceals a frame that fails it.
     fn decode(&mut self, frame: &[u8], crc: Option<u8>) -> Result<PcmFrame, CodecError> {
         if frame.is_empty() {
             return self.conceal();
