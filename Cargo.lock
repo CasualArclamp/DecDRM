@@ -814,7 +814,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "decdrm-cli"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -829,7 +829,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-codecs"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "decdrm-core",
  "decdrm-fdk-sys",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "claxon",
  "num-complex",
@@ -851,7 +851,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-dac"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "candle-core",
  "decdrm-codecs",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-data"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "flate2",
  "thiserror 2.0.21",
@@ -871,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-engine"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -889,18 +889,18 @@ dependencies = [
 
 [[package]]
 name = "decdrm-evs"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "decdrm-fdk-sys"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "decdrm-gui"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -927,7 +927,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-io"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "cpal",
  "flacenc",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-kiwi"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "serde_json",
  "thiserror 2.0.21",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-mdi"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "decdrm-core",
  "tempfile",
@@ -959,14 +959,14 @@ dependencies = [
 
 [[package]]
 name = "decdrm-opus-sys"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "cmake",
 ]
 
 [[package]]
 name = "decdrm-schedule"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-station"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "decdrm-codecs",
  "decdrm-core",
@@ -999,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "decdrm-xaac-sys"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "cc",
 ]
