@@ -12,6 +12,15 @@
 //! neighbouring good frames). The measurements behind the defaults are in the crate
 //! docs.
 //!
+//! # Joint stereo
+//!
+//! The mid and side signals have a decoder network state each and are decoded side by
+//! side on the thread pool; the output is L = M + S, R = M − S. The CRC policy and the
+//! concealment apply to each signal on its own, with one link: a frame whose mid signal
+//! is lost loses its side signal too, so both are concealed alike. A side signal lost on
+//! its own is concealed like a mono signal — bridged, then faded out — which fades the
+//! sound to mono rather than to silence.
+//!
 //! # Delay
 //!
 //! DAC's decoder looks [`DECODER_LAG`] samples (131 ms) ahead, so the PCM of a super
@@ -19,11 +28,9 @@
 //! returns 400 ms per super frame. The output gains of the concealment follow their
 //! frames through the delay.
 
-use crate::config::{
-    Bandwidth, DacConfig, FRAME_SAMPLES, FRAMES_PER_SUPER_FRAME, LATENT_DIM, SAMPLE_RATE, SUPER_FRAME_SAMPLES,
-};
+use crate::config::{DacConfig, FRAME_SAMPLES, FRAMES_PER_SUPER_FRAME, LATENT_DIM, SAMPLE_RATE, SUPER_FRAME_SAMPLES};
 use crate::error::DacError;
-use crate::framing::{Codes, FrameLayout, layer_codebooks};
+use crate::framing::{Codes, FrameLayout, Unpacked, layer_codebooks, unpack_super_frame};
 use crate::model::{DECODER_LAG, DacModel, DecoderState, ModelParts};
 use decdrm_codecs::{CodecError, DrmAudioDecoder, PcmFrame};
 use std::collections::VecDeque;
@@ -79,7 +86,8 @@ pub enum Concealment {
     Mute,
 }
 
-/// Counters of a decoder.
+/// Counters of a decoder. The frame counts are of the mono or mid signal; the region
+/// counts include the side signal's regions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecoderStats {
     /// Super frames decoded (or concealed as a whole).
@@ -97,28 +105,32 @@ pub struct DecoderStats {
     pub regions_failed: u64,
     /// Of those, regions recovered from the repeated copy.
     pub regions_repaired: u64,
+    /// Joint stereo: frames whose side signal was lost (concealed).
+    pub side_frames_concealed: u64,
 }
 
 /// One decoded super frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedSuperFrame {
-    /// 400 ms of 24 kHz mono PCM.
+    /// 400 ms of 24 kHz PCM: mono, or interleaved stereo (L, R, L, R, …).
     pub pcm: Vec<f32>,
-    /// Codebooks used by each frame (0 = concealed).
+    /// Channels of `pcm`: 1 or 2.
+    pub channels: usize,
+    /// Codebooks used by each frame of the mono or mid signal (0 = concealed).
     pub depth: [usize; FRAMES_PER_SUPER_FRAME],
+    /// Joint stereo: codebooks used by each frame of the side signal (0 = concealed).
+    pub side_depth: Option<[usize; FRAMES_PER_SUPER_FRAME]>,
     /// Frames concealed.
     pub concealed: usize,
     /// Frames decoded with fewer codebooks than sent.
     pub degraded: usize,
 }
 
-/// A streaming DAC decoder for one DRM service.
-pub struct DacDecoder {
-    model: Arc<DacModel>,
+/// The decoding state of one signal (mono, mid or side): the network's streaming state
+/// and the concealment's memory.
+struct Channel {
     state: DecoderState,
     layout: FrameLayout,
-    policy: CrcPolicy,
-    concealment: Concealment,
     /// Latent of the last frame given to the network, if it came from received codes
     /// (directly, interpolated or repeated).
     last_latent: Option<Vec<f32>>,
@@ -130,23 +142,31 @@ pub struct DacDecoder {
     gains: VecDeque<f32>,
     /// PCM waiting to go out: starts with the decoder's delay as silence.
     pending: VecDeque<f32>,
+}
+
+/// A streaming DAC decoder for one DRM service.
+pub struct DacDecoder {
+    model: Arc<DacModel>,
+    config: DacConfig,
+    /// The mono or mid signal.
+    mid: Channel,
+    /// Joint stereo: the side signal.
+    side: Option<Channel>,
+    policy: CrcPolicy,
+    concealment: Concealment,
     stats: DecoderStats,
 }
 
 impl DacDecoder {
     pub fn new(model: Arc<DacModel>, config: DacConfig) -> Result<Self, DacError> {
-        let state = model.decoder_state()?;
+        let side = config.side_config().map(|s| Channel::new(&model, s)).transpose()?;
         Ok(Self {
+            mid: Channel::new(&model, config)?,
+            side,
             model,
-            state,
-            layout: FrameLayout::new(config),
+            config,
             policy: CrcPolicy::default(),
             concealment: Concealment::default(),
-            last_latent: None,
-            gap: 0,
-            gain: 0.0,
-            gains: VecDeque::new(),
-            pending: std::iter::repeat_n(0.0, DECODER_LAG).collect(),
             stats: DecoderStats::default(),
         })
     }
@@ -160,7 +180,7 @@ impl DacDecoder {
     }
 
     pub fn config(&self) -> DacConfig {
-        self.layout.config
+        self.config
     }
 
     pub fn set_crc_policy(&mut self, p: CrcPolicy) {
@@ -178,11 +198,36 @@ impl DacDecoder {
     /// Decode one audio super frame (the stream's logical frame without text message
     /// bytes).
     pub fn decode_super_frame(&mut self, sf: &[u8]) -> Result<DecodedSuperFrame, DacError> {
-        let u = self.layout.unpack(sf)?;
+        let (mid, side) = unpack_super_frame(self.config, sf)?;
+        let depth = self.usable_depth(&mid, self.mid.layout, true);
+        let side_layout = self.side.as_ref().map(|s| s.layout);
+        let side = side.zip(side_layout).map(|(u, layout)| {
+            let mut d = self.usable_depth(&u, layout, false);
+            for (s, &m) in d.iter_mut().zip(&depth) {
+                if m == 0 {
+                    *s = 0;
+                }
+            }
+            (u.codes, d)
+        });
+        self.decode_frames(&mid.codes, depth, side.as_ref().map(|(c, d)| (c, *d)))
+    }
+
+    /// 400 ms of concealment (nothing received).
+    pub fn conceal_super_frame(&mut self) -> Result<DecodedSuperFrame, DacError> {
+        let lost = [0; FRAMES_PER_SUPER_FRAME];
+        let side = self.side.as_ref().map(|s| Codes::new(s.layout.codebooks()));
+        self.decode_frames(&Codes::new(self.mid.layout.codebooks()), lost, side.as_ref().map(|c| (c, lost)))
+    }
+
+    /// The codebooks each frame of a signal (laid out by `layout`) decodes, by the CRC
+    /// results and the policy; counts the regions, and with `count_frames` the
+    /// unverified frames.
+    fn usable_depth(&mut self, u: &Unpacked, layout: FrameLayout, count_frames: bool) -> [usize; FRAMES_PER_SUPER_FRAME] {
         self.stats.regions_failed += (u.failed + u.repaired) as u64;
         self.stats.regions_repaired += u.repaired as u64;
-        let all = self.layout.codebooks();
-        let group = self.layout.config.group_frames;
+        let all = layout.codebooks();
+        let group = layout.config.group_frames;
         let mut depth = u.depth;
         let regions = u.region_ok.iter().map(Vec::len).sum::<usize>().max(1);
         let garbage = u.failed as f64 >= GARBAGE_FRACTION * regions as f64;
@@ -199,30 +244,79 @@ impl DacDecoder {
             }
         }
         // Frames that use codes of a failed region.
-        let unverified = (0..FRAMES_PER_SUPER_FRAME)
-            .filter(|&f| {
-                (0..self.layout.layers())
-                    .any(|l| layer_codebooks(l).start < depth[f] && !u.region_ok[l][f / group])
-            })
-            .count();
-        self.stats.frames_unverified += unverified as u64;
-        self.decode_frames(&u.codes, depth)
+        if count_frames {
+            let unverified = (0..FRAMES_PER_SUPER_FRAME)
+                .filter(|&f| (0..layout.layers()).any(|l| layer_codebooks(l).start < depth[f] && !u.region_ok[l][f / group]))
+                .count();
+            self.stats.frames_unverified += unverified as u64;
+        }
+        depth
     }
 
-    /// 400 ms of concealment (nothing received).
-    pub fn conceal_super_frame(&mut self) -> Result<DecodedSuperFrame, DacError> {
-        self.decode_frames(&Codes::new(self.layout.codebooks()), [0; FRAMES_PER_SUPER_FRAME])
+    fn decode_frames(
+        &mut self,
+        codes: &Codes,
+        depth: [usize; FRAMES_PER_SUPER_FRAME],
+        side: Option<(&Codes, [usize; FRAMES_PER_SUPER_FRAME])>,
+    ) -> Result<DecodedSuperFrame, DacError> {
+        let (model, concealment) = (&*self.model, self.concealment);
+        let mid = &mut self.mid;
+        let (pcm, side_depth) = match (self.side.as_mut(), side) {
+            (Some(side), Some((side_codes, side_depth))) => {
+                // (Rust note: the two closures borrow different channels mutably, which
+                // `rayon::join` may run on two threads at once.)
+                let (m, s) = rayon::join(
+                    || mid.decode(model, codes, &depth, concealment),
+                    || side.decode(model, side_codes, &side_depth, concealment),
+                );
+                let (m, s) = (m?, s?);
+                let pcm = m.iter().zip(&s).flat_map(|(&m, &s)| [m + s, m - s]).collect();
+                (pcm, Some(side_depth))
+            }
+            _ => (mid.decode(model, codes, &depth, concealment)?, None),
+        };
+
+        let concealed = depth.iter().filter(|&&d| d == 0).count();
+        let degraded = depth.iter().filter(|&&d| d > 0 && d < self.config.codebooks()).count();
+        let s = &mut self.stats;
+        s.super_frames += 1;
+        s.frames_concealed += concealed as u64;
+        s.frames_degraded += degraded as u64;
+        s.frames_full += (FRAMES_PER_SUPER_FRAME - concealed - degraded) as u64;
+        s.side_frames_concealed += side_depth.map_or(0, |d| d.iter().filter(|&&d| d == 0).count()) as u64;
+        Ok(DecodedSuperFrame { pcm, channels: self.config.channels(), depth, side_depth, concealed, degraded })
+    }
+}
+
+impl Channel {
+    fn new(model: &DacModel, config: DacConfig) -> Result<Self, DacError> {
+        Ok(Self {
+            state: model.decoder_state()?,
+            layout: FrameLayout::new(config),
+            last_latent: None,
+            gap: 0,
+            gain: 0.0,
+            gains: VecDeque::new(),
+            pending: std::iter::repeat_n(0.0, DECODER_LAG).collect(),
+        })
     }
 
-    fn decode_frames(&mut self, codes: &Codes, depth: [usize; FRAMES_PER_SUPER_FRAME]) -> Result<DecodedSuperFrame, DacError> {
+    /// 400 ms of this signal's PCM from the codes and usable depths of a super frame.
+    fn decode(
+        &mut self,
+        model: &DacModel,
+        codes: &Codes,
+        depth: &[usize; FRAMES_PER_SUPER_FRAME],
+        concealment: Concealment,
+    ) -> Result<Vec<f32>, DacError> {
         let mut latents = vec![0f32; FRAMES_PER_SUPER_FRAME * LATENT_DIM];
         for (f, out) in latents.as_chunks_mut::<LATENT_DIM>().0.iter_mut().enumerate() {
             if depth[f] > 0 {
-                self.model.latent(codes.frame(f), depth[f], out)?;
+                model.latent(codes.frame(f), depth[f], out)?;
             }
         }
         let mut gains = [1f32; FRAMES_PER_SUPER_FRAME];
-        let last_valid = self.fill_gaps(&depth, &mut latents, &mut gains);
+        let last_valid = self.fill_gaps(depth, &mut latents, &mut gains, concealment);
         // Gain ramps across each frame from the previous frame's gain to its own; they
         // wait with the frames' samples for the network's look-ahead.
         let mut g0 = self.gain;
@@ -231,7 +325,7 @@ impl DacDecoder {
             g0 = g1;
         }
         self.gain = g0;
-        let out = self.model.decode_latents_stream(&mut self.state, &latents)?;
+        let out = model.decode_latents_stream(&mut self.state, &latents)?;
         let n = out.len().min(self.gains.len());
         for (s, g) in out.into_iter().zip(self.gains.drain(..n)) {
             self.pending.push_back(s * g);
@@ -240,20 +334,18 @@ impl DacDecoder {
         let mut pcm: Vec<f32> = self.pending.drain(..take).collect();
         pcm.resize(SUPER_FRAME_SAMPLES, 0.0);
         self.last_latent = last_valid.then(|| latents[latents.len() - LATENT_DIM..].to_vec());
-
-        let concealed = depth.iter().filter(|&&d| d == 0).count();
-        let degraded = depth.iter().filter(|&&d| d > 0 && d < self.layout.codebooks()).count();
-        let s = &mut self.stats;
-        s.super_frames += 1;
-        s.frames_concealed += concealed as u64;
-        s.frames_degraded += degraded as u64;
-        s.frames_full += (FRAMES_PER_SUPER_FRAME - concealed - degraded) as u64;
-        Ok(DecodedSuperFrame { pcm, depth, concealed, degraded })
+        Ok(pcm)
     }
 
     /// Fill the latents and output gains of the lost frames (`depth` 0). Returns whether
     /// the last frame's latent derives from received codes.
-    fn fill_gaps(&mut self, depth: &[usize; FRAMES_PER_SUPER_FRAME], latents: &mut [f32], gains: &mut [f32; FRAMES_PER_SUPER_FRAME]) -> bool {
+    fn fill_gaps(
+        &mut self,
+        depth: &[usize; FRAMES_PER_SUPER_FRAME],
+        latents: &mut [f32],
+        gains: &mut [f32; FRAMES_PER_SUPER_FRAME],
+        concealment: Concealment,
+    ) -> bool {
         const D: usize = LATENT_DIM;
         let n = FRAMES_PER_SUPER_FRAME;
         let mut valid = self.last_latent.is_some();
@@ -271,10 +363,8 @@ impl DacDecoder {
             // super frame.
             let prev: Option<Vec<f32>> =
                 if f > 0 { valid.then(|| latents[(f - 1) * D..f * D].to_vec()) } else { self.last_latent.clone() };
-            let interpolate = self.concealment == Concealment::Interpolate
-                && self.gap == 0
-                && end < n
-                && len <= MAX_INTERPOLATION_FRAMES;
+            let interpolate =
+                concealment == Concealment::Interpolate && self.gap == 0 && end < n && len <= MAX_INTERPOLATION_FRAMES;
             match prev {
                 Some(prev) if interpolate => {
                     let next = latents[end * D..(end + 1) * D].to_vec();
@@ -293,7 +383,7 @@ impl DacDecoder {
                         if let Some(p) = &prev {
                             latents[(f + i) * D..(f + i + 1) * D].copy_from_slice(p);
                         }
-                        gains[f + i] = match self.concealment {
+                        gains[f + i] = match concealment {
                             _ if prev.is_none() => 0.0,
                             Concealment::Mute => 0.0,
                             _ if k <= HOLD_FRAMES => 1.0,
@@ -324,16 +414,21 @@ impl DrmAudioDecoder for DacDecoder {
         Ok(pcm_frame(d))
     }
 
+    /// `DAC 6 kbit/s (8 codebooks), 24 kHz mono` or `DAC joint stereo, 12 kbit/s mid +
+    /// 1.5 kbit/s side, 24 kHz`.
     fn describe(&self) -> String {
-        let bw: Bandwidth = self.layout.config.bandwidth;
-        format!("DAC {bw} ({} codebooks), 24 kHz mono", bw.codebooks())
+        let bw = self.config.bandwidth;
+        match self.config.side {
+            None => format!("DAC {bw} ({} codebooks), 24 kHz mono", bw.codebooks()),
+            Some(_) => format!("DAC joint stereo, {}, 24 kHz", self.config.rates()),
+        }
     }
 }
 
 /// A decoded super frame as the engine's PCM block: flagged as concealed when any of
 /// its frames was.
 fn pcm_frame(d: DecodedSuperFrame) -> PcmFrame {
-    PcmFrame { sample_rate: SAMPLE_RATE, channels: 1, samples: d.pcm, concealed: d.concealed > 0 }
+    PcmFrame { sample_rate: SAMPLE_RATE, channels: d.channels as _, samples: d.pcm, concealed: d.concealed > 0 }
 }
 
 /// Open the decoder of a DAC service for the receiver engine, from the service's

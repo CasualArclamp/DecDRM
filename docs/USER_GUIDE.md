@@ -530,7 +530,9 @@ multiplex: streams, bit rates, codec settings and what goes where.
   optional ISO language and country. Each service is either:
   - an **audio service** with `[service.audio]`:
     - `codec` = `aac`, `he-aac`, `he-aac-v2`, `xhe-aac`, `opus` or `dac`;
-    - `core_rate`, `stereo`;
+    - `core_rate`, `stereo` (with `dac`: joint stereo);
+    - `dac` only: `bandwidth_kbps`, and with `stereo` `side_bandwidth_kbps` (see
+      [DAC](#dac-neural-codec));
     - `share`, the service's part of the audio capacity when there are several audio
       services: a weight, so 70 and 30 split it 70/30 (default 1, equal parts);
     - `text = [...]`, text messages sent in turn;
@@ -720,7 +722,7 @@ url = "https://radio.example/live.mp3"
 
 DAC, the Descript Audio Codec, is a neural audio codec, which DecDRM carries as its own
 audio coding (SDC audio coding 10 with a `DAC1` configuration). Other receivers,
-including Dream, ignore such services. It runs at 1.5–24 kbit/s (24 kHz mono) with
+including Dream, ignore such services. It runs at 1.5–24 kbit/s (24 kHz, mono or joint stereo) with
 CRC-protected layers, and conceals lost frames well: at 15 dB SNR it lost 1.4 % of
 frames where HE-AAC lost 37 %.
 
@@ -735,13 +737,24 @@ In the station file set `codec = "dac"`, optionally with `bandwidth_kbps` (1.5, 
 codes twice). Weights are looked for in `DECDRM_MODELS`, then in `models/` next to the
 program and in its parent directories.
 
+**Joint stereo.** `stereo = true` codes the mid signal (L + R) / 2 at `bandwidth_kbps`
+and the side signal (L − R) / 2 at `side_bandwidth_kbps` (by default an eighth of the
+mid's rate, at least 1.5: 12 kbit/s mid + 1.5 side, 24 + 3). In the GUI's Transmitter
+form: *Joint stereo* and *Side bit rate*. The receiver shows e.g. "DAC joint stereo,
+12 kbit/s mid + 1.5 kbit/s side, 24 kHz". If the side signal is lost for a moment the
+sound fades to mono, not to silence. DecDRM 0.5.4 and earlier play such a service in
+mono (its mid signal). Joint stereo adds one byte to the SDC's audio entry, which the
+smallest SDCs (mode D, 4-QAM SDC) cannot hold; the station says so.
+
 Things to know:
 - **Quality.** On decoded broadcast audio and speech, DAC at 3 kbit/s came about as
   close to the original as EnCodec at 12 kbit/s, and DAC at 6 kbit/s closer than
   EnCodec at 24.
 - **CPU.** The network is large: decoding takes about a quarter of real time on a
   16-thread desktop CPU (0.83 on a single core), encoding about 0.15. A slow PC
-  cannot keep up, and the audio then stutters.
+  cannot keep up, and the audio then stutters. Joint stereo runs two decoders: about
+  1.6 times the work of mono (on a Ryzen 7 4800H laptop 0.95 of real time, too close
+  to keep up reliably).
 - **Delay.** DAC looks ahead: the transmitter adds 107 ms, the receiver 131 ms.
 - **EnCodec.** DecDRM 0.4.6 and earlier used EnCodec, Meta's neural codec, signalled
   as `ENC1`. Such services are recognised and shown as "EnCodec (no longer

@@ -81,7 +81,8 @@ encoding) and libopus.
 - Light on the CPU: the receiver decodes 10 kHz signals at 100–150× real time (20 kHz
   at ~45×) on one core; the GUI needs a few percent of a core while decoding live.
 - **DAC** (the Descript Audio Codec, a neural codec) as a DecDRM-only audio codec:
-  1.5–24 kbit/s, CRC-protected layers and concealment — at 15 dB SNR it lost 1.4 % of
+  1.5–24 kbit/s, mono or joint stereo (e.g. 12 kbit/s mid + 1.5 kbit/s side),
+  CRC-protected layers and concealment — at 15 dB SNR it lost 1.4 % of
   audio frames where HE-AAC lost 37 %. On broadcast audio and speech, DAC at 3 kbit/s
   came about as close to the original as EnCodec (the neural codec of DecDRM 0.4.6 and
   earlier) at 12. It needs a reasonably modern CPU: decoding takes a quarter of real

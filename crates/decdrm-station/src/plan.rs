@@ -227,8 +227,9 @@ impl AudioPlan {
             }
             Codec::XheAac => format!("xHE-AAC {ch}, {} kHz ({} kHz core)", khz(self.input_rate), khz(self.core_rate)),
             Codec::Dac => match self.dac {
+                Some(c) if c.is_stereo() => format!("{}, 24 kHz", c.describe()),
                 Some(c) => format!("{}, 24 kHz mono", c.describe()),
-                None => "DAC, 24 kHz mono".into(),
+                None => format!("DAC, 24 kHz {ch}"),
             },
         }
     }
@@ -976,8 +977,8 @@ fn check_audio(cfg: &StationConfig, name: &str, a: &crate::config::AudioSettings
     }
     if a.codec == Codec::Dac {
         check_dac(name, a, rate, p);
-    } else if a.bandwidth_kbps.is_some() {
-        p.push(format!("{name}: bandwidth_kbps is only used by codec = \"dac\""));
+    } else if a.bandwidth_kbps.is_some() || a.side_bandwidth_kbps.is_some() {
+        p.push(format!("{name}: bandwidth_kbps and side_bandwidth_kbps are only used by codec = \"dac\""));
     }
     if a.codec == Codec::XheAac {
         if a.core_rate.is_some() {
@@ -1345,19 +1346,22 @@ fn xhe_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::resul
 // DAC (DecDRM's neural codec)
 // ---------------------------------------------------------------------------------
 
-/// Checks of a DAC service: 24 kHz mono, a valid bandwidth, and the codec built in
-/// with its weights installed (so `decdrm tx --check` already tells).
+/// Checks of a DAC service: 24 kHz, valid bandwidths (the side's for joint stereo
+/// only), and the codec built in with its weights installed (so `decdrm tx --check`
+/// already tells).
 fn check_dac(name: &str, a: &crate::config::AudioSettings, rate: u32, p: &mut Problems) {
     if rate != decdrm_dac::SAMPLE_RATE {
         p.push(format!("{name}: DAC always runs at 24 kHz; remove core_rate"));
     }
-    if a.stereo {
-        p.push(format!("{name}: DAC (the 24 kHz model) is mono here; remove stereo = true"));
+    for (key, value) in [("bandwidth_kbps", a.bandwidth_kbps), ("side_bandwidth_kbps", a.side_bandwidth_kbps)] {
+        if let Some(kbps) = value
+            && decdrm_dac::Bandwidth::from_kbps(kbps).is_none()
+        {
+            p.push(format!("{name}: DAC {key} {kbps} is not one of 1.5, 3, 6, 12 and 24"));
+        }
     }
-    if let Some(kbps) = a.bandwidth_kbps
-        && decdrm_dac::Bandwidth::from_kbps(kbps).is_none()
-    {
-        p.push(format!("{name}: DAC bandwidth_kbps {kbps} is not one of 1.5, 3, 6, 12 and 24"));
+    if a.side_bandwidth_kbps.is_some() && !a.stereo {
+        p.push(format!("{name}: side_bandwidth_kbps is for joint stereo: set stereo = true, or remove it"));
     }
     if !decdrm_dac::BUILT_IN {
         p.push(format!(
@@ -1371,14 +1375,20 @@ fn check_dac(name: &str, a: &crate::config::AudioSettings, rate: u32, p: &mut Pr
 
 /// DAC parameters of an audio service carried in `stream`: the requested
 /// bandwidth, or the highest that fits, and the framing that spends the spare bytes on
-/// robustness (`decdrm_dac::plan`).
+/// robustness (`decdrm_dac::plan`); with `stereo`, joint stereo (mid and side signal).
 fn dac_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::result::Result<AudioPlan, String> {
     let text = has_text(a);
     let len = stream.bytes();
     let text_bytes = if text { TEXT_MESSAGE_BYTES } else { 0 };
     let super_frame_len = len.saturating_sub(text_bytes);
     let requested = a.bandwidth_kbps.and_then(decdrm_dac::Bandwidth::from_kbps);
-    let config = decdrm_dac::choose_config(super_frame_len, requested).map_err(|e| {
+    let chosen = if a.stereo {
+        let side = a.side_bandwidth_kbps.and_then(decdrm_dac::Bandwidth::from_kbps);
+        decdrm_dac::choose_stereo_config(super_frame_len, requested, side)
+    } else {
+        decdrm_dac::choose_config(super_frame_len, requested)
+    };
+    let config = chosen.map_err(|e| {
         let kbit = |bytes: usize| bytes as f64 * 8.0 / FRAME_SECONDS / 1000.0;
         let remedy = if stream.hierarchical {
             "the hierarchical stream's length is fixed by the channel: use a higher protection_hierarchical, \
@@ -1386,29 +1396,34 @@ fn dac_plan(a: &crate::config::AudioSettings, stream: &StreamPlan) -> std::resul
         } else {
             "reduce the data bit rates, or use a wider channel, 64-QAM or a higher protection level number"
         };
-        let lower = if requested.is_some() { "a lower bandwidth_kbps, " } else { "" };
+        let lower = match (requested.is_some(), a.stereo) {
+            (true, _) => "a lower bandwidth_kbps, ",
+            (false, true) => "mono, ",
+            (false, false) => "",
+        };
         format!(
             "{:.1} kbit/s left for the audio stream; DAC {} needs at least {:.1} kbit/s ({lower}{remedy})",
             kbit(len),
-            e.bandwidth,
+            e.rates(),
             kbit(e.needed + text_bytes)
         )
     })?;
     let rate = decdrm_dac::SAMPLE_RATE;
-    let params =
-        AudioParams::new(stream.id, AudioCodec::Dac, false, AudioMode::Mono, rate, text, config.codec_config().to_vec());
+    // The SDC's audio mode stays 00: for audio coding 10 it is rfa, and joint stereo is
+    // signalled in the codec config.
+    let params = AudioParams::new(stream.id, AudioCodec::Dac, false, AudioMode::Mono, rate, text, config.codec_config());
     Ok(AudioPlan {
         stream: stream.id,
         codec: Codec::Dac,
         core_rate: rate,
-        stereo: false,
+        stereo: config.is_stereo(),
         input_rate: rate,
-        input_channels: 1,
+        input_channels: config.channels(),
         text,
         frames_per_super_frame: decdrm_dac::FRAMES_PER_SUPER_FRAME,
         super_frame_len,
-        payload_len: decdrm_dac::FrameLayout::new(config).min_bytes(),
-        encoder_bitrate: config.bandwidth.bits_per_second(),
+        payload_len: config.min_bytes(),
+        encoder_bitrate: config.bits_per_second(),
         opus_packet_bytes: 0,
         params,
         dac: Some(config),

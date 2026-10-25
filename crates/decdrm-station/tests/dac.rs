@@ -2,9 +2,9 @@
 //!
 //! * `dac_configuration` — planning and validation (with or without the `dac`
 //!   feature);
-//! * `dac_mode_b_*`, `dac_mode_d_*` — end-to-end loopbacks: the station writes a
-//!   few seconds of signal to a WAV file and the receiver (`decdrm_engine::Session`)
-//!   decodes it. They need `--features dac` and the model weights
+//! * `dac_mode_b_*`, `dac_mode_d_*`, `dac_joint_stereo_*` — end-to-end loopbacks: the
+//!   station writes a few seconds of signal to a WAV file and the receiver
+//!   (`decdrm_engine::Session`) decodes it. They need `--features dac` and the model weights
 //!   (`decdrm models download dac`) and are skipped without the weights.
 //!
 //! Run with `--nocapture` to see the multiplex plans and what was decoded.
@@ -45,9 +45,28 @@ fn dac_configuration() {
     }
     // Invalid settings.
     let problems = |audio: &str| StationConfig::from_toml_str(&toml(audio)).unwrap().validate().unwrap_err().to_string();
-    let e = problems("codec = \"dac\"\nstereo = true\ncore_rate = 12000\nbandwidth_kbps = 5");
-    assert!(e.contains("mono") && e.contains("24 kHz") && e.contains("bandwidth_kbps 5"), "{e}");
+    let e = problems("codec = \"dac\"\nstereo = true\ncore_rate = 12000\nbandwidth_kbps = 5\nside_bandwidth_kbps = 2");
+    assert!(e.contains("24 kHz") && e.contains("bandwidth_kbps 5") && e.contains("side_bandwidth_kbps 2"), "{e}");
     assert!(problems("codec = \"aac\"\nbandwidth_kbps = 6").contains("only used by codec = \"dac\""));
+    assert!(problems("codec = \"dac\"\nside_bandwidth_kbps = 1.5").contains("set stereo = true"));
+    // Joint stereo in the same stream: 3 kbit/s mid + 1.5 side. The mode D channel's
+    // 4-QAM SDC (15 bytes) has no room for the side's parameter byte, which the
+    // station says.
+    match StationConfig::from_toml_str(&toml("codec = \"dac\"\nstereo = true")).unwrap().validate() {
+        Ok(plan) => panic!("joint stereo fitted into the 4-QAM SDC: {}", plan.describe(&cfg)),
+        Err(e) if !decdrm_dac::BUILT_IN || decdrm_dac::find_weights().is_err() => drop(e),
+        Err(e) => assert!(e.to_string().contains("SDC"), "{e}"),
+    }
+    let stereo = StationConfig::from_toml_str(&toml("codec = \"dac\"\nstereo = true").replace("4-QAM", "16-QAM")).unwrap();
+    if let Ok(plan) = stereo.validate() {
+        let a = plan.services[0].audio.as_ref().unwrap();
+        let c = a.dac.expect("DAC configuration");
+        println!("{}", plan.describe(&stereo));
+        assert_eq!((c.bandwidth.kbps(), c.side.map(|s| s.bandwidth.kbps())), (3.0, Some(1.5)));
+        assert_eq!((a.stereo, a.input_channels, a.payload_len), (true, 2, c.min_bytes()));
+        assert_eq!(a.params.codec_config, c.codec_config());
+        assert!(plan.describe(&stereo).contains("DAC joint stereo, mid 3 kbit/s"), "{}", plan.describe(&stereo));
+    }
     if decdrm_dac::BUILT_IN && decdrm_dac::find_weights().is_ok() {
         // 12 kbit/s does not fit into 381 bytes.
         let e = problems("codec = \"dac\"\nbandwidth_kbps = 12");
@@ -180,6 +199,15 @@ mod loopback {
         w.finalize().unwrap();
     }
 
+    /// A WAV at 44.1 kHz with a different tone on each channel.
+    fn write_stereo_tones(path: &Path, left: f64, right: f64, amp: f32, seconds: f64) {
+        let mut w = FileWriter::create(path, AudioFormat::new(44_100, 2), Container::Wav, Encoding::Float32).unwrap();
+        let tone = |f: f64, i: usize| amp * (std::f64::consts::TAU * f * i as f64 / 44_100.0).sin() as f32;
+        let block: Vec<f32> = (0..(seconds * 44_100.0) as usize).flat_map(|i| [tone(left, i), tone(right, i)]).collect();
+        w.write(&block).unwrap();
+        w.finalize().unwrap();
+    }
+
     fn check_service(d: &Decoded, plan: &MultiplexPlan, kbps: f64, text: &str) {
         let st = &d.session.audio_stats;
         assert!(st.codec.starts_with(&format!("DAC {kbps} kbit/s")), "{}", st.codec);
@@ -230,6 +258,70 @@ mod loopback {
         assert_eq!((c.bandwidth.kbps(), c.repeated_layers), (12.0, 3));
         let d = decode(&dir.path().join("dac_b.wav"));
         check_service(&d, &plan, 12.0, "DAC over DRM");
+    }
+
+    /// Joint stereo, mode B, 10 kHz, 64-QAM: 440 Hz on the left and 1 kHz on the right
+    /// come out on their sides, from 12 kbit/s mid + 3 kbit/s side (a 1.5 kbit/s side
+    /// separates two steady tones by only about 6 dB; music fares better, see
+    /// docs/DESIGN.md).
+    #[test]
+    fn dac_joint_stereo_mode_b_loopback() {
+        if !weights_installed() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write_stereo_tones(&dir.path().join("tones.wav"), 440.0, 1000.0, 0.25, 3.0);
+        let toml = r#"
+            [channel]
+            mode = "B"
+            occupancy = 3
+            msc_mode = "64-QAM"
+            interleaving = "short"
+            protection_b = 1
+            [output]
+            file = "dac_stereo.wav"
+            [[service]]
+            label = "DAC stereo"
+            id = 0xD0D0E5
+            [service.audio]
+            codec = "dac"
+            stereo = true
+            side_bandwidth_kbps = 3
+            text = ["Joint stereo"]
+            input = { file = "tones.wav" }
+        "#;
+        let (plan, _) = transmit(dir.path(), toml, 25);
+        let a = plan.services[0].audio.as_ref().unwrap();
+        let c = a.dac.unwrap();
+        assert_eq!((c.bandwidth.kbps(), c.side.map(|s| s.bandwidth.kbps())), (12.0, Some(3.0)));
+        let mut d = decode(&dir.path().join("dac_stereo.wav"));
+        let st = &d.session.audio_stats;
+        assert_eq!(st.codec, "DAC joint stereo, 12 kbit/s mid + 3 kbit/s side, 24 kHz");
+        assert!(st.frames_ok >= 12, "{} super frames decoded", st.frames_ok);
+        assert_eq!((st.frames_concealed, st.super_frame_errors), (0, 0), "every CRC must pass");
+        assert_eq!((d.rate, d.channels), (24_000, 2));
+        assert!(d.texts.iter().any(|t| t == "Joint stereo"), "{:?}", d.texts);
+        let svc = d.session.ensemble().service(0).expect("service 0");
+        assert_eq!(svc.audio.as_ref(), Some(&a.params));
+        let views = d.session.service_views();
+        assert!(
+            views[0].description.starts_with("DAC joint stereo 12 kbit/s mid + 3 kbit/s side 24 kHz, text"),
+            "{}",
+            views[0].description
+        );
+        let audio = views[0].audio.as_ref().unwrap();
+        assert_eq!((audio.stereo, audio.detail.as_deref()), (true, Some("12 + 3 kbit/s")));
+        // Each channel's tone, and how much of the other side's leaks in.
+        let stereo = std::mem::take(&mut d.audio);
+        for (ch, want, other) in [(0, 440.0, 1000.0), (1, 1000.0, 440.0)] {
+            d.audio = stereo.iter().skip(ch).step_by(2).copied().collect();
+            let (f, amp) = dominant_tone(&d, 100.0, 3000.0);
+            let (_, leak) = dominant_tone(&d, other - 10.0, other + 10.0);
+            println!("channel {ch}: {f} Hz, amplitude {amp:.3}; the other side's tone {leak:.4}");
+            assert_eq!(f, want);
+            assert!((amp / 0.25 - 1.0).abs() < 0.3, "amplitude {amp}");
+            assert!(leak < amp / 4.0, "the other channel's tone leaks: {leak} against {amp}");
+        }
     }
 
     /// Real residual errors: the mode B / 64-QAM signal with white noise, decoded by the

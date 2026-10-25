@@ -33,7 +33,8 @@ pub const CONFIG_MAGIC: [u8; 5] = [0x00, b'D', b'A', b'C', b'1'];
 /// The start of the codec specific config of the EnCodec services DecDRM 0.4.6 and
 /// earlier sent (the same framing with Meta's EnCodec model, which DAC replaced).
 pub const ENCODEC_MAGIC: [u8; 4] = [0x00, b'E', b'N', b'C'];
-/// Length of the codec specific config: the magic and one parameter byte.
+/// Length of the codec specific config of a mono service: the magic and one parameter
+/// byte. A joint stereo service adds the side signal's parameter byte.
 pub const CONFIG_LEN: usize = CONFIG_MAGIC.len() + 1;
 /// Frames per CRC group, by their 3-bit code in the parameter byte (the divisors of 30).
 pub const GROUP_SIZES: [usize; 8] = [1, 2, 3, 5, 6, 10, 15, 30];
@@ -116,8 +117,13 @@ impl fmt::Display for Bandwidth {
 }
 
 /// Everything a receiver needs to know about a DAC service besides its stream
-/// length: the bandwidth and the DRM framing. Sent as the codec specific config of SDC
-/// entity type 9 ([`DacConfig::codec_config`]).
+/// length: the bandwidth and the DRM framing, and for joint stereo those of the side
+/// signal. Sent as the codec specific config of SDC entity type 9
+/// ([`DacConfig::codec_config`]).
+///
+/// `bandwidth`, `group_frames` and `repeated_layers` describe the mono signal, or in
+/// joint stereo the mid signal (L + R) / 2, which comes first in the super frame; `side`
+/// codes (L − R) / 2 after it (see [`crate::framing`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DacConfig {
     /// Codebooks per frame.
@@ -126,6 +132,17 @@ pub struct DacConfig {
     pub group_frames: usize,
     /// Leading layers sent a second time after the main block (0 ..= 3, at most
     /// [`Bandwidth::layers`]).
+    pub repeated_layers: usize,
+    /// Joint stereo: the coding of the side signal; `None` for a mono service.
+    pub side: Option<SideCoding>,
+}
+
+/// The coding of the side signal of a joint stereo service: its own bandwidth (usually
+/// far below the mid signal's) and framing, with the same meaning as in [`DacConfig`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SideCoding {
+    pub bandwidth: Bandwidth,
+    pub group_frames: usize,
     pub repeated_layers: usize,
 }
 
@@ -156,36 +173,80 @@ pub enum ConfigError {
 }
 
 impl DacConfig {
-    /// A validated configuration.
+    /// A validated mono configuration.
     pub fn new(bandwidth: Bandwidth, group_frames: usize, repeated_layers: usize) -> Result<Self, ConfigError> {
-        if !GROUP_SIZES.contains(&group_frames) {
-            return Err(ConfigError::InvalidGroup(group_frames));
-        }
-        let max = MAX_REPEATED_LAYERS.min(bandwidth.layers());
-        if repeated_layers > max {
-            return Err(ConfigError::InvalidRepetition { repeated: repeated_layers, max, bandwidth });
-        }
-        Ok(Self { bandwidth, group_frames, repeated_layers })
+        validate(bandwidth, group_frames, repeated_layers)?;
+        Ok(Self { bandwidth, group_frames, repeated_layers, side: None })
     }
 
-    /// Codebooks per frame.
+    /// Joint stereo: `mid`'s bandwidth and framing for the mid signal, `side`'s for the
+    /// side signal (both validated mono configurations).
+    ///
+    /// (Rust note: `Self { side: …, ..mid }` copies every other field from `mid`.)
+    pub fn joint_stereo(mid: DacConfig, side: DacConfig) -> Self {
+        let side =
+            SideCoding { bandwidth: side.bandwidth, group_frames: side.group_frames, repeated_layers: side.repeated_layers };
+        Self { side: Some(side), ..mid }
+    }
+
+    /// Whether the service is joint stereo.
+    pub fn is_stereo(&self) -> bool {
+        self.side.is_some()
+    }
+
+    /// Output channels: 1, or 2 for joint stereo.
+    pub fn channels(&self) -> usize {
+        if self.is_stereo() { 2 } else { 1 }
+    }
+
+    /// The mono (or mid) signal's coding, as a mono configuration.
+    pub fn mid(&self) -> DacConfig {
+        Self { side: None, ..*self }
+    }
+
+    /// The side signal's coding as a mono configuration (joint stereo only).
+    pub fn side_config(&self) -> Option<DacConfig> {
+        self.side.map(|s| Self {
+            bandwidth: s.bandwidth,
+            group_frames: s.group_frames,
+            repeated_layers: s.repeated_layers,
+            side: None,
+        })
+    }
+
+    /// Codebooks per frame (of the mono or mid signal).
     pub fn codebooks(&self) -> usize {
         self.bandwidth.codebooks()
     }
 
-    /// The codec specific config for SDC entity type 9: [`CONFIG_MAGIC`], then
-    /// `bandwidth tier (3 bits) | group size code (3 bits) | repeated layers (2 bits)`.
-    pub fn codec_config(&self) -> [u8; CONFIG_LEN] {
-        let group = GROUP_SIZES.iter().position(|&g| g == self.group_frames).expect("validated group size") as u8;
-        let params = (self.bandwidth.tier() << 5) | (group << 2) | self.repeated_layers as u8;
-        let mut c = [0u8; CONFIG_LEN];
-        c[..CONFIG_MAGIC.len()].copy_from_slice(&CONFIG_MAGIC);
-        c[CONFIG_MAGIC.len()] = params;
+    /// Bit rate of all codes (mid and side), bit/s.
+    pub fn bits_per_second(&self) -> u32 {
+        self.bandwidth.bits_per_second() + self.side.map_or(0, |s| s.bandwidth.bits_per_second())
+    }
+
+    /// Smallest audio super frame that holds this configuration (mid and side), bytes.
+    pub fn min_bytes(&self) -> usize {
+        use crate::framing::FrameLayout;
+        FrameLayout::new(self.mid()).min_bytes() + self.side_config().map_or(0, |s| FrameLayout::new(s).min_bytes())
+    }
+
+    /// The codec specific config for SDC entity type 9: [`CONFIG_MAGIC`], then the
+    /// parameter byte `bandwidth tier (3 bits) | group size code (3 bits) | repeated
+    /// layers (2 bits)`; joint stereo adds the side signal's parameter byte, laid out
+    /// the same way. (Receivers that know only mono ignore it and decode the mid
+    /// signal, which comes first in the super frame.)
+    pub fn codec_config(&self) -> Vec<u8> {
+        let mut c = CONFIG_MAGIC.to_vec();
+        c.push(param_byte(self.bandwidth, self.group_frames, self.repeated_layers));
+        if let Some(s) = self.side {
+            c.push(param_byte(s.bandwidth, s.group_frames, s.repeated_layers));
+        }
         c
     }
 
-    /// Parse a codec specific config. Bytes after the parameter byte are ignored (room
-    /// for compatible additions within format 1).
+    /// Parse a codec specific config. A byte after the parameter byte is the side
+    /// signal's parameter byte (joint stereo); bytes after that are ignored (room for
+    /// compatible additions within format 1).
     pub fn from_codec_config(config: &[u8]) -> Result<Self, ConfigError> {
         if config.starts_with(&ENCODEC_MAGIC) {
             return Err(ConfigError::Encodec);
@@ -199,8 +260,11 @@ impl DacConfig {
             Some(_) => {}
         }
         let &p = config.get(CONFIG_MAGIC.len()).ok_or(ConfigError::Truncated(config.len()))?;
-        let bandwidth = Bandwidth::from_tier(p >> 5).ok_or(ConfigError::InvalidBandwidth(p >> 5))?;
-        Self::new(bandwidth, GROUP_SIZES[usize::from((p >> 2) & 7)], usize::from(p & 3))
+        let mono = parse_param_byte(p)?;
+        match config.get(CONFIG_LEN) {
+            None => Ok(mono),
+            Some(&s) => Ok(Self::joint_stereo(mono, parse_param_byte(s)?)),
+        }
     }
 
     /// Parse the type 9 bytes of a service (the entity body after Short Id and Stream
@@ -213,19 +277,59 @@ impl DacConfig {
         }
     }
 
-    /// E.g. `DAC 6 kbit/s (8 codebooks), CRC per 40 ms, codebooks 0-3 sent twice`.
+    /// E.g. `DAC 6 kbit/s (8 codebooks), CRC per 40 ms, codebooks 0-3 sent twice`, or
+    /// for joint stereo `DAC joint stereo, mid 12 kbit/s (16 codebooks), CRC per 40 ms,
+    /// codebooks 0-7 sent twice; side 1.5 kbit/s (2 codebooks), CRC per 40 ms`.
     pub fn describe(&self) -> String {
-        let group_ms = self.group_frames as f64 * 1000.0 / f64::from(FRAME_RATE);
-        let repeated = match self.repeated_layers {
-            0 => String::new(),
-            r => format!(", codebooks 0-{} sent twice", crate::framing::layer_codebooks(r - 1).end - 1),
+        let channel = |bandwidth: Bandwidth, group_frames: usize, repeated_layers: usize| {
+            let group_ms = group_frames as f64 * 1000.0 / f64::from(FRAME_RATE);
+            let repeated = match repeated_layers {
+                0 => String::new(),
+                r => format!(", codebooks 0-{} sent twice", crate::framing::layer_codebooks(r - 1).end - 1),
+            };
+            format!("{bandwidth} ({} codebooks), CRC per {group_ms:.0} ms{repeated}", bandwidth.codebooks())
         };
-        format!(
-            "DAC {} ({} codebooks), CRC per {group_ms:.0} ms{repeated}",
-            self.bandwidth,
-            self.bandwidth.codebooks()
-        )
+        let mid = channel(self.bandwidth, self.group_frames, self.repeated_layers);
+        match self.side {
+            None => format!("DAC {mid}"),
+            Some(s) => {
+                format!("DAC joint stereo, mid {mid}; side {}", channel(s.bandwidth, s.group_frames, s.repeated_layers))
+            }
+        }
     }
+
+    /// The bit rates in a few words: `6 kbit/s mono` or `12 kbit/s mid + 1.5 kbit/s
+    /// side`.
+    pub fn rates(&self) -> String {
+        match self.side {
+            None => format!("{} mono", self.bandwidth),
+            Some(s) => format!("{} mid + {} side", self.bandwidth, s.bandwidth),
+        }
+    }
+}
+
+/// Checks of one signal's coding.
+fn validate(bandwidth: Bandwidth, group_frames: usize, repeated_layers: usize) -> Result<(), ConfigError> {
+    if !GROUP_SIZES.contains(&group_frames) {
+        return Err(ConfigError::InvalidGroup(group_frames));
+    }
+    let max = MAX_REPEATED_LAYERS.min(bandwidth.layers());
+    if repeated_layers > max {
+        return Err(ConfigError::InvalidRepetition { repeated: repeated_layers, max, bandwidth });
+    }
+    Ok(())
+}
+
+/// `bandwidth tier (3 bits) | group size code (3 bits) | repeated layers (2 bits)`.
+fn param_byte(bandwidth: Bandwidth, group_frames: usize, repeated_layers: usize) -> u8 {
+    let group = GROUP_SIZES.iter().position(|&g| g == group_frames).expect("validated group size") as u8;
+    (bandwidth.tier() << 5) | (group << 2) | repeated_layers as u8
+}
+
+/// A parameter byte as a mono configuration.
+fn parse_param_byte(p: u8) -> Result<DacConfig, ConfigError> {
+    let bandwidth = Bandwidth::from_tier(p >> 5).ok_or(ConfigError::InvalidBandwidth(p >> 5))?;
+    DacConfig::new(bandwidth, GROUP_SIZES[usize::from((p >> 2) & 7)], usize::from(p & 3))
 }
 
 #[cfg(test)]
@@ -272,6 +376,33 @@ mod tests {
         assert!(ConfigError::Encodec.to_string().contains("no longer supported"));
         // AAC type 9 bytes are not DAC.
         assert_eq!(DacConfig::from_type9_bytes(&[0x23, 0x80]), Err(ConfigError::NotDac));
+    }
+
+    /// Joint stereo adds the side signal's parameter byte; a mono-only reading of the
+    /// config (its first six bytes) gives the mid signal's configuration.
+    #[test]
+    fn joint_stereo_config() {
+        let mid = DacConfig::new(Bandwidth::Kbps12, 3, 3).unwrap();
+        let side = DacConfig::new(Bandwidth::Kbps1_5, 6, 1).unwrap();
+        let c = DacConfig::joint_stereo(mid, side);
+        assert!(c.is_stereo() && !mid.is_stereo());
+        assert_eq!((c.channels(), c.mid(), c.side_config()), (2, mid, Some(side)));
+        let bytes = c.codec_config();
+        assert_eq!(bytes, [0, b'D', b'A', b'C', b'1', (3 << 5) | (2 << 2) | 3, (4 << 2) | 1]);
+        assert_eq!(DacConfig::from_codec_config(&bytes), Ok(c));
+        assert_eq!(DacConfig::from_codec_config(&bytes[..CONFIG_LEN]), Ok(mid));
+        // Bytes after the side's are ignored.
+        assert_eq!(DacConfig::from_codec_config(&[&bytes[..], &[0xFF]].concat()), Ok(c));
+        assert_eq!(DacConfig::from_codec_config(&[&bytes[..6], &[0xA0]].concat()), Err(ConfigError::InvalidBandwidth(5)));
+        assert_eq!(c.bits_per_second(), 13_500);
+        assert_eq!(c.rates(), "12 kbit/s mid + 1.5 kbit/s side");
+        assert_eq!(mid.rates(), "12 kbit/s mono");
+        assert_eq!(
+            c.describe(),
+            "DAC joint stereo, mid 12 kbit/s (16 codebooks), CRC per 40 ms, codebooks 0-7 sent twice; \
+             side 1.5 kbit/s (2 codebooks), CRC per 80 ms, codebooks 0-1 sent twice"
+        );
+        assert_eq!(c.min_bytes(), mid.min_bytes() + side.min_bytes());
     }
 
     /// The magic mirrors the prefix decdrm-core recognises.

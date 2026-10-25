@@ -6,6 +6,9 @@
 //! up to 32 codes of 10 bits; DecDRM sends 2, 4, 8, 16 or 32 of them per frame, i.e.
 //! 1.5, 3, 6, 12 or 24 kbit/s. This crate carries it over DRM30 as a **DecDRM-only
 //! extension**: standard receivers see a reserved audio coding and ignore the service.
+//! A service is mono, or **joint stereo**: the mid signal (L + R) / 2 and the side
+//! signal (L − R) / 2 coded by DAC each, the side at a lower rate (e.g. 12 kbit/s mid +
+//! 1.5 kbit/s side; see *Joint stereo*).
 //!
 //! DAC replaced EnCodec (Meta's codec, which DecDRM 0.4.6 and earlier used) after a
 //! comparison on broadcast audio and speech (2026-10-02; `docs/DESIGN.md`): at every
@@ -37,10 +40,13 @@
 //! byte 0   10 0 00 011   audio coding 10 (reserved in ES 201 980 V4), SBR/mode rfa = 0,
 //!                        sampling rate code 011 ("24 kHz")
 //! byte 1   t 0 00000 0   text flag, enhancement 0, coder field and rfa 0
-//! bytes 2… 00 44 41 43 31 pp   codec specific config: NUL, "DAC1", parameter byte
+//! bytes 2… 00 44 41 43 31 pp [ss]   codec specific config: NUL, "DAC1", parameter
+//!                        byte(s)
 //!          pp = bandwidth tier (3 bits: 1.5/3/6/12/24 kbit/s)
 //!             | CRC group size code (3 bits: 1, 2, 3, 5, 6, 10, 15, 30 frames)
 //!             | repeated layers (2 bits: 0-3)
+//!          ss = joint stereo only: the side signal's parameter byte, same layout
+//!               (pp then describes the mid signal)
 //! ```
 //!
 //! ES 201 980 defines no codec config for audio coding 10, and its SBR, mode, rate and
@@ -52,6 +58,27 @@
 //! marker. The transmitter sends this entity last in its SDC block, so nothing after it
 //! is lost to such receivers. The '1' of "DAC1" is the framing format version. (The
 //! EnCodec services of DecDRM 0.4.6 and earlier sent "ENC1" with the same layout.)
+//! The SDC's audio mode stays 00 for joint stereo too (rfa for coding 10): the side
+//! byte says it. DecDRM 0.5.4 and earlier ignore bytes after `pp`, so they play a joint
+//! stereo service's mid signal, in mono.
+//!
+//! ## Joint stereo
+//!
+//! The super frame carries the mid signal's block, laid out exactly as a mono super
+//! frame of its bandwidth and framing, then the side signal's block, laid out the same
+//! way for its own ([`framing`]); the side gets its own CRC regions and repetition.
+//! The planner gives the side an eighth of the mid's bit rate, at least 1.5 kbit/s
+//! ([`default_side`]), and spends spare bytes on the mid's framing first
+//! ([`choose_stereo_config`]). On stereo music (decoded Opus, side 9 dB below mid,
+//! 12 kbit/s mid) the left/right log-spectral distance was 5.2 dB with no side at all,
+//! 2.8 dB with a 1.5 kbit/s side, 2.3 dB at 3 and 1.8 dB at 6; boosting the side before
+//! coding did not help (DAC codes the quieter side as well as it codes loud signals),
+//! so the side is sent at its own level.
+//!
+//! The decoder runs a decoder network per signal, side by side on the thread pool:
+//! about 1.6 times the work of mono. A frame whose mid signal is lost loses its side
+//! too; a side lost on its own is concealed like a mono signal, so the sound fades to
+//! mono rather than to silence ([`DacDecoder`]).
 //!
 //! ## Framing
 //!
@@ -128,7 +155,9 @@
 //! Ryzen 7 9800X3D): real-time factor 0.24 for decoding and 0.15 for encoding on all 16
 //! threads, 0.83 and 0.41 on one core — about twelve times EnCodec's work, as the
 //! network is that much larger (a 1536-channel decoder). A receiver needs a reasonably
-//! modern CPU; on a slow one the audio stutters.
+//! modern CPU; on a slow one the audio stutters. On a Ryzen 7 4800H laptop (8 cores, 16
+//! threads) decoding 12 kbit/s takes RTF 0.58, joint stereo (12 + 1.5 kbit/s) 0.95 —
+//! too close to real time there — and encoding 0.35 and 0.54.
 //!
 //! ## Model weights
 //!
@@ -158,12 +187,12 @@ pub mod model;
 
 pub use config::{
     Bandwidth, CODE_BITS, CODEBOOK_SIZE, ConfigError, DacConfig, FRAME_RATE, FRAME_SAMPLES, FRAMES_PER_SUPER_FRAME,
-    LATENT_DIM, MAX_CODEBOOKS, SAMPLE_RATE, SUPER_FRAME_SAMPLES,
+    LATENT_DIM, MAX_CODEBOOKS, SAMPLE_RATE, SUPER_FRAME_SAMPLES, SideCoding,
 };
 pub use crc::Crc8;
 pub use error::DacError;
-pub use framing::{Codes, FrameLayout, FramingError, Unpacked};
-pub use plan::{PlanError, choose_config};
+pub use framing::{Codes, FrameLayout, FramingError, Unpacked, pack_super_frame, unpack_super_frame};
+pub use plan::{PlanError, choose_config, choose_stereo_config, default_side};
 pub use weights::{WeightsNotFound, find_weights};
 
 #[cfg(feature = "dac")]

@@ -1,5 +1,7 @@
 //! Real-time factor of the streaming DAC encoder and decoder (candle, CPU) in 400 ms
-//! steps, as a DRM receiver runs it: 20 s of test signal, 16 codebooks (12 kbit/s).
+//! steps, as a DRM receiver runs it: 20 s of test signal, 16 codebooks (12 kbit/s);
+//! then the DRM encoder and decoder (framing included) mono at 12 kbit/s and joint
+//! stereo at 12 kbit/s mid + 1.5 kbit/s side.
 //!
 //! ```text
 //! cargo run --release -p decdrm-dac --features dac --example dac_rtf
@@ -12,7 +14,8 @@
 mod common;
 
 use decdrm_dac::model::{DacModel, ENCODER_LEAD_IN, ModelParts};
-use decdrm_dac::{LATENT_DIM, SUPER_FRAME_SAMPLES};
+use decdrm_dac::{Bandwidth, DacConfig, DacDecoder, DacDrmEncoder, LATENT_DIM, SUPER_FRAME_SAMPLES};
+use std::sync::Arc;
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,5 +54,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let decode = t.elapsed().as_secs_f64();
     println!("{:.1} s of signal in 400 ms steps, {codebooks} codebooks ({} samples decoded)", seconds, samples);
     println!("encode RTF {:.3}, decode RTF {:.3}, worst decode step {:.1} ms", encode / seconds, decode / seconds, 1000.0 * worst);
+
+    let model = Arc::new(model);
+    let mid = DacConfig::new(Bandwidth::Kbps12, 3, 0)?;
+    for config in [mid, DacConfig::joint_stereo(mid, DacConfig::new(Bandwidth::Kbps1_5, 3, 0)?)] {
+        // Stereo: the signal on the left, a copy 10 ms later on the right.
+        let pcm: Vec<f32> = if config.is_stereo() {
+            x.iter().enumerate().flat_map(|(i, &v)| [v, if i >= 240 { x[i - 240] } else { 0.0 }]).collect()
+        } else {
+            x.clone()
+        };
+        let len = config.min_bytes();
+        let mut enc = DacDrmEncoder::new(Arc::clone(&model), config)?;
+        let t = Instant::now();
+        let sfs = pcm.chunks(SUPER_FRAME_SAMPLES * config.channels()).map(|c| enc.super_frame(c, len)).collect::<Result<Vec<_>, _>>()?;
+        let encode = t.elapsed().as_secs_f64();
+        let mut dec = DacDecoder::new(Arc::clone(&model), config)?;
+        let (t, mut worst) = (Instant::now(), 0.0f64);
+        for sf in &sfs {
+            let t1 = Instant::now();
+            dec.decode_super_frame(sf)?;
+            worst = worst.max(t1.elapsed().as_secs_f64());
+        }
+        let decode = t.elapsed().as_secs_f64();
+        println!(
+            "DRM {}: encode RTF {:.3}, decode RTF {:.3}, worst decode step {:.1} ms",
+            config.rates(),
+            encode / seconds,
+            decode / seconds,
+            1000.0 * worst
+        );
+    }
     Ok(())
 }

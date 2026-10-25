@@ -984,10 +984,16 @@ fn audio_view(p: &AudioParams) -> crate::snapshot::AudioCodingView {
         AudioCodec::Encodec => "EnCodec",
         AudioCodec::Reserved => "reserved",
     };
+    let dac = (p.codec == AudioCodec::Dac).then(|| decdrm_dac::DacConfig::from_codec_config(&p.codec_config));
     let detail = match p.codec {
-        AudioCodec::Dac => Some(
-            decdrm_dac::DacConfig::from_codec_config(&p.codec_config).map_or_else(|e| e.to_string(), |c| c.bandwidth.to_string()),
-        ),
+        // `12 kbit/s`, or for joint stereo `12 + 1.5 kbit/s` (mid + side).
+        AudioCodec::Dac => Some(dac.clone().expect("DAC").map_or_else(
+            |e| e.to_string(),
+            |c| match c.side {
+                None => c.bandwidth.to_string(),
+                Some(s) => format!("{} + {}", c.bandwidth.kbps(), s.bandwidth),
+            },
+        )),
         AudioCodec::Encodec => Some("DecDRM 0.4.6 and earlier, no longer supported".to_string()),
         _ => None,
     };
@@ -995,7 +1001,8 @@ fn audio_view(p: &AudioParams) -> crate::snapshot::AudioCodingView {
         codec: codec.to_string(),
         sbr: p.sbr,
         parametric_stereo: p.mode == AudioMode::ParametricStereo,
-        stereo: p.mode == AudioMode::Stereo,
+        // DAC signals joint stereo in its codec config (the SDC's mode field is rfa).
+        stereo: p.mode == AudioMode::Stereo || dac.is_some_and(|c| c.is_ok_and(|c| c.is_stereo())),
         sample_rate_hz: p.sample_rate_hz,
         output_rate_hz: if p.codec == AudioCodec::Aac && p.sbr { 2 * p.sample_rate_hz } else { p.sample_rate_hz },
         text: p.text_flag,
@@ -1091,15 +1098,17 @@ fn describe_audio(p: &AudioParams) -> String {
     format!("{codec} {mode} {} kHz{}", p.sample_rate_hz / 1000, if p.text_flag { ", text" } else { "" })
 }
 
-/// E.g. `DAC 6 kbit/s mono 24 kHz, text` — DecDRM's neural codec extension — with
-/// `(not built in)` when this build cannot decode it (no `dac` feature).
+/// E.g. `DAC 6 kbit/s mono 24 kHz, text` or `DAC joint stereo 12 kbit/s mid + 1.5
+/// kbit/s side 24 kHz` — DecDRM's neural codec extension — with `(not built in)` when
+/// this build cannot decode it (no `dac` feature).
 fn describe_dac(p: &AudioParams) -> String {
-    let bandwidth = match decdrm_dac::DacConfig::from_codec_config(&p.codec_config) {
-        Ok(c) => format!("{} ", c.bandwidth),
-        Err(e) => format!("({e}) "),
+    let rates = match decdrm_dac::DacConfig::from_codec_config(&p.codec_config) {
+        Ok(c) if c.is_stereo() => format!("joint stereo {} ", c.rates()),
+        Ok(c) => format!("{} ", c.rates()),
+        Err(e) => format!("({e}) mono "),
     };
     format!(
-        "DAC {bandwidth}mono {} kHz{}{}",
+        "DAC {rates}{} kHz{}{}",
         p.sample_rate_hz / 1000,
         if p.text_flag { ", text" } else { "" },
         if decdrm_dac::BUILT_IN { "" } else { " (not built in)" }

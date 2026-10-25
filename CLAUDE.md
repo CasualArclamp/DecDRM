@@ -42,6 +42,7 @@ milestone checklist (keep it current).
   extension (it replaced EnCodec on 2026-10-02; old `ENC1` services are named, not
   decoded); candle only with the `dac` feature (engine/station/cli/gui forward it).
   Streaming model with exact chunking (`model.rs`, tested against `model/reference.rs`).
+  Mono or joint stereo (mid + side, each its own DAC stream; `DacConfig::side`).
   Weights live in the git-ignored `models/` (`decdrm models download dac`).
 - `apps/decdrm-cli` (binary `decdrm`: `rx` (also `--kiwi`, `--kiwi2` for diversity), `tx`, `schedule`, `devices`, `models`), `apps/decdrm-gui` (egui,
   MSRV 1.95 because of eframe).

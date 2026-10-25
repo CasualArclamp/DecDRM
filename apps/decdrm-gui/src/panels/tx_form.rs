@@ -678,6 +678,9 @@ const XHE_RATES: &[(&str, &str)] = &[
 ];
 const DAC_RATES: &[(&str, &str)] =
     &[("auto", "Highest that fits"), ("1.5", "1.5 kbit/s"), ("3", "3 kbit/s"), ("6", "6 kbit/s"), ("12", "12 kbit/s"), ("24", "24 kbit/s")];
+/// Bit rates of a DAC joint stereo service's side signal.
+const DAC_SIDE_RATES: &[(&str, &str)] =
+    &[("auto", "An eighth of the mid"), ("1.5", "1.5 kbit/s"), ("3", "3 kbit/s"), ("6", "6 kbit/s"), ("12", "12 kbit/s"), ("24", "24 kbit/s")];
 
 /// Which kind of audio input a table describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -743,6 +746,7 @@ fn audio_settings(
             }
             if canon(v) != "dac" {
                 remove(audio, "bandwidth_kbps");
+                remove(audio, "side_bandwidth_kbps");
             }
             changed = true;
         }
@@ -785,18 +789,40 @@ fn audio_settings(
             }
             _ => {}
         }
-        if !matches!(c.as_str(), "heaacv2" | "dac") {
+        if c != "heaacv2" {
             row_label(ui, "Channels");
             let mut stereo = get_bool(audio, "stereo").unwrap_or(false);
-            if ui.checkbox(&mut stereo, "Stereo").changed() {
-                if stereo {
-                    set(audio, "stereo", true);
-                } else {
-                    set(audio, "stereo", false);
+            let label = if c == "dac" { "Joint stereo" } else { "Stereo" };
+            let r = ui.checkbox(&mut stereo, label);
+            let r = if c == "dac" {
+                r.on_hover_text(
+                    "Codes the mid signal (L + R) / 2 at the bit rate above and the side signal (L − R) / 2 at a \
+                     lower one; receivers decode two DAC streams, about twice the CPU of mono",
+                )
+            } else {
+                r
+            };
+            if r.changed() {
+                set(audio, "stereo", stereo);
+                if !stereo {
+                    remove(audio, "side_bandwidth_kbps");
                 }
                 changed = true;
             }
             ui.end_row();
+            if c == "dac" && stereo {
+                row_label(ui, "Side bit rate");
+                let rate = get_num(audio, "side_bandwidth_kbps").map_or_else(|| "auto".into(), |r| format!("{r}"));
+                if let Some(v) = combo(ui, ("tx_dac_side_rate", i), &rate, DAC_SIDE_RATES, 280.0) {
+                    if v == "auto" {
+                        remove(audio, "side_bandwidth_kbps");
+                    } else {
+                        set(audio, "side_bandwidth_kbps", v.parse::<f64>().unwrap_or(1.5));
+                    }
+                    changed = true;
+                }
+                ui.end_row();
+            }
         }
         if let Some(percent) = shares.percent(i) {
             row_label(ui, "Audio share").on_hover_text(

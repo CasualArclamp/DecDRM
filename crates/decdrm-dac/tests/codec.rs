@@ -283,3 +283,97 @@ fn lost_super_frames_fade_out_and_back_in() {
     assert!(out.iter().flatten().all(|v| v.is_finite() && v.abs() < 2.0));
     assert_eq!(dec.stats().frames_concealed, 60);
 }
+
+/// Joint stereo: a 440 Hz tone on the left, 1 kHz on the right and a chirp in the
+/// centre come out on their sides; a receiver that knows only mono decodes the mid
+/// signal from the same super frames; a lost side signal fades the sound to mono, not
+/// to silence.
+#[test]
+fn joint_stereo_round_trip() {
+    let Some(model) = model() else { return };
+    let seconds = 4.0;
+    let centre = chirp(150.0, 5000.0, 0.15, seconds);
+    let (tl, tr) = (tone(440.0, 0.3, seconds), tone(1000.0, 0.3, seconds));
+    let l: Vec<f32> = tl.iter().zip(&centre).map(|(a, c)| a + c).collect();
+    let r: Vec<f32> = tr.iter().zip(&centre).map(|(a, c)| a + c).collect();
+    let mid_ref: Vec<f32> = l.iter().zip(&r).map(|(a, b)| 0.5 * (a + b)).collect();
+    let stereo: Vec<f32> = with_tail(&l).iter().zip(&with_tail(&r)).flat_map(|(&a, &b)| [a, b]).collect();
+
+    let mid = DacConfig::new(Bandwidth::Kbps12, 3, 0).unwrap();
+    let config = DacConfig::joint_stereo(mid, DacConfig::new(Bandwidth::Kbps3, 3, 0).unwrap());
+    let len = config.min_bytes() + 5;
+    let mut enc = DacDrmEncoder::new(Arc::clone(&model), config).unwrap();
+    assert!(enc.super_frame(&stereo[..SUPER_FRAME_SAMPLES], len).is_err(), "mono input to a stereo encoder");
+    let t0 = Instant::now();
+    let sfs: Vec<Vec<u8>> =
+        stereo.chunks(2 * SUPER_FRAME_SAMPLES).map(|c| enc.super_frame(c, len).unwrap()).collect();
+    let encode_s = t0.elapsed().as_secs_f64();
+
+    let mut dec = DacDecoder::new(Arc::clone(&model), config).unwrap();
+    let t1 = Instant::now();
+    let mut out = Vec::new();
+    for sf in &sfs {
+        let d = dec.decode_super_frame(sf).unwrap();
+        assert_eq!((d.channels, d.pcm.len()), (2, 2 * SUPER_FRAME_SAMPLES));
+        out.extend(d.pcm);
+    }
+    let decode_s = t1.elapsed().as_secs_f64();
+    println!("{seconds} s of stereo: encode {encode_s:.2} s, decode {decode_s:.2} s [test profile]");
+    let stats = dec.stats();
+    assert_eq!((stats.frames_full, stats.frames_concealed, stats.side_frames_concealed, stats.regions_failed), (330, 0, 0, 0));
+    let n = l.len();
+    let (yl, yr): (Vec<f32>, Vec<f32>) = out.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).unzip();
+    let (yl, yr) = (&yl[DELAY..DELAY + n], &yr[DELAY..DELAY + n]);
+    let skip = 4800;
+    let (fl, fr) = (dominant_frequency(&yl[skip..], 300.0, 1500.0), dominant_frequency(&yr[skip..], 300.0, 1500.0));
+    let (lsd_l, lsd_r) = (log_spectral_distance(&l[skip..], &yl[skip..]), log_spectral_distance(&r[skip..], &yr[skip..]));
+    println!("left: {fl} Hz, LSD {lsd_l:.2} dB; right: {fr} Hz, LSD {lsd_r:.2} dB");
+    assert!((fl - 440.0).abs() <= 2.0 && (fr - 1000.0).abs() <= 2.0, "tones on the wrong side: {fl} / {fr} Hz");
+    // (Two steady tones over a chirp are hard for DAC at these rates: the mid signal
+    // alone measures 5.8 dB, the side 7.3. On stereo music the left/right distance is
+    // 2.3 dB at 12 + 3 kbit/s, see docs/DESIGN.md.)
+    assert!(lsd_l < 12.0 && lsd_r < 12.0);
+    // Separation: the left tone is much weaker on the right than on the left.
+    let level = |x: &[f32], f: f64| {
+        let w = std::f64::consts::TAU * f / RATE;
+        let (re, im) = x.iter().enumerate().fold((0.0, 0.0), |(a, b), (i, &v)| {
+            (a + f64::from(v) * (w * i as f64).cos(), b + f64::from(v) * (w * i as f64).sin())
+        });
+        10.0 * (re * re + im * im).log10()
+    };
+    let separation = level(&yl[skip..], 440.0) - level(&yr[skip..], 440.0);
+    println!("separation of the left tone: {separation:.1} dB");
+    assert!(separation > 12.0, "left tone only {separation:.1} dB stronger on the left");
+    assert_eq!(decdrm_codecs::DrmAudioDecoder::describe(&dec), "DAC joint stereo, 12 kbit/s mid + 3 kbit/s side, 24 kHz");
+
+    // A mono receiver (format 1 without the side byte) plays the mid signal.
+    let mut mono = DacDecoder::new(Arc::clone(&model), config.mid()).unwrap();
+    let ym: Vec<f32> = sfs.iter().flat_map(|sf| mono.decode_super_frame(sf).unwrap().pcm).collect();
+    let ym = &ym[DELAY..DELAY + n];
+    let lsd_m = log_spectral_distance(&mid_ref[skip..], &ym[skip..]);
+    let from_stereo: Vec<f32> = yl.iter().zip(yr).map(|(a, b)| 0.5 * (a + b)).collect();
+    let diff = ym.iter().zip(&from_stereo).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    println!("mono receiver: LSD against the mid signal {lsd_m:.2} dB, largest difference from (L + R) / 2 {diff:.1e}");
+    assert!(lsd_m < 8.0 && diff < 1e-4);
+
+    // Garbage in the side block of super frames 4 and 5: the side signal is concealed
+    // (bridged, then faded), the sound goes mono and keeps its level.
+    let side_start = FrameLayout::new(config).min_bytes();
+    let mut damaged = sfs.clone();
+    let mut rng = Rng::new(5);
+    for sf in &mut damaged[4..6] {
+        sf[side_start..].iter_mut().for_each(|b| *b = rng.next_u64() as u8);
+    }
+    let mut dec = DacDecoder::new(Arc::clone(&model), config).unwrap();
+    let blocks: Vec<Vec<f32>> = damaged.iter().map(|sf| dec.decode_super_frame(sf).unwrap().pcm).collect();
+    let stats = dec.stats();
+    println!("side lost: {stats:?}");
+    assert_eq!((stats.frames_concealed, stats.side_frames_concealed), (0, 60));
+    // Output block 5 (after the decoder's look-ahead: deep in the side's gap).
+    let b = &blocks[5][2 * (DECODER_LAG + 3000)..];
+    let (bl, br): (Vec<f32>, Vec<f32>) = b.as_chunks::<2>().0.iter().map(|&[a, b]| (a, b)).unzip();
+    let s: Vec<f32> = bl.iter().zip(&br).map(|(a, b)| a - b).collect();
+    println!("deep in the side's gap: L {:.1} dBFS, L − R {:.1} dBFS", rms_db(&bl), rms_db(&s));
+    assert!(rms_db(&bl) > -20.0 && rms_db(&s) < -80.0, "not mono at full level");
+    assert!(blocks.iter().flatten().all(|v| v.is_finite() && v.abs() < 2.0));
+}

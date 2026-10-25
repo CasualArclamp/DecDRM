@@ -261,6 +261,45 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       the monitor on; through VB-Audio cable A (ignored test, inaudible) an I/Q file of
       1 kHz on I and 3 kHz on Q came back 1 kHz left and 3 kHz right at the input's
       level, paced in real time.
+- [x] **DAC joint stereo** (2026-10-25) — the user asked for joint stereo in the DAC
+      codec (someone else showed "DAC joint stereo, 12 kbit/s mid + 1.5 kbit/s side,
+      24 kHz" without sharing code; written here from scratch).
+      *Measured first* (stereo music: an Opus test transmission decoded to WAV, 36 s,
+      side 8–10 dB below mid; whole-signal DAC, 16-codebook mid): left/right
+      log-spectral distance 5.2 dB with no side (mono), 2.8 with a 2-codebook side
+      (1.5 kbit/s), 2.3 with 4, 1.8 with 8. Raising the side's level by 6 or 12 dB
+      before coding did not help (6 dB: the same, 12 dB: worse), so no side gain.
+      *Done:* `DacConfig::side` (`SideCoding`), signalled as a second parameter byte
+      after the first (`\0DAC1 pp ss`, same layout; format 1 receivers ignore it and
+      play the mid signal). Super frame = the mid block exactly as a mono super frame,
+      then the side block with its own CRC regions and repetition
+      (`framing::pack_super_frame` / `unpack_super_frame`). Planner
+      `choose_stereo_config`: side = an eighth of the mid's rate, at least 1.5
+      kbit/s (`default_side`), the largest mid that fits with it, spare bytes to the
+      mid's framing first. `DacDrmEncoder` takes interleaved stereo and codes M/S with
+      two encoder states under `rayon::join`; `DacDecoder` keeps a `Channel` (network
+      state + concealment memory) per signal, decodes them side by side, outputs
+      L = M + S, R = M − S. A lost mid frame drops its side frame too; a side lost
+      alone is concealed (bridged, faded), which fades to mono. Station: `stereo =
+      true` with DAC, `side_bandwidth_kbps`; GUI form *Joint stereo* + *Side bit
+      rate*; engine shows "DAC joint stereo, 12 kbit/s mid + 1.5 kbit/s side, 24 kHz"
+      and a Stereo tag. The SDC's audio mode stays 00 (rfa for coding 10).
+      *CPU:* this machine is a Ryzen 7 4800H laptop (the RTFs above were a 9800X3D):
+      mono 12 kbit/s decode RTF ≈ 0.6, joint stereo ≈ 0.95–1.0, encode 0.35 / 0.54.
+      Stacking both signals' rows into one matrix product was no faster than
+      `rayon::join` (micro-benchmark per layer shape), so no batching. The matrix
+      products are about two thirds of decode time; the decoder's first transposed
+      convolution (30 rows × 1536 × 12288 per super frame) is now computed as
+      (Wᵀ·xᵀ)ᵀ: 23 → 6.5 ms, identical output (decode RTF 0.63 → 0.58 here).
+      Tests: config/framing/plan units (round trips, a mono reader of a stereo super
+      frame, side errors leave the mid alone, planner monotonic), model test
+      `joint_stereo_round_trip` (tones on their sides, 18 dB separation at 12 + 3;
+      a mono decoder gets exactly (L + R) / 2 from the same super frames; garbage side
+      blocks → 60 side frames concealed, mono at full level), station planning and
+      `dac_joint_stereo_mode_b_loopback` (mode B 64-QAM, 12 + 3 kbit/s: tones at
+      ~23 dB separation, no frame concealed). With a 1.5 kbit/s side the same two
+      steady tones separated by only ~6 dB: low side rates suit music better than
+      test tones.
 - [x] **Corrupt xHE-AAC frames concealed; Smooth SBR** (2026-10-07) — from the overnight
       CNR survey (2026-10-06/07: 6030 and 13835 kHz on Korean, Japanese and Taiwanese
       Kiwis, decoded by FDK-AAC and an instrumented libxaac). (1) The session handed

@@ -112,6 +112,19 @@ fn matmul(rows: Vec<f32>, n: usize, k: usize, w: &Tensor) -> CResult<Vec<f32>> {
     Tensor::from_vec(rows, (n, k), &Device::Cpu)?.matmul(w)?.flatten_all()?.to_vec1()
 }
 
+/// The same product with the weights stored transposed (`w_t`: m × k), computed as
+/// (wᵀ · rowsᵀ)ᵀ. For a few rows against a much wider than tall matrix candle's matrix
+/// product is far faster that way round: the decoder's first transposed convolution,
+/// 30 rows × 1536 × 12288 per super frame, takes 6.5 ms instead of 23 (Ryzen 7 4800H),
+/// with identical results.
+fn matmul_t(rows: Vec<f32>, n: usize, k: usize, w_t: &Tensor) -> CResult<Vec<f32>> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let x_t = Tensor::from_vec(rows, (n, k), &Device::Cpu)?.t()?.contiguous()?;
+    w_t.matmul(&x_t)?.t()?.contiguous()?.flatten_all()?.to_vec1()
+}
+
 // ---------------------------------------------------------------------------------
 // Streaming layers
 // ---------------------------------------------------------------------------------
@@ -197,8 +210,10 @@ impl Conv {
 /// ends. Output row r is the full output's row r + padding, which input rows ⌊(r+p)/s⌋
 /// and the one before make.
 struct ConvTr {
-    /// (cin, 2s·cout): column `j·cout + o` is tap `j` of output channel `o`.
+    /// (cin, 2s·cout): column `j·cout + o` is tap `j` of output channel `o`; stored
+    /// transposed when `transposed` (see [`matmul_t`]).
     w: Tensor,
+    transposed: bool,
     bias: Vec<f32>,
     cin: usize,
     cout: usize,
@@ -229,7 +244,7 @@ impl ConvTr {
     fn push(&self, st: &mut ConvTrState, x: &[f32], end: Option<i64>) -> CResult<Vec<f32>> {
         let (s, p, cout) = (self.stride as i64, self.padding as i64, self.cout);
         let t = x.len() / self.cin;
-        let col = matmul(x.to_vec(), t, self.cin, &self.w)?;
+        let col = if self.transposed { matmul_t(x.to_vec(), t, self.cin, &self.w)? } else { matmul(x.to_vec(), t, self.cin, &self.w)? };
         let width = 2 * self.stride * cout;
         let (old, new) = (st.received, st.received + t as i64);
         // Output r is complete once input row ⌊(r + p)/s⌋ is in.
@@ -538,11 +553,16 @@ impl Loader<'_> {
             let p = format!("decoder.block.{i}");
             let out = dim / 2;
             // (in, out, 2s) → (in, 2s, out) → (in, 2s·out).
-            let w = self.tensor(&format!("{p}.conv_t1.weight"), &[dim, out, 2 * s])?.permute((0, 2, 1))?.reshape((dim, 2 * s * out))?.contiguous()?;
+            let w = self.tensor(&format!("{p}.conv_t1.weight"), &[dim, out, 2 * s])?.permute((0, 2, 1))?.reshape((dim, 2 * s * out))?;
+            // Only the first block's matrix (1536 × 12288, 30 rows per super frame) is
+            // faster transposed; the second (768 × 3840, 240 rows) is slower that way.
+            let transposed = 2 * s * out >= 8 * dim;
+            let w = if transposed { w.t()?.contiguous()? } else { w.contiguous()? };
             blocks.push(DecoderBlock {
                 snake: self.snake(&format!("{p}.snake1"), dim)?,
                 conv: ConvTr {
                     w,
+                    transposed,
                     bias: self.tensor(&format!("{p}.conv_t1.bias"), &[out])?.to_vec1()?,
                     cin: dim,
                     cout: out,

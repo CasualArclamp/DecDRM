@@ -17,6 +17,21 @@
 //! frame by frame, the longest prefix of layers whose regions passed their CRC (in the
 //! first or the repeated copy): an error in a fine layer only lowers the bandwidth of
 //! that group for a moment, an error in layer 0 makes the frames lost (concealed).
+//!
+//! ## Joint stereo
+//!
+//! A joint stereo super frame carries two such blocks, each laid out as above for its
+//! own bandwidth and framing ([`DacConfig::side`]):
+//!
+//! ```text
+//! mid signal (L + R) / 2:  layers, repeated layers   (FrameLayout of the mid, whole bytes)
+//! side signal (L − R) / 2: layers, repeated layers   (FrameLayout of the side, whole bytes)
+//! zero padding up to the stream length
+//! ```
+//!
+//! The mid block is exactly a mono super frame followed by "padding", so a receiver
+//! that knows only mono plays the mid signal ([`pack_super_frame`],
+//! [`unpack_super_frame`]).
 
 use crate::config::{CODE_BITS, CODEBOOK_SIZE, DacConfig, FRAMES_PER_SUPER_FRAME};
 use crate::crc::Crc8;
@@ -81,14 +96,53 @@ pub enum FramingError {
     CodeRange(u16),
     #[error("codes of {got} codebooks given, the configuration has {want}")]
     Codebooks { got: usize, want: usize },
+    #[error("codes of {got} signal(s) given, the configuration has {want} (mono, or joint stereo's mid and side)")]
+    Channels { got: usize, want: usize },
     #[error("the audio super frame has {len} bytes, the DAC configuration needs {need}")]
     TooShort { len: usize, need: usize },
 }
 
-/// Sizes and positions of everything in a super frame of a configuration.
+/// Sizes and positions of everything in the block of one signal: the whole super frame
+/// of a mono configuration, the mid block of a joint stereo one (the side block is the
+/// layout of [`DacConfig::side_config`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameLayout {
+    /// The signal's coding (a mono configuration).
     pub config: DacConfig,
+}
+
+/// Build an audio super frame of `len` bytes (zero padded) for `config`: the codes of
+/// the mono or mid signal, and for joint stereo those of the side signal.
+pub fn pack_super_frame(config: DacConfig, mid: &Codes, side: Option<&Codes>, len: usize) -> Result<Vec<u8>, FramingError> {
+    let need = config.min_bytes();
+    if len < need {
+        return Err(FramingError::TooShort { len, need });
+    }
+    let mid_layout = FrameLayout::new(config);
+    let mut sf = mid_layout.pack(mid, mid_layout.min_bytes())?;
+    match (config.side_config(), side) {
+        (Some(s), Some(codes)) => {
+            let layout = FrameLayout::new(s);
+            sf.extend(layout.pack(codes, layout.min_bytes())?);
+        }
+        (None, None) => {}
+        _ => return Err(FramingError::Channels { got: 1 + usize::from(side.is_some()), want: config.channels() }),
+    }
+    sf.resize(len, 0);
+    Ok(sf)
+}
+
+/// Read a received audio super frame of `config`: the mono or mid signal, and for joint
+/// stereo the side signal.
+pub fn unpack_super_frame(config: DacConfig, sf: &[u8]) -> Result<(Unpacked, Option<Unpacked>), FramingError> {
+    let need = config.min_bytes();
+    if sf.len() < need {
+        return Err(FramingError::TooShort { len: sf.len(), need });
+    }
+    let mid_layout = FrameLayout::new(config);
+    let mid = mid_layout.unpack(sf)?;
+    let side = config.side_config().map(|s| FrameLayout::new(s).unpack(&sf[mid_layout.min_bytes()..])).transpose()?;
+    Ok((mid, side))
 }
 
 /// The content of a received super frame after the CRC checks.
@@ -117,8 +171,9 @@ impl Unpacked {
 }
 
 impl FrameLayout {
+    /// The layout of `config`'s mono or mid signal.
     pub fn new(config: DacConfig) -> Self {
-        Self { config }
+        Self { config: config.mid() }
     }
 
     pub fn codebooks(&self) -> usize {
@@ -374,6 +429,44 @@ mod tests {
         let u = layout.unpack(&vec![0; need]).unwrap();
         assert_eq!((u.failed, u.lost_frames()), (2 * layout.groups(), 30));
         assert!(Codes::from_vec(2, vec![1024; 60]).is_err());
+    }
+
+    /// Joint stereo: the side block follows the mid block, which a mono reader decodes
+    /// as a mono super frame; errors in one block leave the other intact.
+    #[test]
+    fn joint_stereo_super_frame() {
+        let mid = DacConfig::new(Bandwidth::Kbps12, 3, 2).unwrap();
+        let config = DacConfig::joint_stereo(mid, DacConfig::new(Bandwidth::Kbps1_5, 5, 1).unwrap());
+        let (m, s) = (codes(16, 7), codes(2, 8));
+        let len = config.min_bytes() + 11;
+        let mut sf = pack_super_frame(config, &m, Some(&s), len).unwrap();
+        assert_eq!(sf.len(), len);
+        let (um, us) = unpack_super_frame(config, &sf).unwrap();
+        let us = us.expect("side block");
+        assert_eq!((um.codes, us.codes.clone()), (m.clone(), s.clone()));
+        assert_eq!((um.failed, us.failed), (0, 0));
+        // A mono receiver reads the mid signal.
+        assert_eq!(FrameLayout::new(mid).unpack(&sf).unwrap().codes, m);
+        assert_eq!(FrameLayout::new(config).config, mid);
+        // A flipped bit in the side block's base layer: the side group fails (and is
+        // repaired from its copy), the mid is untouched.
+        let at = FrameLayout::new(mid).min_bytes() * 8 + 3;
+        sf[at / 8] ^= 0x80 >> (at % 8);
+        let (um, us) = unpack_super_frame(config, &sf).unwrap();
+        let us = us.unwrap();
+        assert_eq!((um.failed, um.repaired, us.failed, us.repaired), (0, 0, 0, 1));
+        assert_eq!(us.codes, s);
+        // Wrong inputs.
+        assert_eq!(pack_super_frame(config, &m, None, len), Err(FramingError::Channels { got: 1, want: 2 }));
+        assert_eq!(pack_super_frame(mid, &m, Some(&s), len), Err(FramingError::Channels { got: 2, want: 1 }));
+        assert_eq!(
+            pack_super_frame(config, &m, Some(&s), config.min_bytes() - 1),
+            Err(FramingError::TooShort { len: config.min_bytes() - 1, need: config.min_bytes() })
+        );
+        assert!(unpack_super_frame(config, &sf[..config.min_bytes() - 1]).is_err());
+        // Mono through the same functions.
+        let sf = pack_super_frame(mid, &m, None, mid.min_bytes()).unwrap();
+        assert!(matches!(unpack_super_frame(mid, &sf), Ok((u, None)) if u.codes == m));
     }
 
     /// A corrupted region lowers the depth of its group only; a corrupted base layer

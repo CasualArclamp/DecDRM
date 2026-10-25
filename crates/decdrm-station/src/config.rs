@@ -496,6 +496,11 @@ pub struct AudioSettings {
     /// important codebooks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bandwidth_kbps: Option<f64>,
+    /// DAC with `stereo = true` (joint stereo) only: bit rate of the side signal's
+    /// codes, kbit/s — 1.5, 3, 6, 12 or 24. Default: an eighth of the mid signal's
+    /// (`bandwidth_kbps`), at least 1.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side_bandwidth_kbps: Option<f64>,
 }
 
 fn default_share() -> f64 {
@@ -518,6 +523,7 @@ impl AudioSettings {
             part: Part::B,
             hierarchical: false,
             bandwidth_kbps: None,
+            side_bandwidth_kbps: None,
         }
     }
 }
