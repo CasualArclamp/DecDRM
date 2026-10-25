@@ -116,7 +116,14 @@ fn main() -> eframe::Result {
             .with_title("DecDRM")
             .with_app_id("decdrm-gui")
             .with_inner_size(args.window_size.map_or([1280.0, 800.0], |(w, h)| [w, h]))
-            .with_min_inner_size([900.0, 560.0]),
+            .with_min_inner_size([900.0, 560.0])
+            // Window and taskbar icon (assets/icon, made by scripts/make-icon.py). The
+            // PNG is compiled into the executable, so decoding it cannot fail at run time
+            // unless the file in the repo is broken.
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon/png/decdrm-256.png"))
+                    .expect("assets/icon/png/decdrm-256.png is a valid PNG"),
+            ),
         ..Default::default()
     };
     // `Box::new(|cc| ..)`: eframe takes the app constructor as a boxed closure and calls

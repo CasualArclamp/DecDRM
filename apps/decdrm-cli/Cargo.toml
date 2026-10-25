@@ -29,3 +29,7 @@ decdrm-station = { path = "../../crates/decdrm-station" }
 clap = { version = "4.6", features = ["derive"] }
 ctrlc = "3.5"
 anyhow.workspace = true
+
+# Embeds the app icon in the Windows executable (build.rs); a no-op on other targets.
+[build-dependencies]
+winresource = { version = "0.1.34", default-features = false }

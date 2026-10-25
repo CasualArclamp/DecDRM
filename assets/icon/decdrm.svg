@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- DecDRM app icon (32 px and up): a DRM signal's OFDM spectrum, flat carriers with
+     boosted gain pilots, the middle pilot sending radio waves. Original artwork, same
+     licence as the project. Small sizes use decdrm-small.svg. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#173a63"/>
+      <stop offset="1" stop-color="#0a1a30"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="url(#bg)"/>
+  <g fill="none" stroke="#e8f2ff" stroke-width="11" stroke-linecap="round">
+    <path d="M108.08 83.28 A26 26 0 0 1 147.92 83.28"/>
+    <path d="M92.76 70.43 A46 46 0 0 1 163.24 70.43" opacity="0.8"/>
+    <path d="M77.44 57.56 A66 66 0 0 1 178.56 57.56" opacity="0.6"/>
+  </g>
+  <g fill="#3fd0c9">
+    <rect x="48" y="144" width="10" height="56" rx="2"/>
+    <rect x="78" y="144" width="10" height="56" rx="2"/>
+    <rect x="93" y="144" width="10" height="56" rx="2"/>
+    <rect x="108" y="144" width="10" height="56" rx="2"/>
+    <rect x="138" y="144" width="10" height="56" rx="2"/>
+    <rect x="153" y="144" width="10" height="56" rx="2"/>
+    <rect x="168" y="144" width="10" height="56" rx="2"/>
+    <rect x="198" y="144" width="10" height="56" rx="2"/>
+  </g>
+  <g fill="#ffb340">
+    <rect x="63" y="124" width="10" height="76" rx="2"/>
+    <rect x="123" y="108" width="10" height="92" rx="2"/>
+    <rect x="183" y="124" width="10" height="76" rx="2"/>
+  </g>
+</svg>

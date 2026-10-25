@@ -261,6 +261,16 @@ symbol lengths are 1152/1024/704/448 samples for modes A/B/C/D.
       the monitor on; through VB-Audio cable A (ignored test, inaudible) an I/Q file of
       1 kHz on I and 3 kHz on Q came back 1 kHz left and 3 kHz right at the input's
       level, paced in real time.
+- [x] **App icon** (2026-10-25) — DecDRM had none. Original artwork in `assets/icon/`:
+      a DRM OFDM spectrum (teal carriers, three boosted amber gain pilots), the middle
+      pilot sending radio waves, on a rounded dark-blue square. `decdrm.svg` (32 px and
+      up) and `decdrm-small.svg` (16/24 px, drawn on a 16-pixel grid);
+      `scripts/make-icon.py` renders `png/decdrm-{16..256}.png` with resvg's CLI
+      (`cargo install resvg`) and packs them into `decdrm.ico` (PNG entries). The GUI
+      sets the 256 px PNG as window/taskbar icon (`ViewportBuilder::with_icon`, compiled
+      in); `build.rs` in both apps embeds the .ico and version information in the
+      Windows exes (`winresource`, only when the target is Windows, so Linux builds
+      skip it). Checked: Explorer's icon of both exes, `WM_GETICON` of the GUI window.
 - [x] **DAC joint stereo** (2026-10-25) — the user asked for joint stereo in the DAC
       codec (someone else showed "DAC joint stereo, 12 kbit/s mid + 1.5 kbit/s side,
       24 kHz" without sharing code; written here from scratch).
