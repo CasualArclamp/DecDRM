@@ -986,6 +986,7 @@ dependencies = [
  "decdrm-mdi",
  "flacenc",
  "image",
+ "quick-xml",
  "rustls",
  "rustls-native-certs",
  "serde",

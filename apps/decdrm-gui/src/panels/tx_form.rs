@@ -1009,41 +1009,40 @@ const APP_KINDS: &[(&str, &str)] = &[
     ("raw", "Raw data"),
 ];
 
-/// One data application: type, file or folder, bit rate, part A.
+const JOURNALINE_SOURCES: &[(&str, &str)] = &[("file", "Page file"), ("feeds", "RSS feeds")];
+
+/// Keys of a Journaline application's feeds.
+const FEED_KEYS: [&str; 4] = ["feeds", "feed_refresh", "feed_items", "feed_title"];
+
+/// One data application: type, file or folder (Journaline: or RSS feeds), bit rate,
+/// part A.
 fn app_row(ui: &mut Ui, app: &mut dyn TableLike, id: impl std::hash::Hash + std::fmt::Debug + Copy, ctx: &mut FormCtx, parts: &mut Parts) -> bool {
     let mut changed = false;
+    let kind = get_str(app, "type").unwrap_or_else(|| "journaline".into());
+    let journaline = canon(&kind) == "journaline";
+    // A Journaline application with a `feeds` key (even an empty one) takes feeds.
+    let feeds = journaline && app.contains_key("feeds");
     ui.horizontal_wrapped(|ui| {
-        let kind = get_str(app, "type").unwrap_or_else(|| "journaline".into());
         if let Some(v) = combo(ui, (id, "kind"), &kind, APP_KINDS, 170.0) {
             set(app, "type", v);
+            if canon(v) != "journaline" {
+                FEED_KEYS.iter().for_each(|k| remove(app, k));
+            }
             changed = true;
         }
-        let mut path = get_str(app, "path").unwrap_or_default();
-        let hint = match canon(&kind).as_str() {
-            "slideshow" => "folder of images",
-            "website" => "site folder",
-            "journaline" => "page file (.toml)",
-            "epg" => "schedule (.toml, optional)",
-            _ => "data file",
-        };
-        if ui.add(egui::TextEdit::singleline(&mut path).desired_width(200.0).hint_text(hint)).changed() {
-            if path.is_empty() {
+        if journaline
+            && let Some(v) = combo(ui, (id, "source"), if feeds { "feeds" } else { "file" }, JOURNALINE_SOURCES, 100.0)
+        {
+            if v == "feeds" {
                 remove(app, "path");
+                set(app, "feeds", toml_edit::Array::new());
             } else {
-                set(app, "path", path.as_str());
+                FEED_KEYS.iter().for_each(|k| remove(app, k));
             }
             changed = true;
         }
-        if ui.small_button("…").on_hover_text("Choose").clicked() {
-            let picked = if matches!(canon(&kind).as_str(), "slideshow" | "website") {
-                pick_folder(ctx.base_dir)
-            } else {
-                pick_file(ctx.base_dir, "Data", &["toml", "json", "bin", "*"])
-            };
-            if let Some(p) = picked {
-                set(app, "path", p.as_str());
-                changed = true;
-            }
+        if !feeds {
+            changed |= path_editor(ui, app, &kind, ctx);
         }
         let mut rate = get_int(app, "bitrate").unwrap_or(2000);
         if ui.add(egui::DragValue::new(&mut rate).range(100..=64_000).speed(50.0).suffix(" bit/s")).changed() {
@@ -1051,6 +1050,126 @@ fn app_row(ui: &mut Ui, app: &mut dyn TableLike, id: impl std::hash::Hash + std:
             changed = true;
         }
         changed |= part_switch(ui, app, "Part A", parts);
+    });
+    if feeds {
+        changed |= feed_settings(ui, app, id);
+    }
+    changed
+}
+
+/// The file or folder of a data application.
+fn path_editor(ui: &mut Ui, app: &mut dyn TableLike, kind: &str, ctx: &mut FormCtx) -> bool {
+    let mut changed = false;
+    let mut path = get_str(app, "path").unwrap_or_default();
+    let hint = match canon(kind).as_str() {
+        "slideshow" => "folder of images",
+        "website" => "site folder",
+        "journaline" => "page file (.toml)",
+        "epg" => "schedule (.toml, optional)",
+        _ => "data file",
+    };
+    if ui.add(egui::TextEdit::singleline(&mut path).desired_width(200.0).hint_text(hint)).changed() {
+        if path.is_empty() {
+            remove(app, "path");
+        } else {
+            set(app, "path", path.as_str());
+        }
+        changed = true;
+    }
+    if ui.small_button("…").on_hover_text("Choose").clicked() {
+        let picked = if matches!(canon(kind).as_str(), "slideshow" | "website") {
+            pick_folder(ctx.base_dir)
+        } else {
+            pick_file(ctx.base_dir, "Data", &["toml", "json", "bin", "*"])
+        };
+        if let Some(p) = picked {
+            set(app, "path", p.as_str());
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// The feed URLs of a Journaline application.
+fn get_feeds(app: &dyn TableLike) -> Vec<String> {
+    let Some(list) = app.get("feeds").and_then(Item::as_array) else { return Vec::new() };
+    list.iter().filter_map(|v| v.as_str()).map(str::to_string).collect()
+}
+
+/// The URLs in the feed box: one per line, blank lines left out.
+fn feed_lines(text: &str) -> Vec<String> {
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()
+}
+
+const FEEDS_HELP: &str = "RSS or Atom feeds (http:// or https://), one per line. The root menu lists the feeds, each \
+     feed's menu its items, each item's page its description and link. The feeds are fetched when the \
+     transmission starts and then on the schedule; changed pages go out at once with the next revision.";
+
+/// A Journaline application's feeds: the URLs, how often they are fetched, how many
+/// items each, and the root menu's title.
+fn feed_settings(ui: &mut Ui, app: &mut dyn TableLike, id: impl std::hash::Hash + std::fmt::Debug + Copy) -> bool {
+    let mut changed = false;
+    let feeds = get_feeds(app);
+    // The box's text is kept while it means the same URLs (so a new empty line can be
+    // typed); otherwise it is made from the file.
+    let key = egui::Id::new((id, "feed_text"));
+    let mut text = ui
+        .data(|d| d.get_temp::<String>(key))
+        .filter(|t| feed_lines(t) == feeds)
+        .unwrap_or_else(|| feeds.join("\n"));
+    let edit = egui::TextEdit::multiline(&mut text)
+        .desired_rows(2)
+        .desired_width(f32::INFINITY)
+        .hint_text("https://… one feed per line");
+    if ui.add(edit).on_hover_text(FEEDS_HELP).changed() {
+        let lines = feed_lines(&text);
+        if lines != feeds {
+            set(app, "feeds", lines.iter().map(String::as_str).collect::<toml_edit::Array>());
+            changed = true;
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(key, text));
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Every");
+        let mut minutes = get_int(app, "feed_refresh").unwrap_or(600) / 60;
+        if ui
+            .add(egui::DragValue::new(&mut minutes).range(1..=1440).suffix(" min"))
+            .on_hover_text("How often the feeds are fetched (also: Update while transmitting)")
+            .changed()
+        {
+            if minutes == 10 {
+                remove(app, "feed_refresh");
+            } else {
+                set(app, "feed_refresh", minutes * 60);
+            }
+            changed = true;
+        }
+        let mut items = get_int(app, "feed_items").unwrap_or(10);
+        if ui
+            .add(egui::DragValue::new(&mut items).range(1..=50).suffix(" items"))
+            .on_hover_text("Items per feed, the first ones of each")
+            .changed()
+        {
+            if items == 10 {
+                remove(app, "feed_items");
+            } else {
+                set(app, "feed_items", items);
+            }
+            changed = true;
+        }
+        let mut title = get_str(app, "feed_title").unwrap_or_default();
+        if ui
+            .add(egui::TextEdit::singleline(&mut title).desired_width(140.0).hint_text("News feeds"))
+            .on_hover_text("Title of the root menu")
+            .changed()
+        {
+            if title.trim().is_empty() {
+                remove(app, "feed_title");
+            } else {
+                set(app, "feed_title", title.as_str());
+            }
+            changed = true;
+        }
     });
     changed
 }
@@ -1688,6 +1807,30 @@ hierarchical = true
         // Others with no weight left share the rest equally; a share stays positive.
         assert_eq!(rebalance(&[Some(1.0), Some(0.0), None], 0, 99.95), [Some(100.0), Some(0.1), None]);
         assert_eq!(rebalance(&[Some(2.0), Some(2.0), Some(2.0)], 1, 40.0), [Some(30.0), Some(40.0), Some(30.0)]);
+    }
+
+    /// A Journaline application switched to feeds and back; the URLs one per line.
+    #[test]
+    fn journaline_feeds() {
+        let mut doc: DocumentMut = "[[service]]\nlabel = \"D\"\nid = 0xD0D002\n[service.data]\ntype = \"journaline\"\npath = \"pages.toml\"\n"
+            .parse()
+            .unwrap();
+        let svc = doc.get_mut("service").and_then(Item::as_array_of_tables_mut).unwrap().get_mut(0).unwrap();
+        let app = child(svc, "data");
+        // What the source switch does.
+        remove(app, "path");
+        set(app, "feeds", toml_edit::Array::new());
+        let lines = feed_lines(" https://a.example/rss \n\n http://b.example/atom\n");
+        set(app, "feeds", lines.iter().map(String::as_str).collect::<toml_edit::Array>());
+        set(app, "feed_refresh", 15 * 60);
+        assert_eq!(get_feeds(app), ["https://a.example/rss", "http://b.example/atom"]);
+        let cfg: decdrm_station::StationConfig = toml::from_str(&doc.to_string()).unwrap();
+        let data = cfg.services[0].data.as_ref().unwrap();
+        assert_eq!((data.feeds.len(), data.feed_refresh, data.path.as_ref()), (2, Some(900), None));
+        let svc = doc.get_mut("service").and_then(Item::as_array_of_tables_mut).unwrap().get_mut(0).unwrap();
+        let app = child(svc, "data");
+        FEED_KEYS.iter().for_each(|k| remove(app, k));
+        assert!(!doc.to_string().contains("feed"), "{doc}");
     }
 
     #[test]

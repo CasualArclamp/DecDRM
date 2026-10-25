@@ -934,23 +934,49 @@ fn services_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
     });
 }
 
-/// A Journaline application: its pages, the page file's updates, and the Update button.
+/// A Journaline application: its pages, the page file's or feeds' updates, and the
+/// Update button.
 fn journaline_status(ui: &mut Ui, tx: &TxSession, j: &JournalineStatus, live: bool) {
+    let feeds = !j.feeds.is_empty();
     let mut text = format!("\u{b7} {} page{}", j.pages, if j.pages == 1 { "" } else { "s" });
+    if feeds {
+        text.push_str(&format!(" from {} feed{}", j.feeds.len(), if j.feeds.len() == 1 { "" } else { "s" }));
+    }
     if let Some(t) = j.updated_at_s {
         text.push_str(&format!(", updated {}\u{d7}, last at {}", j.updates, fmt_time(t)));
     }
-    ui.label(RichText::new(text).weak()).on_hover_text(format!(
-        "Page file {}.\nSaved changes go on the air by themselves within about two seconds: new and changed \
-         pages are sent first, with the next revision, so receivers show them at once.",
-        j.path.display()
-    ));
-    if live
-        && ui
-            .small_button("Update")
-            .on_hover_text("Load the page file again now (the time on the air is the time of the update)")
-            .clicked()
-    {
+    let hover = if feeds {
+        let list: Vec<String> = j
+            .feeds
+            .iter()
+            .map(|f| {
+                let what = match (&f.title, &f.error) {
+                    (_, Some(e)) => format!("{} items, last fetch failed: {e}", f.items),
+                    (Some(t), None) => format!("\"{t}\", {} items", f.items),
+                    (None, None) => "not fetched yet".into(),
+                };
+                format!("{}: {what}", f.url)
+            })
+            .collect();
+        format!(
+            "{}\nThe feeds are fetched again on their schedule: new and changed pages are sent first, with \
+             the next revision, so receivers show them at once.",
+            list.join("\n")
+        )
+    } else {
+        format!(
+            "Page file {}.\nSaved changes go on the air by themselves within about two seconds: new and changed \
+             pages are sent first, with the next revision, so receivers show them at once.",
+            j.path.display()
+        )
+    };
+    ui.label(RichText::new(text).weak()).on_hover_text(hover);
+    let update_help = if feeds {
+        "Fetch the feeds again now (their changes go on the air when the fetch is done)"
+    } else {
+        "Load the page file again now (the time on the air is the time of the update)"
+    };
+    if live && ui.small_button("Update").on_hover_text(update_help).clicked() {
         tx.reload_journaline();
     }
 }

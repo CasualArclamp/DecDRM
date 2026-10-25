@@ -56,7 +56,7 @@ encoding) and libopus.
   bars (codec, SBR/PS, bit rate, protection, data applications), text,
   slideshow, Journaline browser, broadcast website, EPG, broadcast clock, alternative
   frequencies, recording of the audio (WAV/FLAC), and a transmitter tab whose
-  Journaline pages can be edited while on the air.
+  Journaline pages can be edited while on the air or made from RSS/Atom feeds.
 - KiwiSDR client: DecDRM tunes a KiwiSDR on the internet and decodes its I/Q directly
   (`decdrm rx --kiwi HOST --freq KHZ`; in the GUI a *KiwiSDR* source with a list of the
   public Kiwis whose owners allow apps, and a double-click in the *Schedule* tab). It

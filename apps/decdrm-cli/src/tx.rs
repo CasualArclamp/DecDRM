@@ -174,8 +174,10 @@ fn print_status(s: &StationStatus) {
         for app in &sv.apps {
             line.push_str(&format!("; {} {:.2} kbit/s", app.kind, app.bitrate / 1000.0));
             if let Some(j) = &app.journaline {
-                let updates = if j.updates > 0 { format!(", page file loaded again {}x", j.updates) } else { String::new() };
-                line.push_str(&format!(" ({} pages{updates})", j.pages));
+                let source = if j.feeds.is_empty() { "page file" } else { "feeds" };
+                let updates = if j.updates > 0 { format!(", {source} loaded again {}x", j.updates) } else { String::new() };
+                let feeds = if j.feeds.is_empty() { String::new() } else { format!(" from {} feeds", j.feeds.len()) };
+                line.push_str(&format!(" ({} pages{feeds}{updates})", j.pages));
             }
         }
         println!("{line}");

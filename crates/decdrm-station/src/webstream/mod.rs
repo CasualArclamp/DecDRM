@@ -46,7 +46,7 @@
 
 mod decode;
 mod framing;
-mod http;
+pub(crate) mod http;
 mod icy;
 mod ogg;
 mod playlist;

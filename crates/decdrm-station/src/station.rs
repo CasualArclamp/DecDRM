@@ -119,19 +119,34 @@ pub struct AppStatus {
 }
 
 /// A Journaline application's pages. Its page file is loaded again when it changes
-/// while the station transmits, or on request ([`Station::reload_journaline`]).
+/// while the station transmits, or on request ([`Station::reload_journaline`]); its
+/// feeds are fetched again on their schedule, or on request.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct JournalineStatus {
-    /// The page file (resolved path).
+    /// The page file (resolved path); empty for feeds.
     pub path: PathBuf,
+    /// The feeds, in the order of the configuration; empty for a page file.
+    pub feeds: Vec<FeedStatus>,
     /// Pages on the air.
     pub pages: usize,
     /// Times the page file was loaded again with changes while transmitting.
     pub updates: u32,
     /// When the last of those was, seconds of signal.
     pub updated_at_s: Option<f64>,
-    /// Why the page file did not load the last time it was tried (the pages before
-    /// stay on the air).
+    /// Why the page file did not load the last time it was tried, or which feeds
+    /// could not be fetched the last time (the pages before stay on the air).
+    pub error: Option<String>,
+}
+
+/// One feed of a Journaline application.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FeedStatus {
+    pub url: String,
+    /// The feed's title (`None` until it was fetched).
+    pub title: Option<String>,
+    /// Items on the air.
+    pub items: usize,
+    /// Why the last fetch failed (the items before stay on the air).
     pub error: Option<String>,
 }
 

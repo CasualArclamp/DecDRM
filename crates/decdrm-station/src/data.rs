@@ -7,7 +7,8 @@
 //! * Website — a directory tree in a MOT directory-mode carousel.
 //! * Journaline — pages from a TOML/JSON page file ([`JournalineFile`]), loaded again
 //!   when it changes while the station transmits ([`JournalineWatch`]): new and changed
-//!   pages go out at once, with the next revision index.
+//!   pages go out at once, with the next revision index. Or pages made from RSS/Atom
+//!   feeds, fetched on a schedule ([`crate::feeds`]) and loaded the same way.
 //! * EPG — a schedule (TS 102 818 `epg`/`schedule`/`programme`) from inline or file
 //!   programmes, binary encoded (TS 102 371) in a directory-mode MOT carousel with
 //!   ScopeStart/ScopeEnd/ScopeId (the described service, see
@@ -16,7 +17,8 @@
 //!   `segment_size` bytes, cycled ([`RawSource`]); receivers capture them as they are.
 
 use crate::config::{AppKind, AppSettings, EpgFile, EpgProgramme, JournalineFile, JournalinePage, JournalineRow, StationConfig};
-use crate::station::JournalineStatus;
+use crate::feeds::{self, FeedWatch};
+use crate::station::{FeedStatus, JournalineStatus};
 use decdrm_data::encoder::{DataUnitSource, RawSource};
 use decdrm_data::epg::{self, EpgElement, EpgValue};
 use decdrm_data::journaline::{JournalineEncoder, ListItem, MenuItem, NmlObject, PageChanges, ROOT_OBJECT_ID};
@@ -44,7 +46,10 @@ fn is_image(path: &Path) -> bool {
 
 /// The resolved `path` of an application, or a problem text if it is missing.
 fn required_path(cfg: &StationConfig, app: &AppSettings) -> Result<PathBuf, String> {
-    app.path.as_ref().map(|p| cfg.resolve(p)).ok_or_else(|| format!("{} needs a `path`", app.kind))
+    app.path.as_ref().map(|p| cfg.resolve(p)).ok_or_else(|| match app.kind {
+        AppKind::Journaline => "journaline needs a page file (`path`) or `feeds`".to_string(),
+        kind => format!("{kind} needs a `path`"),
+    })
 }
 
 /// Cheap checks of an application's content (files exist, page file and schedule
@@ -79,6 +84,7 @@ pub(crate) fn check_content(cfg: &StationConfig, app: &AppSettings) -> Result<()
                 return Err(format!("website start page {index} not found in {}", dir.display()));
             }
         }
+        AppKind::Journaline if !app.feeds.is_empty() => check_feeds(app)?,
         AppKind::Journaline => {
             let file = load_journaline(&required_path(cfg, app)?)?;
             journaline_encoder(&file, app.compress)?;
@@ -189,6 +195,31 @@ pub fn load_journaline(path: &Path) -> Result<JournalineFile, String> {
     }
 }
 
+/// The feed settings of a Journaline application (the feeds themselves are fetched
+/// when the station starts).
+fn check_feeds(app: &AppSettings) -> Result<(), String> {
+    if app.path.is_some() {
+        return Err("give either a page file (`path`) or `feeds`, not both".into());
+    }
+    if app.feeds.len() > feeds::MAX_FEEDS {
+        return Err(format!("at most {} feeds", feeds::MAX_FEEDS));
+    }
+    for url in &app.feeds {
+        crate::webstream::http::Url::parse(url.trim()).map_err(|e| format!("feed {url}: {e}"))?;
+    }
+    if let Some(s) = app.feed_refresh
+        && s < feeds::MIN_REFRESH_S
+    {
+        return Err(format!("feed_refresh {s} s is below {} s", feeds::MIN_REFRESH_S));
+    }
+    if let Some(n) = app.feed_items
+        && !(1..=feeds::MAX_ITEMS).contains(&n)
+    {
+        return Err(format!("feed_items {n} is outside 1-{}", feeds::MAX_ITEMS));
+    }
+    Ok(())
+}
+
 /// One page as an NML object.
 fn nml_page(p: &JournalinePage) -> Result<NmlObject, String> {
     Ok(match (&p.menu, &p.text, &p.list) {
@@ -293,41 +324,74 @@ fn stamp(path: &Path) -> Option<FileStamp> {
     Some((meta.modified().ok(), meta.len()))
 }
 
-/// The page file of a Journaline application, loaded into its carousel again when it
-/// changes while the station transmits, or on request ([`Self::reload`]).
+/// Where a Journaline application's pages come from.
+enum JournalineInput {
+    /// A page file, checked for changes.
+    PageFile {
+        path: PathBuf,
+        /// The file as last loaded (or tried), and as seen at the last check (when).
+        loaded: Option<FileStamp>,
+        seen: Option<FileStamp>,
+        checked: Option<Instant>,
+    },
+    /// RSS/Atom feeds, fetched on a schedule ([`FeedWatch`]).
+    Feeds { watch: FeedWatch, root_title: String },
+}
+
+/// The pages of a Journaline application — a page file or feeds — loaded into its
+/// carousel again when they change while the station transmits, or on request
+/// ([`Self::reload`]).
 ///
-/// The file is checked once per [`WATCH_INTERVAL`], and a change is loaded once the
+/// A page file is checked once per [`WATCH_INTERVAL`], and a change is loaded once the
 /// file has stayed the same for a whole interval, so that a file still being saved is
 /// not read half-written: an edit is on the air one to two seconds after it is saved.
 /// A page file that does not load (a syntax error, a link to a missing page) changes
 /// nothing on the air; the problem is reported, and the next change is tried.
+///
+/// Feeds are fetched on their own thread every `feed_refresh` seconds; each fetch's
+/// pages are loaded when it finishes. A feed that cannot be fetched keeps its pages.
 pub(crate) struct JournalineWatch {
-    path: PathBuf,
+    input: JournalineInput,
     compress: bool,
     carousel: JournalineCarousel,
-    /// The file as last loaded (or tried), and as seen at the last check (when).
-    loaded: Option<FileStamp>,
-    seen: Option<FileStamp>,
-    checked: Option<Instant>,
     pub status: JournalineStatus,
 }
 
 impl JournalineWatch {
-    /// Load the page file of `app` into a new carousel.
+    /// Load the page file of `app`, or fetch its feeds, into a new carousel.
     pub fn open(cfg: &StationConfig, app: &AppSettings) -> Result<Self, String> {
+        if !app.feeds.is_empty() {
+            return Self::open_feeds(app);
+        }
         let path = required_path(cfg, app)?;
         // Taken before reading: a change while it is read is then loaded later.
         let loaded = stamp(&path);
         let enc = journaline_encoder(&load_journaline(&path)?, app.compress)?;
         Ok(Self {
             status: JournalineStatus { path: path.clone(), pages: enc.len(), ..Default::default() },
-            path,
+            input: JournalineInput::PageFile { path, loaded, seen: loaded, checked: None },
             compress: app.compress,
             carousel: JournalineCarousel(Arc::new(Mutex::new(enc))),
-            loaded,
-            seen: loaded,
-            checked: None,
         })
+    }
+
+    /// Fetch the feeds of `app` (once, here) into a new carousel, and start fetching
+    /// them on a schedule.
+    fn open_feeds(app: &AppSettings) -> Result<Self, String> {
+        let refresh = Duration::from_secs(app.feed_refresh.unwrap_or(feeds::DEFAULT_REFRESH_S).into());
+        let watch = FeedWatch::start(&app.feeds, app.feed_items.unwrap_or(feeds::DEFAULT_ITEMS), refresh)?;
+        let root_title = app.feed_title.clone().unwrap_or_else(|| feeds::DEFAULT_ROOT_TITLE.to_string());
+        let mut enc = JournalineEncoder::new();
+        enc.set_compression(app.compress).map_err(|e| e.to_string())?;
+        enc.replace_all(feeds::feed_pages(&root_title, watch.feeds())).map_err(|e| e.to_string())?;
+        let mut this = Self {
+            status: JournalineStatus { pages: enc.len(), ..Default::default() },
+            input: JournalineInput::Feeds { watch, root_title },
+            compress: app.compress,
+            carousel: JournalineCarousel(Arc::new(Mutex::new(enc))),
+        };
+        this.feed_status();
+        Ok(this)
     }
 
     /// The carousel, for the stream's packet multiplexer.
@@ -336,24 +400,40 @@ impl JournalineWatch {
     }
 
     /// Check the page file (at most once per [`WATCH_INTERVAL`]) and load it if it has
-    /// changed and then stayed the same since the last check. `at_s` is the station's
-    /// time, seconds of signal. Returns what happened, for the log.
+    /// changed and then stayed the same since the last check; or load the pages of a
+    /// fetch of the feeds that has finished. `at_s` is the station's time, seconds of
+    /// signal. Returns what happened, for the log.
     pub fn poll(&mut self, now: Instant, at_s: f64) -> Option<String> {
-        if self.checked.is_some_and(|t| now.duration_since(t) < WATCH_INTERVAL) {
-            return None;
+        match &mut self.input {
+            JournalineInput::PageFile { path, loaded, seen, checked } => {
+                if checked.is_some_and(|t| now.duration_since(t) < WATCH_INTERVAL) {
+                    return None;
+                }
+                *checked = Some(now);
+                let current = stamp(path);
+                let settled = current.is_some() && current == *seen;
+                *seen = current;
+                (settled && current != *loaded).then(|| self.reload(at_s))
+            }
+            JournalineInput::Feeds { watch, .. } => watch.poll().then(|| self.load_feeds(at_s)),
         }
-        self.checked = Some(now);
-        let current = stamp(&self.path);
-        let settled = current.is_some() && current == self.seen;
-        self.seen = current;
-        (settled && current != self.loaded).then(|| self.reload(at_s))
     }
 
-    /// Load the page file now (`at_s`: the station's time). Returns what happened, for
-    /// the log.
+    /// Load the page file now, or start fetching the feeds now (their pages are loaded
+    /// when the fetch finishes, by [`Self::poll`]); `at_s`: the station's time. Returns
+    /// what happened, for the log.
     pub fn reload(&mut self, at_s: f64) -> String {
-        self.loaded = stamp(&self.path);
-        let result = load_journaline(&self.path)
+        let path = match &mut self.input {
+            JournalineInput::PageFile { path, loaded, .. } => {
+                *loaded = stamp(path);
+                path.clone()
+            }
+            JournalineInput::Feeds { watch, .. } => {
+                watch.fetch_now();
+                return "fetching the Journaline feeds now".into();
+            }
+        };
+        let result = load_journaline(&path)
             .and_then(|file| journaline_pages(&file, self.compress))
             .and_then(|pages| self.carousel.lock().replace_all(pages).map_err(|e| e.to_string()));
         match result {
@@ -373,6 +453,48 @@ impl JournalineWatch {
                 line
             }
         }
+    }
+
+    /// The feeds as last fetched into the carousel; what changed, for the log.
+    fn load_feeds(&mut self, at_s: f64) -> String {
+        let JournalineInput::Feeds { watch, root_title } = &self.input else {
+            unreachable!("not a feed application")
+        };
+        // The pages always fit (see `feed_pages`), so this does not fail.
+        let result = self.carousel.lock().replace_all(feeds::feed_pages(root_title, watch.feeds()));
+        let mut line = match result {
+            Ok(changes) if changes.is_empty() => "Journaline feeds fetched: no page changed".to_string(),
+            Ok(changes) => {
+                self.status.updates += 1;
+                self.status.updated_at_s = Some(at_s);
+                format!("Journaline feeds fetched: {}", describe_changes(&changes))
+            }
+            Err(e) => format!("Journaline feeds fetched: {e}; the pages before stay on the air"),
+        };
+        self.status.pages = self.carousel.lock().len();
+        self.feed_status();
+        if let Some(e) = &self.status.error {
+            line.push_str(&format!("; {e} (its pages before stay on the air)"));
+        }
+        line
+    }
+
+    /// The status of each feed, and their problems as the application's error.
+    fn feed_status(&mut self) {
+        let JournalineInput::Feeds { watch, .. } = &self.input else { return };
+        self.status.feeds = watch
+            .urls
+            .iter()
+            .zip(watch.feeds().iter().zip(watch.errors()))
+            .map(|(url, (feed, error))| FeedStatus {
+                url: url.clone(),
+                title: feed.as_ref().map(|f| f.title.clone()),
+                items: feed.as_ref().map_or(0, |f| f.items.len()),
+                error: error.clone(),
+            })
+            .collect();
+        let errors: Vec<&str> = watch.errors().iter().flatten().map(String::as_str).collect();
+        self.status.error = (!errors.is_empty()).then(|| errors.join("; "));
     }
 }
 
@@ -614,6 +736,67 @@ mod tests {
         assert_eq!((watch.status.updates, watch.status.pages), (2, 2));
         assert_eq!(watch.poll(at(7.0), 7.0), None);
         assert_eq!(watch.poll(at(8.0), 8.0), None, "the reload took this version");
+    }
+
+    /// Feeds: the page tree from the first fetch, a changed feed on request (new
+    /// revision for the changed page and the menu), a failing feed reported while its
+    /// pages stay; the settings checked.
+    #[test]
+    fn journaline_feeds_are_watched() {
+        use crate::feeds::test_server::{FeedServer, rss};
+        let server = FeedServer::start();
+        server.set("/news", 200, &rss("News", &[("One", "first", "https://n/1"), ("Two", "second", "https://n/2")]));
+        server.set("/sport", 200, &rss("Sport", &[("Goal", "", "")]));
+        let cfg = StationConfig::default();
+        let mut app = AppSettings::new(AppKind::Journaline);
+        app.feeds = vec![server.url("/news"), server.url("/sport")];
+        check_content(&cfg, &app).unwrap();
+        let (_, watch) = build_source(&cfg, &app, 1).unwrap();
+        let mut watch = watch.expect("Journaline is watched");
+        let page = |w: &JournalineWatch, id: u16| w.carousel.lock().get(id).cloned().unwrap();
+        assert_eq!(watch.status.pages, 6);
+        assert_eq!(page(&watch, 0), NmlObject::menu(0, "News feeds", vec![MenuItem::new(1, "News"), MenuItem::new(4, "Sport")]));
+        assert_eq!(page(&watch, 2), NmlObject::plain_text(2, "One", "first\n\nhttps://n/1"));
+        assert_eq!(page(&watch, 5), NmlObject::title_only(5, "Goal"));
+        let feed = |w: &JournalineWatch, k: usize| {
+            let f = &w.status.feeds[k];
+            (f.title.clone(), f.items, f.error.is_some())
+        };
+        assert_eq!(feed(&watch, 0), (Some("News".into()), 2, false));
+        assert_eq!(watch.status.path, PathBuf::new());
+
+        // A new first item: everything after it moves down one page.
+        server.set("/news", 200, &rss("News", &[("Zero", "new", "https://n/0"), ("One", "first", "https://n/1")]));
+        server.set("/sport", 503, "");
+        assert_eq!(watch.reload(10.0), "fetching the Journaline feeds now");
+        let t0 = Instant::now();
+        let line = loop {
+            if let Some(line) = watch.poll(Instant::now(), 11.0) {
+                break line;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(10), "no fetch");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(line.starts_with("Journaline feeds fetched: pages 1, 2, 3 changed;"), "{line}");
+        assert!(line.contains("HTTP 503") && line.ends_with("(its pages before stay on the air)"), "{line}");
+        assert_eq!(page(&watch, 2), NmlObject { revision: 1, ..NmlObject::plain_text(2, "Zero", "new\n\nhttps://n/0") });
+        assert_eq!(page(&watch, 5), NmlObject::title_only(5, "Goal"), "the failed feed's page stays");
+        assert_eq!((watch.status.updates, watch.status.updated_at_s), (1, Some(11.0)));
+        assert_eq!(feed(&watch, 1), (Some("Sport".into()), 1, true));
+        assert!(watch.status.error.as_deref().is_some_and(|e| e.contains("/sport")));
+
+        // Settings.
+        let bad = |f: &dyn Fn(&mut AppSettings)| {
+            let mut a = app.clone();
+            f(&mut a);
+            check_content(&cfg, &a).unwrap_err()
+        };
+        assert!(bad(&|a| a.path = Some("pages.toml".into())).contains("not both"));
+        assert!(bad(&|a| a.feeds = vec!["ftp://x/feed".into()]).contains("ftp://x/feed"));
+        assert!(bad(&|a| a.feed_refresh = Some(10)).contains("below 60"));
+        assert!(bad(&|a| a.feed_items = Some(0)).contains("1-50"));
+        let none = AppSettings::new(AppKind::Journaline);
+        assert!(check_content(&cfg, &none).unwrap_err().contains("or `feeds`"));
     }
 
     #[test]

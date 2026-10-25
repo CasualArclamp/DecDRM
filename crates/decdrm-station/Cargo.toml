@@ -26,6 +26,8 @@ serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1"
 # Journaline page files may also be written as JSON.
 serde_json = "1"
+# Journaline pages from RSS/Atom feeds (the version the GUI reads EPG XML with).
+quick-xml = "0.41"
 thiserror.workspace = true
 # Web stream input: MP3/MP2 and Vorbis/FLAC decoders (the same symphonia as decdrm-io's
 # WAV/FLAC reader; the stream framing and the Ogg demuxer are DecDRM's own).

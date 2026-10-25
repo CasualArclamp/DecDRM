@@ -746,6 +746,11 @@ fn build(cfg: &StationConfig) -> Result<MultiplexPlan> {
                 (_, Some(_)) => p.push(format!("{name}: app_id is only used with type = \"raw\"")),
                 (_, None) => {}
             }
+            let feed_settings =
+                !app.feeds.is_empty() || app.feed_refresh.is_some() || app.feed_items.is_some() || app.feed_title.is_some();
+            if feed_settings && app.kind != AppKind::Journaline {
+                p.push(format!("{name}: feeds (and feed_refresh, feed_items, feed_title) are only used with type = \"journaline\""));
+            }
             if let Err(e) = crate::data::check_content(cfg, app) {
                 p.push(format!("{name}: {e}"));
             }

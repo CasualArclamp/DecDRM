@@ -492,6 +492,139 @@ fn journaline_pages_update_while_transmitting() {
     assert_eq!(page(2).first().map(|u| (u.1, u.3.as_str())), Some((0, "Sunny")));
 }
 
+/// Serves the feeds in `routes` (path → document, changeable) on 127.0.0.1, one
+/// request per connection, until the test ends. Returns the base URL.
+fn feed_server(routes: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for mut conn in listener.incoming().flatten() {
+            let mut head = Vec::new();
+            let mut byte = [0u8];
+            while !head.ends_with(b"\r\n\r\n") && conn.read(&mut byte).is_ok_and(|n| n == 1) {
+                head.push(byte[0]);
+            }
+            let line = String::from_utf8_lossy(&head).lines().next().unwrap_or_default().to_string();
+            let path = line.split(' ').nth(1).unwrap_or("/").to_string();
+            let body = routes.lock().unwrap().iter().find(|(p, _)| *p == path).map(|(_, b)| b.clone());
+            let (status, body) = match body {
+                Some(b) => ("200 OK", b),
+                None => ("404 Not Found", String::new()),
+            };
+            let reply = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let _ = conn.write_all(reply.as_bytes());
+        }
+    });
+    base
+}
+
+/// Journaline pages from an RSS and an Atom feed served on 127.0.0.1, laid out as the
+/// other build's recording shows them (mode B, 10 kHz, 16-QAM, 4.8 kbit/s): the root
+/// menu "News feeds", each feed's menu, the items' pages; then a new item while
+/// transmitting, which the receiver sees as changed pages with the next revision.
+#[test]
+fn journaline_feeds_loopback() {
+    use decdrm_data::journaline::{JournalineBrowser, MenuItem, NmlObject};
+    use std::sync::{Arc, Mutex};
+    let rss = |items: &[(&str, &str)]| {
+        let items: String = items
+            .iter()
+            .map(|(t, d)| format!("<item><title>{t}</title><description><![CDATA[<p>{d}</p>]]></description><link>https://example.org/{t}</link></item>"))
+            .collect();
+        format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><rss version=\"2.0\"><channel><title>Test News</title>{items}</channel></rss>")
+    };
+    let atom = r#"<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Atom “Weekly”</title>
+        <entry><title>Entry &amp; more</title><link href="https://example.org/e"/><summary>Summary</summary></entry></feed>"#;
+    let routes = Arc::new(Mutex::new(vec![
+        ("/news.rss".to_string(), rss(&[("First", "One &amp; only"), ("Second", "Two")])),
+        ("/weekly.atom".to_string(), atom.to_string()),
+    ]));
+    let base = feed_server(routes.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let toml = format!(
+        r#"
+        [channel]
+        mode = "B"
+        occupancy = 3
+        msc_mode = "16-QAM"
+        interleaving = "short"
+        [output]
+        file = "feeds.wav"
+        [[service]]
+        label = "Data 2"
+        id = 0xD0D002
+        [service.data]
+        type = "journaline"
+        feeds = ["{base}/news.rss", "{base}/weekly.atom"]
+        bitrate = 4800
+    "#
+    );
+    let mut cfg = StationConfig::from_toml_str(&toml).unwrap();
+    cfg.base_dir = Some(dir.path().to_path_buf());
+    cfg.validate().unwrap_or_else(|e| panic!("{e}"));
+    let mut station = Station::new(cfg).unwrap_or_else(|e| panic!("{e}"));
+    let status = |s: &Station| s.status().services[0].apps[0].journaline.clone().expect("Journaline status");
+    let first = status(&station);
+    assert_eq!((first.pages, first.updates, first.error), (6, 0, None));
+    let titles: Vec<Option<String>> = first.feeds.iter().map(|f| f.title.clone()).collect();
+    assert_eq!(titles, [Some("Test News".to_string()), Some("Atom “Weekly”".to_string())]);
+    station.run_frames(15).unwrap();
+
+    // A new item on top of the RSS feed, fetched on request.
+    routes.lock().unwrap()[0].1 = rss(&[("Breaking", "New"), ("First", "One &amp; only"), ("Second", "Two")]);
+    assert_eq!(station.reload_journaline(), 1);
+    let t0 = Instant::now();
+    while status(&station).updates == 0 {
+        assert!(t0.elapsed().as_secs() < 10, "the feeds were not fetched");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        station.run_frames(1).unwrap();
+    }
+    let log = station.take_log();
+    assert!(
+        log.iter().any(|l| l == r#"service 0 ("Data 2"): Journaline feeds fetched: pages 0, 1, 2, 3, 4, 5 changed, page 6 added"#),
+        "{log:?}"
+    );
+    station.run_frames(15).unwrap();
+    station.finish().unwrap();
+
+    let d = decode(&dir.path().join("feeds.wav"), false);
+    let mut browser = JournalineBrowser::new();
+    let mut updates = Vec::new();
+    for (_, e) in &d.data {
+        if let DataEvent::Journaline(u) = e {
+            updates.push((u.object_id(), u.object.revision, u.status));
+            browser.insert(u.object.clone());
+        }
+    }
+    println!("{updates:?}");
+    // First the page tree of the start, as in the recording.
+    let first_of = |id: u16| updates.iter().find(|u| u.0 == id).copied();
+    for id in 0..=5 {
+        assert_eq!(first_of(id).map(|u| (u.1, u.2)), Some((0, ObjectStatus::New)), "page {id}");
+    }
+    // Then the tree after the new item: the pages after it moved down one id.
+    let rev1 = |o: NmlObject| NmlObject { revision: 1, ..o };
+    let root = vec![MenuItem::new(1, "Test News"), MenuItem::new(5, "Atom “Weekly”")];
+    assert_eq!(*browser.root().expect("the root menu"), rev1(NmlObject::menu(0, "News feeds", root)));
+    let menu = vec![MenuItem::new(2, "Breaking"), MenuItem::new(3, "First"), MenuItem::new(4, "Second")];
+    assert_eq!(*browser.get(1).unwrap(), rev1(NmlObject::menu(1, "Test News", menu)));
+    assert_eq!(*browser.get(2).unwrap(), rev1(NmlObject::plain_text(2, "Breaking", "New
+
+https://example.org/Breaking")));
+    assert_eq!(*browser.get(3).unwrap(), rev1(NmlObject::plain_text(3, "First", "One & only
+
+https://example.org/First")));
+    assert_eq!(*browser.get(4).unwrap(), rev1(NmlObject::plain_text(4, "Second", "Two
+
+https://example.org/Second")));
+    assert_eq!(*browser.get(5).unwrap(), rev1(NmlObject::menu(5, "Atom “Weekly”", vec![MenuItem::new(6, "Entry & more")])));
+    assert_eq!(*browser.get(6).unwrap(), NmlObject::plain_text(6, "Entry & more", "Summary
+
+https://example.org/e"));
+    assert_eq!(browser.len(), 7);
+}
+
 /// A music-like file: harmonics with vibrato, noise and bursts (hard for the encoder).
 fn write_music(path: &Path, rate: u32, seconds: f64) {
     let mut w = FileWriter::create(path, AudioFormat::new(rate, 2), Container::Wav, Encoding::Int16).unwrap();

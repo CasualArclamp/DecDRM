@@ -547,7 +547,7 @@ multiplex: streams, bit rates, codec settings and what goes where.
   |---|---|
   | `slideshow` | a folder of JPEG/PNG images |
   | `website` | a directory tree with a start page |
-  | `journaline` | a TOML/JSON page file |
+  | `journaline` | a TOML/JSON page file, or RSS/Atom `feeds` (see [below](#news-from-rss-feeds-journaline)) |
   | `epg` | inline `[[…programme]]` entries and/or a file; the guide describes the station's audio service |
   | `tpeg` | a file, sent as TPEG |
   | `raw` | a file, sent as application `app_id` |
@@ -603,7 +603,7 @@ The GUI's *Transmitter* page edits the station file:
 - starts and stops the transmission, optionally with *Stop after* a duration;
 - shows the multiplex, per-service bit rates, levels and the transmitted spectrum;
 - shows each Journaline application's pages and updates, with *Update* to load the
-  page file at once (it is loaded by itself anyway, see above);
+  page file or fetch the feeds at once (both happen by themselves anyway, see above);
 - the *Station* view is a form for the file (the *TOML* view shows the text). *Part A*
   on an audio service or data application moves that stream into the more strongly
   protected part (*Protection, part A*), outlined in the multiplex bar. The part A row
@@ -717,6 +717,49 @@ url = "https://radio.example/live.mp3"
   reconnections as they happen and adds the stream's state (connecting, buffering,
   playing, reconnecting), buffer and title to its status lines. The station's status
   also carries the stream's coding, bit rate, sampling rate and station name.
+
+### News from RSS feeds (Journaline)
+
+A Journaline application can take its pages from RSS or Atom feeds instead of a page
+file. The station fetches them when it starts, then again on a schedule, and changes go
+on the air at once. Rebroadcasting someone else's news needs their permission.
+
+```toml
+[[service]]
+label = "News"
+id = 0xD0D002
+[service.data]
+type = "journaline"
+feeds = ["https://news.example/rss.xml", "https://other.example/atom.xml"]
+bitrate = 4800
+# feed_refresh = 600         # seconds between fetches (default 600, at least 60)
+# feed_items = 10            # items per feed, the first ones (default 10, up to 50)
+# feed_title = "News feeds"  # title of the root menu
+```
+
+- **Pages:** the root menu (*News feeds*) lists the feeds by their titles. Each feed is
+  a menu of its items, and each item is a page: its title, its description, an empty
+  line and its link. An item with neither description nor link is a headline only. Ids
+  go in order: 0 the root, 1 the first feed's menu, 2… its items, then the next feed.
+- **Text:** HTML in titles and descriptions is reduced to plain text (paragraphs and
+  `<br>` become line breaks), and entities are decoded. A page is kept within
+  Journaline's 4092 bytes by shortening the description ("…").
+- **Updates:** every `feed_refresh` seconds, or at once with *Update* in the GUI's
+  Transmitter tab, the feeds are fetched again. New and changed pages go out first,
+  with the next revision, so receivers show them at once. A new item at the top of a
+  feed moves the items after it down one page, so those pages change too. A feed that
+  cannot be fetched keeps the pages it had; the log and the Transmitter tab say why.
+- **Starting:** if none of the feeds can be fetched at the start, the station stops with
+  a message that says so. If only some fail, it starts with the others and tries the
+  failed ones again at the next fetch.
+- **Feeds:** RSS 2.0, RSS 1.0 (RDF) and Atom, over HTTP or HTTPS, up to 4 MiB each and
+  20 feeds per application. A page file (`path`) and `feeds` cannot be combined.
+- **In the GUI:** in the *Station* form, switch the Journaline application from *Page
+  file* to *RSS feeds* and enter the URLs one per line, with how often to fetch them,
+  how many items to take and the root menu's title. The Transmitter tab shows "N pages
+  from K feeds"; hover over it for each feed's title, items and last problem.
+- **Receiving:** any Journaline receiver shows the pages: in DecDRM, the *Journaline*
+  tab.
 
 ## DAC (neural codec)
 

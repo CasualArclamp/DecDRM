@@ -17,7 +17,8 @@ milestone checklist (keep it current).
 - `crates/decdrm-data` — packet mode, MOT, Journaline, EPG, BWS, TPEG.
 - `crates/decdrm-engine` — worker thread: source → `Session` (receiver + multiplex +
   audio/text/data pipelines) → audio out / data store; `Snapshot`s for the UIs.
-- `crates/decdrm-station` — transmitter application layer (TOML station config).
+- `crates/decdrm-station` — transmitter application layer (TOML station config);
+  `feeds` turns RSS/Atom feeds into Journaline pages (fetched on a schedule).
 - `crates/decdrm-schedule` — DRM broadcast schedules (Dream's DRMDX `DRMSchedule.ini`,
   EiBi CSV): what is on the air now; GUI Schedule tab, `decdrm schedule`. Downloads only
   on the user's request (curl/wget); `src/eibi_tables.rs` is generated from Dream.
