@@ -46,7 +46,9 @@ encoding) and libopus.
   every MSC mode incl. hierarchical 64-QAM and unequal protection, programme audio
   from a file, a sound card, a test tone or an internet radio stream (Icecast/SHOUTCAST
   over HTTP/HTTPS, MP3/AAC/Ogg/FLAC, its titles as text messages), WAV/FLAC or
-  sound-card output (clock-drift compensated with a sound-card or stream input), plus a channel
+  sound-card output (clock-drift compensated with a sound-card or stream input), a
+  HackRF One output streaming over USB straight to the radio (its own libusb-level
+  protocol, no libhackrf needed), plus a channel
   simulator (the DRM channel models 1–6, noise, frequency and clock offsets:
   `[simulate]` or `decdrm tx … --channel-model 3 --snr 18`) for testing receivers.
 - Desktop GUI (egui): spectrum, waterfall, constellations, audio spectrum, channel,

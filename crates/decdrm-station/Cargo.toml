@@ -36,6 +36,8 @@ symphonia = { version = "0.6.1", default-features = false, features = ["mp1", "m
 # and the operating system's trusted root certificates.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
+# HackRF transmitter output: USB access (libusb level, no libhackrf needed).
+rusb = "0.9"
 
 [dev-dependencies]
 # The receiver session decodes the loopback tests' output.

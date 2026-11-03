@@ -392,7 +392,7 @@ fn every_problem_is_reported() {
     let p = problems(text);
     for needle in [
         "only defined with occupancy 3 or 5",
-        "set `file` and/or `device`",
+        "set `file`, `device` and/or `hackrf`",
         "not an ISO 8601 time",
         "longer than 16 characters",
         "does not fit in 24 bits",
@@ -594,4 +594,63 @@ fn modulator_section() {
     assert!(p.iter().any(|x| x.contains("buffer_frames 99")), "{p:?}");
     assert!(problems("[mdi]\ninput = \"8000\"\n").iter().any(|x| x.contains("output: set")));
     assert!(problems("[output]\nfile = \"o.wav\"\n[mdi]\ninput = \"nonsense\"\n").iter().any(|x| x.starts_with("mdi: input")));
+}
+
+/// The HackRF output: needs I/Q format (zero offset, not swapped), a frequency,
+/// sample rate and IF within the radio's ranges, and works without a file or
+/// sound card.
+#[test]
+fn hackrf_output() {
+    use decdrm_station::SignalFormat;
+
+    // Valid on its own: no file, no sound card, just the radio.
+    let mut cfg = parse(&base());
+    cfg.output.file = None;
+    cfg.output.format = SignalFormat::Iq;
+    cfg.output.hackrf = Some(Default::default());
+    let plan = cfg.validate().unwrap();
+    assert!(plan.describe(&cfg).contains("hackrf"), "the plan names the output");
+
+    // The defaults: 15.5 MHz, 2 Msps, IF 250 kHz, LO 15.25 MHz.
+    let h = cfg.output.hackrf.clone().unwrap();
+    assert_eq!(
+        (h.frequency_hz, h.sample_rate_hz, h.if_offset_hz as u32, h.tx_gain_db),
+        (15_500_000, 2_000_000, 250_000, 40)
+    );
+    assert_eq!(h.lo_hz(), 15_250_000);
+
+    // Real format, a non-zero I/Q offset and swapped channels are rejected.
+    for (what, format, offset, swap) in [
+        ("format", SignalFormat::Real, 0.0, false),
+        ("iq_offset_hz", SignalFormat::Iq, 1000.0, false),
+        ("iq_swap", SignalFormat::Iq, 0.0, true),
+    ] {
+        let mut cfg = parse(&base());
+        cfg.output.file = None;
+        cfg.output.format = format;
+        cfg.output.iq_offset_hz = offset;
+        cfg.output.iq_swap = swap;
+        cfg.output.hackrf = Some(Default::default());
+        let p = cfg.validate().unwrap_err().problems().to_vec();
+        assert!(p.iter().any(|x| x.contains(what)), "{what}: {p:?}");
+    }
+
+    // Out-of-range settings are rejected.
+    for (what, h) in [
+        ("frequency_hz", decdrm_station::HackrfSettings { frequency_hz: 500_000, ..Default::default() }),
+        ("sample_rate_hz", decdrm_station::HackrfSettings { sample_rate_hz: 1_000_000, ..Default::default() }),
+        ("tx_gain_db", decdrm_station::HackrfSettings { tx_gain_db: 48, ..Default::default() }),
+        ("if_offset_hz", decdrm_station::HackrfSettings { if_offset_hz: 10_000.0, ..Default::default() }),
+        ("if_offset_hz", decdrm_station::HackrfSettings { if_offset_hz: 1_000_000.0, ..Default::default() }),
+    ] {
+        let mut cfg = parse(&base());
+        cfg.output.file = None;
+        cfg.output.format = SignalFormat::Iq;
+        cfg.output.hackrf = Some(h);
+        let p = cfg.validate().unwrap_err().problems().to_vec();
+        assert!(p.iter().any(|x| x.contains(what)), "{what}: {p:?}");
+    }
+
+    // Unknown keys are denied, as everywhere.
+    assert!(StationConfig::from_toml_str("[output]\nformat = \"iq\"\n[output.hackrf]\nfrequency = 1\n").is_err());
 }

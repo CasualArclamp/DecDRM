@@ -336,6 +336,18 @@ impl MultiplexPlan {
         if let Some(sim) = &cfg.simulate {
             let _ = writeln!(s, "channel simulator: {}", sim.describe());
         }
+        if let Some(h) = &cfg.output.hackrf {
+            let _ = writeln!(
+                s,
+                "hackrf: {:.4} MHz (LO {:.4} MHz + IF {:.0} kHz), {} Msps, TX gain {} dB{}",
+                h.frequency_hz as f64 / 1e6,
+                h.lo_hz() as f64 / 1e6,
+                h.if_offset_hz / 1e3,
+                h.sample_rate_hz as f64 / 1e6,
+                h.tx_gain_db,
+                if h.amp_enable { ", RF amp on" } else { "" }
+            );
+        }
         let afs = &cfg.afs;
         if !afs.is_empty() {
             let count = |n: usize, what: &str| match n {
@@ -528,8 +540,8 @@ pub(crate) fn output_config(out: &crate::config::OutputSettings, layout: Option<
 /// Checks of `[output]`.
 fn check_output(cfg: &StationConfig, p: &mut Problems) {
     let out = &cfg.output;
-    if out.file.is_none() && out.device.is_none() {
-        p.push("output: set `file` and/or `device`");
+    if out.file.is_none() && out.device.is_none() && out.hackrf.is_none() {
+        p.push("output: set `file`, `device` and/or `hackrf`");
     }
     if let Some(f) = &out.file {
         let path = cfg.resolve(f);
@@ -548,6 +560,51 @@ fn check_output(cfg: &StationConfig, p: &mut Problems) {
     }
     if !(-60.0..=0.0).contains(&out.level_dbfs) {
         p.push(format!("output: level_dbfs {} is outside -60..0 dBFS", out.level_dbfs));
+    }
+    if let Some(h) = &out.hackrf {
+        if out.format != crate::config::SignalFormat::Iq {
+            p.push("output: hackrf needs format = \"iq\" (complex baseband; it shifts the signal to its IF itself)");
+        }
+        if out.iq_offset_hz != 0.0 {
+            p.push(format!(
+                "output: hackrf needs iq_offset_hz = 0, not {} (hackrf.if_offset_hz does the IF shift)",
+                out.iq_offset_hz
+            ));
+        }
+        if out.iq_swap {
+            p.push("output: hackrf needs iq_swap = false (swapping I/Q mirrors the spectrum)");
+        }
+        if !(1_000_000..=6_000_000_000).contains(&h.frequency_hz) {
+            p.push(format!("hackrf: frequency_hz {} is outside the HackRF's 1 MHz–6 GHz range", h.frequency_hz));
+        }
+        if h.frequency_hz.saturating_sub(h.if_offset_hz.round() as u64) < 1_000_000 {
+            p.push(format!(
+                "hackrf: if_offset_hz {} puts the local oscillator below the HackRF's 1 MHz lower limit",
+                h.if_offset_hz
+            ));
+        }
+        if !(2_000_000..=20_000_000).contains(&h.sample_rate_hz) {
+            p.push(format!(
+                "hackrf: sample_rate_hz {} is outside the HackRF's 2–20 MHz range (2 MHz is plenty for DRM)",
+                h.sample_rate_hz
+            ));
+        }
+        if h.tx_gain_db > 47 {
+            p.push(format!("hackrf: tx_gain_db {} is outside the HackRF's 0–47 dB range", h.tx_gain_db));
+        }
+        if h.if_offset_hz != 0.0 && h.if_offset_hz.abs() < 15_000.0 {
+            p.push(format!(
+                "hackrf: if_offset_hz {} is smaller than 15 kHz — the DRM channel would sit on the HackRF's DC spike (0 skips the IF shift entirely)",
+                h.if_offset_hz
+            ));
+        }
+        // Half of the widest DRM channel, as a guard band around the IF.
+        if h.if_offset_hz.abs() + 10_000.0 > f64::from(h.sample_rate_hz) / 2.0 {
+            p.push(format!(
+                "hackrf: if_offset_hz {} plus the DRM channel does not fit into half of sample_rate_hz {}",
+                h.if_offset_hz, h.sample_rate_hz
+            ));
+        }
     }
 }
 

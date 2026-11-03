@@ -32,6 +32,20 @@ format = "real"              # "real" IF signal (1 channel) or "iq" (2 channels,
 level_dbfs = -15             # RMS level per channel; OFDM peaks are ~10 dB higher
 band_limit = true            # transmit channel filter against the OFDM side lobes
 
+# --- HackRF One transmitter output ----------------------------------------------------
+# Streams the signal to a HackRF over USB (no libhackrf needed, only its WinUSB driver).
+# Needs format = "iq" with iq_offset_hz = 0: the HackRF shifts the signal to its own IF
+# (if_offset_hz above the local oscillator), keeping the DRM channel clear of the radio's
+# DC spike. Example: the 15.5 MHz short-wave broadcast band.
+# [output.hackrf]
+# frequency_hz = 15_500_000  # centre of the DRM channel on air, 1 MHz–6 GHz
+# sample_rate_hz = 2_000_000 # 2–20 MHz; 2 MHz is plenty for a DRM channel
+# if_offset_hz = 250_000    # IF within the HackRF's passband (0 = zero IF; the LO leaks there)
+# tx_gain_db = 40            # transmit VGA gain, 0–47 dB
+# amp_enable = false         # 14 dB RF amplifier
+# serial = "0000000000000000600463dc2b723cc7"  # which HackRF (any one if omitted)
+# buffer_s = 1.0             # signal buffered before transmitting starts
+
 # --- Channel simulator (for testing receivers): impairs the signal before the outputs --
 # [simulate]                 # the CLI's --channel-model N / --snr DB set or override this
 # channel = 3                # DRM channel model (ES 201 980 annex B): 1 AWGN, 2 Rice with delay,

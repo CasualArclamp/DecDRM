@@ -517,7 +517,8 @@ multiplex: streams, bit rates, codec settings and what goes where.
     stream, and `protection_a` for streams with `part = "A"` (unequal error
     protection; it must be more robust, i.e. lower, than `protection_b`).
 - **`[output]`:**
-  - `file` (WAV/FLAC) and/or `device` (sound card);
+  - `file` (WAV/FLAC), `device` (sound card) and/or `hackrf` (a HackRF One, see
+    [below](#transmitting-through-a-hackrf-one));
   - `format`: `real` IF with the DC carrier at `if_hz`, or `iq`. By default a real
     signal is centred at 12 kHz: the DC carrier sits at 12 kHz for 9/10 kHz, at about
     9.7 kHz for 4.5/5 kHz (their carriers all lie above it) and at about 7 kHz for
@@ -669,6 +670,43 @@ buffer. The CLI's status lines show this as *clock trim*.
 
 To hear your own station, point `decdrm rx --device …` (or the GUI) at the other end of
 the cable.
+
+### Transmitting through a HackRF One
+
+`[output.hackrf]` streams the signal straight to a [HackRF One](https://greatscottgadgets.com/hackrf/)
+over USB, on the radio's own clock — no libhackrf or sound card needed. The station's
+complex baseband is resampled to the HackRF's sample rate and shifted to an intermediate
+frequency inside its passband, so the DRM channel keeps clear of the radio's DC spike
+and LO leakage; the local oscillator runs at the channel centre less that IF.
+
+```toml
+[output]
+format = "iq"        # required, with iq_offset_hz = 0: the HackRF does its own IF shift
+
+[output.hackrf]
+frequency_hz = 15_500_000  # centre of the DRM channel on air, 1 MHz–6 GHz
+sample_rate_hz = 2_000_000 # 2–20 MHz; 2 MHz is plenty for a DRM channel
+if_offset_hz = 250_000    # IF within the passband; 0 = zero IF (the LO leaks there)
+tx_gain_db = 40            # transmit VGA gain, 0–47 dB
+amp_enable = false         # the 14 dB RF amplifier
+# serial = "…23cc7"        # which HackRF (any one if omitted)
+# buffer_s = 1.0           # signal buffered before transmitting starts
+```
+
+Everything is optional but `format`: the defaults above transmit the 15.5 MHz
+short-wave broadcast band at 2 Msps. `buffer_s` of signal is queued before the radio
+starts, so a burst of encoding delay does not leave a gap on air.
+
+**Windows driver.** The HackRF needs a WinUSB-class driver; install it once with
+[Zadig](https://zadig.akeo.ie/) (choose *WinUSB* for the HackRF One). On Linux the
+[udev rules](https://github.com/greatscottgadgets/hackrf/tree/master/host/libhackrf)
+of libhackrf's package let a normal user open the radio.
+
+To watch your own station, `decdrm rx` (or the GUI) with an SDR receiver — or a KiwiSDR,
+which takes the signal off the air the same way it does a real broadcaster's.
+
+> **Keep to your licence and to lab conditions.** Even at the HackRF's milliwatt level,
+> an antenna turns it into a transmitter that needs one.
 
 ### Relaying an internet radio stream
 

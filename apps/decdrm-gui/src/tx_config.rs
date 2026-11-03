@@ -158,16 +158,16 @@ pub fn start_check(
     allow_device: bool,
 ) -> Result<(), String> {
     let out = &cfg.output;
-    if out.file.is_none() && out.device.is_none() {
+    if out.file.is_none() && out.device.is_none() && out.hackrf.is_none() {
         return Err(
-            "the configuration has no output: set [output] file or device, or choose one above"
+            "the configuration has no output: set [output] file, device or hackrf, or choose one above"
                 .into(),
         );
     }
     if out.device.is_some() && !allow_device {
         return Err("sound-card output is disabled in this run (--no-audio)".into());
     }
-    if frames.is_none() && out.device.is_none() && !inputs_finite(cfg) {
+    if frames.is_none() && out.device.is_none() && out.hackrf.is_none() && !inputs_finite(cfg) {
         return Err(
             "the signal goes to a file but has no end: set a duration limit \
              (or `loop = false` on every audio input file)"
@@ -186,6 +186,12 @@ pub fn describe_output(cfg: &StationConfig, plan: &MultiplexPlan) -> String {
     }
     if let Some(d) = &o.device {
         sinks.push(format!("sound card \"{d}\""));
+    }
+    if let Some(h) = &o.hackrf {
+        sinks.push(format!(
+            "hackrf at {:.4} MHz",
+            h.frequency_hz as f64 / 1e6
+        ));
     }
     if sinks.is_empty() {
         sinks.push("no output".into());

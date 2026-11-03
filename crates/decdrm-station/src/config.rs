@@ -190,8 +190,8 @@ impl ChannelSettings {
 // Output
 // ---------------------------------------------------------------------------------
 
-/// Where the transmitter signal goes. At least one of `file` and `device` must be
-/// given (the CLI's `--output` replaces both).
+/// Where the transmitter signal goes. At least one of `file`, `device` and `hackrf`
+/// must be given (the CLI's `--output` replaces the file and the sound card).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OutputSettings {
@@ -218,6 +218,9 @@ pub struct OutputSettings {
     pub level_dbfs: f64,
     /// Apply the transmit channel filter (removes the OFDM side lobes).
     pub band_limit: bool,
+    /// Transmit through a HackRF One (see [`HackrfSettings`]); needs
+    /// `format = "iq"` with `iq_offset_hz = 0` (the HackRF does its own IF shift).
+    pub hackrf: Option<HackrfSettings>,
 }
 
 impl Default for OutputSettings {
@@ -233,7 +236,63 @@ impl Default for OutputSettings {
             iq_swap: false,
             level_dbfs: decdrm_core::tx::output::DEFAULT_LEVEL_DBFS,
             band_limit: true,
+            hackrf: None,
         }
+    }
+}
+
+/// The HackRF One transmitter output (`[output.hackrf]`): streams the complex
+/// baseband to the HackRF over USB (its own libusb-level protocol, no libhackrf
+/// needed), resampled from the station's 48 kHz to the HackRF's sample rate and
+/// shifted to an intermediate frequency away from the zero-IF DC spike.
+///
+/// The station's `[output]` section must use `format = "iq"` with
+/// `iq_offset_hz = 0`: this sink takes zero-IF complex baseband and applies
+/// [`HackrfSettings::if_offset_hz`] itself, at the HackRF's sample rate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HackrfSettings {
+    /// Centre frequency of the DRM channel on air, Hz (e.g. 15_500_000 for the
+    /// 15.5 MHz short-wave broadcast band).
+    pub frequency_hz: u64,
+    /// HackRF sample rate, Hz. 2–20 MHz; the default of 2 MHz is plenty for a
+    /// DRM channel (≤ 20 kHz wide).
+    pub sample_rate_hz: u32,
+    /// Intermediate frequency the signal is shifted to within the HackRF's
+    /// passband, Hz. The local oscillator runs at `frequency_hz − if_offset_hz`,
+    /// keeping the DRM channel clear of the HackRF's DC spike and LO leakage.
+    /// Default 250 kHz; |if_offset| plus half the DRM channel (up to 10 kHz)
+    /// must stay within a quarter of the sample rate.
+    pub if_offset_hz: f64,
+    /// Transmit VGA gain, 0–47 dB (the final stage before the antenna).
+    pub tx_gain_db: u32,
+    /// Enable the 14 dB RF power amplifier.
+    pub amp_enable: bool,
+    /// Serial number of the HackRF to use (any one if none).
+    pub serial: Option<String>,
+    /// Seconds of signal buffered in the station before the radio starts
+    /// transmitting (a smooth start without underruns).
+    pub buffer_s: f64,
+}
+
+impl Default for HackrfSettings {
+    fn default() -> Self {
+        Self {
+            frequency_hz: 15_500_000,
+            sample_rate_hz: 2_000_000,
+            if_offset_hz: 250_000.0,
+            tx_gain_db: 40,
+            amp_enable: false,
+            serial: None,
+            buffer_s: 1.0,
+        }
+    }
+}
+
+impl HackrfSettings {
+    /// The local-oscillator frequency: below the channel centre by the IF offset.
+    pub fn lo_hz(&self) -> u64 {
+        self.frequency_hz.saturating_sub(self.if_offset_hz.round() as u64).max(1_000_000)
     }
 }
 

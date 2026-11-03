@@ -1,0 +1,35 @@
+# Mayak relay: DRM30 through a HackRF One.
+[channel]
+mode = "B"
+occupancy = 3          # 10 kHz
+msc_mode = "16-QAM"
+protection_b = 1
+
+[time]
+
+[output]
+format = "iq"          # complex baseband; the HackRF does its own IF shift
+level_dbfs = -15
+
+[output.hackrf]
+frequency_hz = 1_530_000
+sample_rate_hz = 2_000_000
+if_offset_hz = 250_000
+tx_gain_db = 47
+amp_enable = true
+
+[[service]]
+label = "RADIO MAYAK"
+id = 0x42
+programme_type = "Information"
+
+[service.audio]
+#codec = "he-aac"
+#codec = "he-aac-v2"
+codec = "xhe-aac"
+text = ["mayak"]
+stereo = false
+
+[service.audio.input]
+url = "https://icecast-vgtrk.cdnvideo.ru/mayakfm_mp3_128kbps"
+stream_titles = true    # the stream's "now playing" as text messages

@@ -63,7 +63,7 @@ pub fn run(a: TxArgs) -> Result<()> {
     let frames = a.duration.map(|d| (d / 0.4).ceil() as u64);
 
     // Checked before the station creates its output file.
-    if frames.is_none() && cfg.output.device.is_none() && !cfg.inputs_finite() {
+    if frames.is_none() && cfg.output.device.is_none() && cfg.output.hackrf.is_none() && !cfg.inputs_finite() {
         bail!("the signal goes to a file but has no end: give --duration SECS (or set `loop = false` on every audio input file)");
     }
     for url in cfg.services.iter().filter_map(|s| s.audio.as_ref()?.input.url.as_ref()) {
@@ -89,6 +89,17 @@ pub fn run(a: TxArgs) -> Result<()> {
     let mut station = station?;
     if let Some(dev) = &station.status().device {
         println!("sound card: {dev}");
+    }
+    if let Some(h) = &station.status().hackrf {
+        println!(
+            "hackrf: {:.4} MHz (LO {:.4} MHz + IF {:.0} kHz), {} Msps, TX gain {} dB{}",
+            h.frequency_hz as f64 / 1e6,
+            h.lo_hz as f64 / 1e6,
+            h.if_offset_hz / 1e3,
+            h.sample_rate_hz as f64 / 1e6,
+            h.tx_gain_db,
+            if h.amp { ", RF amp on" } else { "" }
+        );
     }
     // The inputs' log: web stream connections, titles, reconnections.
     let print_log = |station: &mut Station| station.take_log().iter().for_each(|line| println!("{line}"));
@@ -133,6 +144,9 @@ fn print_status(s: &StationStatus) {
         s.time_sent.as_ref().map(|t| format!(", time {t}")).unwrap_or_default(),
         if s.device.is_some() { format!(", {} underruns", s.device_underruns) } else { String::new() }
     );
+    if let Some(h) = &s.hackrf {
+        println!("          hackrf: {:.1} s transmitted, {:.1} s buffered", h.transmitted_s, h.queued_s);
+    }
     if let Some(m) = &s.mdi {
         let state = if m.waiting { "waiting for MDI".to_string() } else { m.channel.clone().unwrap_or_default() };
         println!(
