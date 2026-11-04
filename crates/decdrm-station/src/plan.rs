@@ -58,7 +58,7 @@
 //! or 4:1 stereo) and then creates the encoder once, for the xHE-AAC Static Config that
 //! SDC type 9 carries.
 
-use crate::config::{AppKind, Codec, Part, SbrRatio, SignalFormat, StationConfig};
+use crate::config::{AppKind, Codec, HackrfSettings, Part, SbrRatio, SignalFormat, StationConfig};
 use crate::error::{ConfigProblems, Result, StationError};
 use crate::sdc;
 use decdrm_core::cellmap::CellMap;
@@ -336,6 +336,25 @@ impl MultiplexPlan {
         if let Some(sim) = &cfg.simulate {
             let _ = writeln!(s, "channel simulator: {}", sim.describe());
         }
+        if let Some(h) = &cfg.output.hackrf {
+            let _ = writeln!(
+                s,
+                "hackrf: {:.4} MHz (LO {:.4} MHz + IF {:.0} kHz), {} Msps, TX gain {} dB{}",
+                h.frequency_hz as f64 / 1e6,
+                h.lo_hz() as f64 / 1e6,
+                h.if_offset_hz / 1e3,
+                h.sample_rate_hz as f64 / 1e6,
+                h.tx_gain_db,
+                if h.amp_enable { ", RF amp on" } else { "" }
+            );
+            if h.sample_rate_hz > HackrfSettings::REAL_TIME_RATE_HZ {
+                let _ = writeln!(
+                    s,
+                    "        note: above {} Msps the station may not keep real time (the resampler runs on its thread): expect underruns, and the radio may stop taking data; 2 Msps is plenty for DRM",
+                    HackrfSettings::REAL_TIME_RATE_HZ / 1_000_000
+                );
+            }
+        }
         let afs = &cfg.afs;
         if !afs.is_empty() {
             let count = |n: usize, what: &str| match n {
@@ -526,10 +545,10 @@ pub(crate) fn output_config(out: &crate::config::OutputSettings, layout: Option<
 }
 
 /// Checks of `[output]`.
-fn check_output(cfg: &StationConfig, p: &mut Problems) {
+fn check_output(cfg: &StationConfig, layout: Option<ChannelLayout>, p: &mut Problems) {
     let out = &cfg.output;
-    if out.file.is_none() && out.device.is_none() {
-        p.push("output: set `file` and/or `device`");
+    if out.file.is_none() && out.device.is_none() && out.hackrf.is_none() {
+        p.push("output: set `file`, `device` and/or `hackrf`");
     }
     if let Some(f) = &out.file {
         let path = cfg.resolve(f);
@@ -548,6 +567,88 @@ fn check_output(cfg: &StationConfig, p: &mut Problems) {
     }
     if !(-60.0..=0.0).contains(&out.level_dbfs) {
         p.push(format!("output: level_dbfs {} is outside -60..0 dBFS", out.level_dbfs));
+    }
+    if let Some(h) = &out.hackrf {
+        if !cfg!(feature = "hackrf") {
+            p.push("output: this build has no HackRF output (feature \"hackrf\")");
+        }
+        if out.format != crate::config::SignalFormat::Iq {
+            p.push("output: hackrf needs format = \"iq\" (complex baseband; it shifts the signal to its IF itself)");
+        }
+        if out.iq_offset_hz != 0.0 {
+            p.push(format!(
+                "output: hackrf needs iq_offset_hz = 0, not {} (hackrf.if_offset_hz does the IF shift)",
+                out.iq_offset_hz
+            ));
+        }
+        if out.iq_swap {
+            p.push("output: hackrf needs iq_swap = false (swapping I/Q mirrors the spectrum)");
+        }
+        // The signal's span from its lowest to its highest carrier: the 18 and 20 kHz
+        // occupancies reach about 14.6 kHz above the DC carrier and only 4.6 kHz below
+        // it, so half the nominal bandwidth is not the room they need.
+        let (band_lo, band_hi) =
+            layout.map_or((-10_000.0, 10_000.0), decdrm_core::tx::output::carrier_span_hz);
+        // Half a carrier of guard for the outermost carriers' main lobes.
+        let margin = layout.map_or(0.0, |l| l.mode.carrier_spacing() / 2.0);
+        if !HackrfSettings::RANGE_HZ.contains(&h.frequency_hz) {
+            p.push(format!("hackrf: frequency_hz {} is outside the HackRF's 1 MHz–6 GHz range", h.frequency_hz));
+        } else {
+            // The whole signal, not just the nominal frequency, has to stay inside the
+            // range: a 20 kHz channel on 1 MHz reaches 4.6 kHz below the floor.
+            let floor = *HackrfSettings::RANGE_HZ.start() as f64;
+            let ceiling = *HackrfSettings::RANGE_HZ.end() as f64;
+            let lowest = h.frequency_hz as f64 + band_lo;
+            let highest = h.frequency_hz as f64 + band_hi;
+            if lowest < floor || highest > ceiling {
+                p.push(format!(
+                    "hackrf: the channel reaches {lowest:.0}..{highest:.0} Hz, outside the HackRF's 1 MHz–6 GHz range (the signal extends above and below frequency_hz)"
+                ));
+            }
+        }
+        // The oscillator sits at `frequency - if_offset`, so a negative offset moves
+        // it above the channel: check both ends of the radio's range.
+        let lo = h.lo_hz_unclamped();
+        if !(1_000_000..=6_000_000_000).contains(&lo) {
+            p.push(format!(
+                "hackrf: if_offset_hz {} puts the local oscillator at {lo} Hz, outside the HackRF's 1 MHz–6 GHz range",
+                h.if_offset_hz
+            ));
+        }
+        if !(2_000_000..=20_000_000).contains(&h.sample_rate_hz) {
+            p.push(format!(
+                "hackrf: sample_rate_hz {} is outside the HackRF's 2–20 MHz range (2 MHz is plenty for DRM)",
+                h.sample_rate_hz
+            ));
+        }
+        if h.tx_gain_db > 47 {
+            p.push(format!("hackrf: tx_gain_db {} is outside the HackRF's 0–47 dB range", h.tx_gain_db));
+        }
+        if !(0.05..=10.0).contains(&h.buffer_s) {
+            p.push(format!("hackrf: buffer_s {} is outside 0.05-10 s", h.buffer_s));
+        }
+        if h.if_offset_hz != 0.0 && h.if_offset_hz.abs() < 15_000.0 {
+            p.push(format!(
+                "hackrf: if_offset_hz {} is smaller than 15 kHz — the DRM channel would sit on the HackRF's DC spike (0 skips the IF shift entirely)",
+                h.if_offset_hz
+            ));
+        }
+        // The channel also has to fit into the radio's passband, centred on the IF.
+        let half = f64::from(h.sample_rate_hz) / 2.0;
+        if h.if_offset_hz + band_lo - margin < -half
+            || h.if_offset_hz + band_hi + margin > half
+        {
+            p.push(format!(
+                "hackrf: the channel reaches {:.2}..{:.2} kHz from the DC carrier, so if_offset_hz {} puts it at {:.2}..{:.2} kHz, outside +-{:.0} kHz of sample_rate_hz {}",
+                band_lo / 1e3,
+                band_hi / 1e3,
+                h.if_offset_hz,
+                (h.if_offset_hz + band_lo - margin) / 1e3,
+                (h.if_offset_hz + band_hi + margin) / 1e3,
+                half / 1e3,
+                h.sample_rate_hz
+            ));
+        }
     }
 }
 
@@ -584,11 +685,12 @@ fn build_mdi(cfg: &StationConfig, m: &crate::config::MdiSettings) -> Result<Mult
     if !(1..=50).contains(&m.buffer_frames) {
         p.push(format!("mdi: buffer_frames {} is outside 1-50", m.buffer_frames));
     }
-    check_output(cfg, &mut p);
-    check_simulate(cfg, &mut p);
-    p.finish()?;
+    // The channel is a placeholder until the MDI arrives: the default mode B, 10 kHz.
     let tx = TxConfig::default();
     let layout = ChannelLayout::new(tx.mode, tx.occupancy).expect("the default layout exists");
+    check_output(cfg, Some(layout), &mut p);
+    check_simulate(cfg, &mut p);
+    p.finish()?;
     let transmitter = Transmitter::new(tx)?;
     let capacity = transmitter.msc_capacity();
     // One stream filling the frame: a valid description for the parts of the station
@@ -652,7 +754,7 @@ fn build(cfg: &StationConfig) -> Result<MultiplexPlan> {
     }
 
     // --- Output.
-    check_output(cfg, &mut p);
+    check_output(cfg, layout, &mut p);
     let output = output_config(&cfg.output, layout);
     if let Some(l) = layout
         && let Err(e) = OutputStage::new(l, output)

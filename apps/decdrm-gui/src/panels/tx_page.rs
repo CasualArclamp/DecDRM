@@ -57,6 +57,24 @@ pub struct TxPage {
     bar: Option<PlanBar>,
     /// Check again at this time (after form edits settle).
     recheck_at: Option<Instant>,
+    /// The HackRF Ones on the USB bus, scanned off the UI thread (`None` until a
+    /// scan finishes); an error is the enumeration's.
+    hackrf_scan: Option<Result<Vec<decdrm_station::HackrfDevice>, String>>,
+    /// The scan in flight, whose outcome lands in `hackrf_scan`.
+    hackrf_scan_rx: Option<std::sync::mpsc::Receiver<Result<Vec<decdrm_station::HackrfDevice>, String>>>,
+    /// A scan was asked for (the mode's first show, the button, the dialog): started
+    /// after the panels are drawn.
+    hackrf_scan_wanted: bool,
+    /// A start was requested: a failure to reach the HackRF should open the dialog.
+    dialog_armed: bool,
+    /// The HackRF error the dialog shows, while it is open.
+    error_dialog: Option<String>,
+    /// The configuration also names a file or a sound card, which the HackRF choice
+    /// leaves out ("As configured" keeps them).
+    other_outputs: bool,
+    /// The output mode as last seen: choosing the radio (or opening a station while it
+    /// is chosen) takes the file's `[output.hackrf]` into the quick fields.
+    last_output: Option<TxOutput>,
 }
 
 impl TxPage {
@@ -79,6 +97,13 @@ impl TxPage {
             doc: None,
             bar: None,
             recheck_at: None,
+            hackrf_scan: None,
+            hackrf_scan_rx: None,
+            hackrf_scan_wanted: false,
+            dialog_armed: false,
+            error_dialog: None,
+            other_outputs: false,
+            last_output: None,
         };
         if let Some(path) = settings.station_config.clone()
             && let Err(e) = page.load(&path)
@@ -107,6 +132,7 @@ impl TxPage {
             Ok(()) => {
                 settings.station_config = Some(path.to_path_buf());
                 self.notice = None;
+                self.seed_hackrf_fields(settings);
             }
             Err(e) => self.notice = Some(format!("cannot open {}: {e}", path.display())),
         }
@@ -135,6 +161,7 @@ impl TxPage {
         self.checked = None;
         self.notice = None;
         settings.station_config = None;
+        self.seed_hackrf_fields(settings);
     }
 
     fn start_dir(&self) -> Option<PathBuf> {
@@ -220,6 +247,10 @@ impl TxPage {
             output: settings.tx_output,
             file: settings.tx_output_file.clone(),
             device: settings.tx_output_device.clone(),
+            hackrf_frequency_khz: settings.tx_hackrf_frequency_khz,
+            hackrf_if_khz: Some(settings.tx_hackrf_if_khz),
+            hackrf_gain_db: settings.tx_hackrf_gain_db,
+            hackrf_amp: settings.tx_hackrf_amp,
         }
     }
 
@@ -232,6 +263,10 @@ impl TxPage {
                 Ok((cfg, plan)) => {
                     // A modulator's multiplex comes with the MDI.
                     self.bar = plan.mdi.is_none().then(|| PlanBar::of(&cfg, &plan));
+                    // Whether the *file* names a destination the HackRF choice leaves
+                    // out (the prepared config has them cleared already).
+                    self.other_outputs = StationConfig::from_toml_str(&self.text)
+                        .is_ok_and(|c| c.output.file.is_some() || c.output.device.is_some());
                     (
                         Checked::Ok {
                             plan: plan.describe(&cfg),
@@ -286,6 +321,7 @@ impl TxPage {
         } else {
             ""
         };
+        self.dialog_armed = true;
         tx.start(cfg, plan, frames, format!("{name}{unsaved}"));
     }
 
@@ -297,6 +333,7 @@ impl TxPage {
         tx: &mut TxSession,
         allow_device: bool,
     ) {
+        self.poll_hackrf_scan(ui.ctx());
         egui::Panel::top("tx_toolbar").show(ui, |ui| {
             self.toolbar(ui, settings, devices);
         });
@@ -338,6 +375,118 @@ impl TxPage {
                 View::Toml => self.editor(ui),
             }
         });
+        // A failed start through the HackRF opens a dialog with the reason and a
+        // Retry: the radio usually just needs its driver, or another program to
+        // let go of it. Armed by `transmit`, disarmed once transmitting or failed.
+        if self.dialog_armed {
+            if let Some(e) = &tx.error {
+                self.dialog_armed = false;
+                if e.starts_with("hackrf:") {
+                    self.error_dialog = Some(e.clone());
+                }
+            } else if tx.is_running() && tx.snap.started {
+                self.dialog_armed = false;
+            }
+        }
+        if let Some(message) = self.error_dialog.clone() {
+            let mut open = true;
+            let mut retry = false;
+            let mut scan = false;
+            let mut close = false;
+            egui::Window::new("HackRF One")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.set_max_width(520.0);
+                    ui.add(egui::Label::new(RichText::new(&message).color(Palette::for_ui(ui).error)).wrap());
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(
+                            "Check that the radio is connected by USB and not open in another program.\n\
+                             Windows: install its WinUSB driver with Zadig (again after a driver update).\n\
+                             Linux: libhackrf's 53-hackrf.rules in /etc/udev/rules.d/ (udevadm control --reload), or run as root.",
+                        )
+                        .weak(),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Scan devices").on_hover_text("Look for HackRF Ones on the USB bus again").clicked() {
+                            scan = true;
+                        }
+                        if ui.button("Retry").on_hover_text("Try to start the transmission again").clicked() {
+                            retry = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            if scan {
+                self.hackrf_scan_wanted = true;
+            }
+            if retry {
+                self.error_dialog = None;
+                self.transmit(settings, tx, allow_device);
+            } else if close || !open {
+                self.error_dialog = None;
+            }
+        }
+        if self.hackrf_scan_wanted {
+            self.hackrf_scan_wanted = false;
+            self.start_hackrf_scan();
+        }
+        if self.hackrf_scan_rx.is_some() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// Look for HackRFs on a helper thread: the USB scan takes long enough to be felt.
+    fn start_hackrf_scan(&mut self) {
+        if self.hackrf_scan_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(decdrm_station::hackrf_devices().map_err(|e| e.to_string()));
+        });
+        self.hackrf_scan_rx = Some(rx);
+    }
+
+    /// Take the scan's outcome if it has arrived, and keep repainting while it runs.
+    fn poll_hackrf_scan(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.hackrf_scan_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.hackrf_scan = Some(outcome);
+                self.hackrf_scan_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.hackrf_scan = Some(Err("the USB scan thread ended".into()));
+                self.hackrf_scan_rx = None;
+            }
+        }
+    }
+
+    /// Take the station file's `[output.hackrf]` into the quick fields, when the radio
+    /// is the chosen output: the file's frequency, gain and amplifier, until the fields
+    /// are edited.
+    fn seed_hackrf_fields(&mut self, settings: &mut Settings) {
+        if settings.tx_output != TxOutput::Hackrf {
+            return;
+        }
+        if let Some((khz, if_khz, gain_db, amp)) = tx_config::hackrf_fields(&self.text) {
+            settings.tx_hackrf_frequency_khz = khz;
+            settings.tx_hackrf_if_khz = if_khz;
+            settings.tx_hackrf_gain_db = gain_db;
+            settings.tx_hackrf_amp = amp;
+        }
     }
 
     fn form(&mut self, ui: &mut Ui, devices: &mut DeviceLists, levels: Vec<Option<(f32, f32)>>) {
@@ -437,12 +586,28 @@ impl TxPage {
                 .on_hover_text(
                     "Where the signal goes; overrides [output] without changing the file.",
                 );
+            // Choosing the radio starts from the station file's own HackRF settings;
+            // the quick fields win from then on (and when another station is opened).
+            if self.last_output != Some(settings.tx_output) {
+                if self.last_output.is_some() {
+                    self.seed_hackrf_fields(settings);
+                }
+                self.last_output = Some(settings.tx_output);
+            }
             match settings.tx_output {
                 TxOutput::Config => {
                     ui.label(RichText::new("(the file's [output])").weak());
                 }
                 TxOutput::File => output_file_picker(ui, settings),
                 TxOutput::Device => output_device_picker(ui, settings, devices),
+                TxOutput::Hackrf => output_hackrf_picker(
+                    ui,
+                    settings,
+                    &self.hackrf_scan,
+                    self.hackrf_scan_rx.is_some(),
+                    &mut self.hackrf_scan_wanted,
+                    self.other_outputs,
+                ),
             }
             ui.separator();
             ui.checkbox(&mut settings.tx_duration_enabled, "Stop after");
@@ -697,6 +862,59 @@ fn output_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
         });
         ui.add_space(2.0);
         egui::Grid::new("tx_output_status").num_columns(2).spacing([12.0, 3.0]).show(ui, |ui| {
+            if let Some(h) = &s.hackrf {
+                value(ui, "HackRF", format!("{:.4} MHz", h.frequency_hz as f64 / 1e6)).on_hover_text(
+                    "The DRM channel's nominal frequency: the DC carrier. The 18 and 20 kHz occupancies are not symmetric about it (see Band).",
+                );
+                ui.end_row();
+                // kHz reads best on the medium wave; the short-wave bands are MHz.
+                let band = if h.frequency_hz >= 10_000_000 {
+                    format!("{:.4}..{:.4} MHz", h.band_lo_hz / 1e6, h.band_hi_hz / 1e6)
+                } else {
+                    format!("{:.1}..{:.1} kHz", h.band_lo_hz / 1e3, h.band_hi_hz / 1e3)
+                };
+                value(ui, "Band", band).on_hover_text(
+                    "The occupied spectrum, lowest to highest carrier. The 9 and 10 kHz occupancies are symmetric about the nominal frequency, but 18 and 20 kHz extend upwards: a 20 kHz mode A signal reaches +14.58 kHz and only -4.58 kHz, so the band's middle sits 5 kHz high (18 kHz: +13.08 and -4.08, 4.5 kHz high). That is the DRM spectrum table, not a tuning error.",
+                );
+                ui.end_row();
+                value(
+                    ui,
+                    "Local osc",
+                    format!("{:.4} MHz {:+.0} kHz IF", h.lo_hz as f64 / 1e6, h.if_offset_hz / 1e3),
+                )
+                .on_hover_text(
+                    "The local oscillator sits below the nominal frequency by the IF (above it when if_offset_hz is negative), clear of the radio's DC spike.",
+                );
+                ui.end_row();
+                value(
+                    ui,
+                    "Sample rate",
+                    format!(
+                        "{} Msps, TX gain {} dB{}",
+                        h.sample_rate_hz as f64 / 1e6,
+                        h.tx_gain_db,
+                        if h.amp { " + RF amp" } else { "" }
+                    ),
+                );
+                ui.end_row();
+                value(ui, "Sent", format!("{:.1} s", h.transmitted_s))
+                    .on_hover_text("Signal handed to the radio since it started transmitting.");
+                ui.end_row();
+                let queued = RichText::new(format!("{:.1} s", h.queued_s)).monospace();
+                ui.label(RichText::new("Buffered").weak());
+                ui.label(if h.queued_s < 0.2 { queued.color(pal.error) } else { queued })
+                    .on_hover_text(
+                        "Signal held in the station as headroom; it should stay near `buffer_s`. Near zero risks an underrun.",
+                    );
+                ui.end_row();
+                let underruns = RichText::new(h.underruns.to_string()).monospace();
+                ui.label(RichText::new("Underruns").weak());
+                ui.label(if h.underruns > 0 { underruns.color(pal.error) } else { underruns })
+                    .on_hover_text(
+                        "Times the station fell behind and left the radio's buffer empty — each risks a gap on air; should stay 0.",
+                    );
+                ui.end_row();
+            }
             if let Some(dev) = &s.device {
                 value(ui, "Sound card", dev.as_str());
                 ui.end_row();
@@ -1012,6 +1230,186 @@ fn output_file_picker(ui: &mut Ui, settings: &mut Settings) {
     }
 }
 
+fn output_hackrf_picker(
+    ui: &mut Ui,
+    settings: &mut Settings,
+    scan: &Option<Result<Vec<decdrm_station::HackrfDevice>, String>>,
+    scanning: bool,
+    scan_wanted: &mut bool,
+    other_outputs: bool,
+) {
+    /// Broadcast bands to start from (kHz): a little below each band's middle, so the
+    /// whole channel stays inside it (40 kHz in the narrow 75 m and 15 m, where 70
+    /// would leave the band), and the medium-wave channel the default was chosen for.
+    /// The band's name.
+    const PRESETS: [(f64, &str); 15] = [
+        (1_530.0, "medium wave"),
+        (2_330.0, "120 m"),
+        (3_230.0, "90 m"),
+        (3_910.0, "75 m"),
+        (4_830.0, "60 m"),
+        (5_980.0, "49 m"),
+        (7_330.0, "41 m"),
+        (9_530.0, "31 m"),
+        (11_760.0, "25 m"),
+        (13_650.0, "22 m"),
+        (15_380.0, "19 m"),
+        (17_620.0, "16 m"),
+        (18_920.0, "15 m"),
+        (21_580.0, "13 m"),
+        (25_780.0, "11 m"),
+    ];
+    let current = PRESETS
+        .iter()
+        .find(|(khz, _)| (settings.tx_hackrf_frequency_khz - khz).abs() < 0.05)
+        .map(|(_, band)| *band);
+    egui::ComboBox::from_id_salt("tx_hackrf_preset")
+        .selected_text(current.unwrap_or("Band"))
+        .width(60.0)
+        .show_ui(ui, |ui| {
+            for (khz, band) in PRESETS {
+                let picked = current == Some(band);
+                if ui.selectable_label(picked, format!("{band} — {khz:.0} kHz")).clicked() {
+                    settings.tx_hackrf_frequency_khz = khz;
+                }
+            }
+        })
+        .response
+        .on_hover_text(
+            "Broadcast bands, a little below each band's middle so the whole channel stays inside the band; drag the frequency for anything else.",
+        );
+    // The radio's span less the IF: the channel and the local oscillator must both
+    // stay inside it (1 MHz … 6 GHz), so the field cannot leave it either.
+    let if_offset_hz = settings.tx_hackrf_if_khz * 1_000.0;
+    let (min_hz, max_hz) = decdrm_station::HackrfSettings::frequency_range_for(if_offset_hz);
+    let (min_khz, max_khz) = (min_hz as f64 / 1_000.0, max_hz as f64 / 1_000.0);
+    settings.tx_hackrf_frequency_khz = settings.tx_hackrf_frequency_khz.clamp(min_khz, max_khz);
+    ui.add(
+        egui::DragValue::new(&mut settings.tx_hackrf_frequency_khz)
+            .range(min_khz..=max_khz)
+            .speed(1.0)
+            .max_decimals(1)
+            .suffix(" kHz"),
+    )
+    .on_hover_text(format!(
+        "Nominal frequency of the DRM channel on air, {min_khz:.0}–{max_khz:.0} kHz with the IF {if_offset_hz:.0} kHz. Taken from the station file's [output.hackrf] when you choose HackRF or open it; these fields win afterwards."
+    ));
+    // The IF presets: -950..+950 kHz in 50 kHz steps, 0 being zero IF. A choice that
+    // would push the local oscillator out of the radio's range at the current channel
+    // frequency is offered disabled, with the frequency span it would need.
+    const IF_STEP_KHZ: i32 = 50;
+    const IF_MAX_KHZ: i32 = 950;
+    let selected = if settings.tx_hackrf_if_khz == 0.0 {
+        "IF 0 kHz".to_string()
+    } else if (settings.tx_hackrf_if_khz.abs() <= f64::from(IF_MAX_KHZ))
+        && (settings.tx_hackrf_if_khz / f64::from(IF_STEP_KHZ)).fract() == 0.0
+    {
+        format!("IF {:+.0} kHz", settings.tx_hackrf_if_khz)
+    } else {
+        format!("IF {:+.1} kHz", settings.tx_hackrf_if_khz)
+    };
+    egui::ComboBox::from_id_salt("tx_hackrf_if")
+        .selected_text(selected)
+        .width(110.0)
+        .show_ui(ui, |ui| {
+            for step in -(IF_MAX_KHZ / IF_STEP_KHZ)..=(IF_MAX_KHZ / IF_STEP_KHZ) {
+                let khz = f64::from(step * IF_STEP_KHZ);
+                let (min_hz, max_hz) =
+                    decdrm_station::HackrfSettings::frequency_range_for(khz * 1_000.0);
+                let (min_khz, max_khz) = (min_hz as f64 / 1_000.0, max_hz as f64 / 1_000.0);
+                let fits = (min_khz..=max_khz).contains(&settings.tx_hackrf_frequency_khz);
+                let picked = (settings.tx_hackrf_if_khz - khz).abs() < 0.5;
+                let label = if step == 0 {
+                    "0 kHz — zero IF (the DC spike sits on the channel)".to_string()
+                } else {
+                    format!("{khz:+.0} kHz")
+                };
+                let hover = if !fits {
+                    format!(
+                        "Needs a channel frequency of {min_khz:.0}–{max_khz:.0} kHz to keep the local oscillator inside the radio's range."
+                    )
+                } else if step == 0 {
+                    "Zero IF: the radio's DC spike and LO leakage sit on the channel.".to_string()
+                } else {
+                    format!(
+                        "The local oscillator sits {:.0} kHz {} the channel.",
+                        khz.abs(),
+                        if khz < 0.0 { "above" } else { "below" }
+                    )
+                };
+                let response = ui.add_enabled(fits, egui::Button::selectable(picked, label));
+                let response = if fits {
+                    response.on_hover_text(hover)
+                } else {
+                    response.on_disabled_hover_text(hover)
+                };
+                if response.clicked() {
+                    settings.tx_hackrf_if_khz = khz;
+                }
+            }
+        })
+        .response
+        .on_hover_text(
+            "The IF the DRM channel is shifted to within the radio's passband: negative puts the local oscillator above the channel (the default -250 kHz), positive below. 0 is zero IF and puts the radio's DC spike on the channel. Presets from -950 to +950 kHz in 50 kHz steps; a value from the station file that is not on the grid is kept and shown as it is.",
+        );
+    ui.add(
+        egui::DragValue::new(&mut settings.tx_hackrf_gain_db)
+            .range(0..=47)
+            .speed(0.5)
+            .suffix(" dB"),
+    )
+    .on_hover_text("HackRF transmit VGA gain, 0–47 dB.");
+    ui.checkbox(&mut settings.tx_hackrf_amp, "RF amp")
+        .on_hover_text("The HackRF's 14 dB RF amplifier.");
+    if other_outputs {
+        ui.label(RichText::new("file/sound card ignored").weak())
+            .on_hover_text(
+                "This mode transmits through the radio only. Choose \"As configured\" for simultaneous outputs.",
+            );
+    }
+    ui.separator();
+    if scan.is_none() && !scanning {
+        *scan_wanted = true;
+    }
+    if ui
+        .small_button("Scan")
+        .on_hover_text("Look for HackRF Ones on the USB bus again")
+        .clicked()
+    {
+        *scan_wanted = true;
+    }
+    if scanning {
+        ui.label(RichText::new("scanning…").weak());
+    }
+    let driver_hint = "Windows: the radio needs its WinUSB driver (Zadig); Linux: libhackrf's udev rule, or run as root. A radio another program is using cannot be opened either.";
+    match scan {
+        Some(Ok(list)) if list.is_empty() => {
+            ui.colored_label(ui.visuals().warn_fg_color, "no HackRF found")
+                .on_hover_text(format!("Check that the radio is connected and not in use by another program. {driver_hint}"));
+        }
+        Some(Ok(list)) => {
+            let serials: Vec<&str> = list
+                .iter()
+                .map(|d| d.serial.as_deref().unwrap_or("serial unreadable"))
+                .collect();
+            let failed = list.iter().filter(|d| d.error.is_some()).count();
+            let summary = match failed {
+                0 => format!("{} found", list.len()),
+                n if n == list.len() => "cannot open (driver, or in use?)".to_string(),
+                n => format!("{} found, {n} cannot open (driver, or in use?)", list.len()),
+            };
+            let text = RichText::new(summary).monospace();
+            ui.label(if failed > 0 { text.color(ui.visuals().warn_fg_color) } else { text })
+                .on_hover_text(format!("{}{driver_hint}", serials.join("\n")));
+        }
+        Some(Err(e)) => {
+            ui.colored_label(ui.visuals().warn_fg_color, "USB scan failed")
+                .on_hover_text(e.as_str());
+        }
+        None => {}
+    }
+}
+
 fn output_device_picker(ui: &mut Ui, settings: &mut Settings, devices: &mut DeviceLists) {
     let current = settings
         .tx_output_device
@@ -1032,5 +1430,44 @@ fn output_device_picker(ui: &mut Ui, settings: &mut Settings, devices: &mut Devi
         .clicked()
     {
         devices.refresh();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Choosing the radio takes the station file's [output.hackrf] into the quick
+    /// fields; a file without the section, or another output mode, leaves them alone.
+    #[test]
+    fn the_radio_mode_starts_from_the_files_fields() {
+        let mut settings = Settings { tx_output: TxOutput::Hackrf, ..Default::default() };
+        let mut page = TxPage::new(&mut settings, PathBuf::from("."));
+        page.text =
+            "[output]\nformat = \"iq\"\n[output.hackrf]\nfrequency_hz = 26_070_000\nif_offset_hz = 250_000.0\ntx_gain_db = 30\namp_enable = true\n"
+                .into();
+        page.seed_hackrf_fields(&mut settings);
+        assert_eq!(
+            (
+                settings.tx_hackrf_frequency_khz,
+                settings.tx_hackrf_if_khz,
+                settings.tx_hackrf_gain_db,
+                settings.tx_hackrf_amp
+            ),
+            (26_070.0, 250.0, 30, true)
+        );
+
+        // A file without the section leaves the fields as they are.
+        settings.tx_hackrf_frequency_khz = 9_530.0;
+        page.text = "[output]\nfile = \"out.wav\"\n".into();
+        page.seed_hackrf_fields(&mut settings);
+        assert_eq!(settings.tx_hackrf_frequency_khz, 9_530.0);
+
+        // Another output mode does not take the radio's values either.
+        settings.tx_output = TxOutput::File;
+        page.text =
+            "[output]\nformat = \"iq\"\n[output.hackrf]\nfrequency_hz = 26_070_000\n".into();
+        page.seed_hackrf_fields(&mut settings);
+        assert_eq!(settings.tx_hackrf_frequency_khz, 9_530.0);
     }
 }

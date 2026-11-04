@@ -1,0 +1,40 @@
+# Radio relay example: DRM30 through a HackRF One.
+#
+# The input is a public placeholder: pick a stream you may lawfully relay — your own,
+# a CC-licensed one, or the broadcaster's with permission. A public station's stream
+# (a major broadcaster's, say) is meant for listening, not retransmission. A local file
+# with `loop = true` avoids the question entirely.
+[channel]
+mode = "B"
+occupancy = 3          # 10 kHz
+msc_mode = "16-QAM"
+protection_b = 1
+
+[time]
+
+[output]
+format = "iq"          # complex baseband; the HackRF does its own IF shift
+level_dbfs = -15
+
+[output.hackrf]
+frequency_hz = 1_530_000
+sample_rate_hz = 2_000_000
+if_offset_hz = -250_000
+tx_gain_db = 40
+amp_enable = true
+
+[[service]]
+label = "RADIO EXAMPLE"
+id = 0x42
+programme_type = "Information"
+
+[service.audio]
+#codec = "he-aac"
+#codec = "he-aac-v2"
+codec = "xhe-aac"
+text = ["radio example"]
+stereo = false
+
+[service.audio.input]
+url = "https://radio.example/live.mp3"   # replace with a stream you may relay
+stream_titles = true    # the stream's "now playing" as text messages

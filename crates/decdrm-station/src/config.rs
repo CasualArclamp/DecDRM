@@ -190,8 +190,8 @@ impl ChannelSettings {
 // Output
 // ---------------------------------------------------------------------------------
 
-/// Where the transmitter signal goes. At least one of `file` and `device` must be
-/// given (the CLI's `--output` replaces both).
+/// Where the transmitter signal goes. At least one of `file`, `device` and `hackrf`
+/// must be given (the CLI's `--output` replaces the file and the sound card).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OutputSettings {
@@ -218,6 +218,9 @@ pub struct OutputSettings {
     pub level_dbfs: f64,
     /// Apply the transmit channel filter (removes the OFDM side lobes).
     pub band_limit: bool,
+    /// Transmit through a HackRF One (see [`HackrfSettings`]); needs
+    /// `format = "iq"` with `iq_offset_hz = 0` (the HackRF does its own IF shift).
+    pub hackrf: Option<HackrfSettings>,
 }
 
 impl Default for OutputSettings {
@@ -233,7 +236,109 @@ impl Default for OutputSettings {
             iq_swap: false,
             level_dbfs: decdrm_core::tx::output::DEFAULT_LEVEL_DBFS,
             band_limit: true,
+            hackrf: None,
         }
+    }
+}
+
+/// The HackRF One transmitter output (`[output.hackrf]`): streams the complex
+/// baseband to the HackRF over USB (its own libusb-level protocol, no libhackrf
+/// needed), resampled from the station's 48 kHz to the HackRF's sample rate and
+/// shifted to an intermediate frequency away from the zero-IF DC spike.
+///
+/// The station's `[output]` section must use `format = "iq"` with
+/// `iq_offset_hz = 0`: this sink takes zero-IF complex baseband and applies
+/// [`HackrfSettings::if_offset_hz`] itself, at the HackRF's sample rate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HackrfSettings {
+    /// Nominal frequency of the DRM channel on air, Hz: the position of the DC
+    /// carrier. Defaults to 1_530_000 (a medium-wave broadcast channel); e.g.
+    /// 15_500_000 for the 15.5 MHz short-wave broadcast band. The usable span is
+    /// [`HackrfSettings::frequency_range`]: the channel and the local oscillator must
+    /// both stay inside [`HackrfSettings::RANGE_HZ`]. The 18 and 20 kHz occupancies
+    /// are not symmetric about it: the signal spans about -4.6..+14.6 kHz, so its
+    /// centre of power is a few kHz higher.
+    pub frequency_hz: u64,
+    /// HackRF sample rate, Hz. The radio accepts 2–20 MHz, but the station has to
+    /// resample its 48 kHz baseband to it on its own thread and hand two bytes per
+    /// sample to USB: 2 MHz (the default) is plenty for a DRM channel (≤ 20 kHz
+    /// wide), and above [`Self::REAL_TIME_RATE_HZ`] a typical machine falls behind,
+    /// the radio underruns and may stop taking data altogether. A higher rate buys
+    /// nothing for DRM; it only widens the passband.
+    pub sample_rate_hz: u32,
+    /// Intermediate frequency the signal is shifted to within the HackRF's
+    /// passband, Hz. The local oscillator runs at `frequency_hz - if_offset_hz`,
+    /// keeping the DRM channel clear of the HackRF's DC spike and LO leakage.
+    /// Default -250 kHz (the oscillator above the channel); the offset plus the
+    /// channel's own span (up to 14.6 kHz above the DC carrier in the 18 and 20 kHz
+    /// occupancies) must stay within half the sample rate.
+    pub if_offset_hz: f64,
+    /// Transmit VGA gain, 0–47 dB (the final stage before the antenna).
+    pub tx_gain_db: u32,
+    /// Enable the 14 dB RF power amplifier.
+    pub amp_enable: bool,
+    /// Serial number of the HackRF to use (any one if none).
+    pub serial: Option<String>,
+    /// Seconds of signal buffered in the station before the radio starts
+    /// transmitting (a smooth start without underruns), 0.05–10 s. The queue is
+    /// capped at 64 MB, so a high sample rate shortens it.
+    pub buffer_s: f64,
+}
+
+impl Default for HackrfSettings {
+    fn default() -> Self {
+        Self {
+            frequency_hz: 1_530_000,
+            sample_rate_hz: 2_000_000,
+            if_offset_hz: -250_000.0,
+            tx_gain_db: 40,
+            amp_enable: false,
+            serial: None,
+            buffer_s: 1.0,
+        }
+    }
+}
+
+impl HackrfSettings {
+    /// The radio's frequency span, Hz (both the local oscillator and the channel
+    /// have to stay inside it).
+    pub const RANGE_HZ: std::ops::RangeInclusive<u64> = 1_000_000..=6_000_000_000;
+
+    /// The highest sample rate the station usually keeps up with in real time, Hz.
+    /// The radio takes more (2–20 MHz), but every sample costs a resampler step and
+    /// two bytes of USB writes on the station's thread; measured on a typical desktop,
+    /// 4 Msps keeps real time and 8 Msps does not (the radio then underruns). Not a
+    /// hard limit: a faster machine may.
+    pub const REAL_TIME_RATE_HZ: u32 = 4_000_000;
+
+    /// The transmit frequencies that keep both the channel and the local
+    /// oscillator (`frequency - if_offset`) inside [`Self::RANGE_HZ`], Hz.
+    /// With the default −250 kHz offset: 1 MHz … 5 999 750 000 Hz.
+    pub fn frequency_range(&self) -> (u64, u64) {
+        Self::frequency_range_for(self.if_offset_hz)
+    }
+
+    /// [`Self::frequency_range`] for a given IF offset, without constructing the
+    /// settings: what the GUI clamps its frequency field to.
+    pub fn frequency_range_for(if_offset_hz: f64) -> (u64, u64) {
+        let (floor, ceiling) = (*Self::RANGE_HZ.start(), *Self::RANGE_HZ.end());
+        let offset = if_offset_hz.round();
+        let lower = (floor as f64 + offset).max(floor as f64);
+        let upper = (ceiling as f64 + offset).min(ceiling as f64);
+        (lower as u64, (upper.max(lower)) as u64)
+    }
+
+    /// The local-oscillator frequency: below the nominal frequency by the IF offset
+    /// (above it when the offset is negative), kept within the radio's 1 MHz floor.
+    pub fn lo_hz(&self) -> u64 {
+        u64::try_from(self.lo_hz_unclamped()).unwrap_or(0).max(1_000_000)
+    }
+
+    /// The local oscillator before the 1 MHz floor is applied: outside the radio's
+    /// range when the offset pushes it there, which the plan reports.
+    pub(crate) fn lo_hz_unclamped(&self) -> i128 {
+        i128::from(self.frequency_hz) - self.if_offset_hz.round() as i128
     }
 }
 

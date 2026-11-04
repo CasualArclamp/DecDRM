@@ -173,6 +173,17 @@ pub(super) fn hover_label(
     }
 }
 
+/// Hover label for a spectrum on an absolute axis (kHz in, MHz out, 1 Hz shown).
+fn hover_label_mhz(dy: usize) -> impl Fn(&HoverPosition<'_>) -> Option<String> {
+    move |pos: &HoverPosition<'_>| {
+        let p = match pos {
+            HoverPosition::NearDataPoint { position, .. }
+            | HoverPosition::Elsewhere { position } => position,
+        };
+        Some(format!("{:.6} MHz\n{:.dy$} dB", p.x / 1e3, p.y))
+    }
+}
+
 fn line(name: &str, points: &Points, color: Color32) -> Line<'static> {
     Line::new(name.to_string(), PlotPoints::new(points.clone()))
         .color(color)
@@ -191,31 +202,40 @@ pub fn spectrum_plot(
 ) {
     let (x0, x1) = s.span_khz;
     let (y0, y1) = s.db_range;
-    base_plot(id)
+    let on_air = s.on_air_khz.is_some();
+    let mut plot = base_plot(id)
         .height(height)
-        .x_axis_label("frequency (kHz)")
-        .y_axis_label("power (dB)")
-        .label_formatter(hover_label("kHz", 2, "dB", 1))
-        .show(ui, |p| {
-            p.set_plot_bounds(PlotBounds::from_min_max([x0, y0], [x1, y1]));
-            if let Some((lo, hi)) = s.band_khz {
-                p.span(
-                    Span::new("DRM signal", lo..=hi)
-                        .fill(pal.band)
-                        .border_width(0.0),
-                );
-            }
-            if let Some(dc) = s.dc_khz {
-                p.vline(
-                    VLine::new("DC carrier", dc)
-                        .color(pal.marker)
-                        .style(LineStyle::dashed_dense()),
-                );
-            }
-            if !s.points.is_empty() {
-                p.line(line(name, &s.points, pal.spectrum).width(1.0));
-            }
-        });
+        .x_axis_label(if on_air {
+            "frequency (kHz on air)"
+        } else {
+            "frequency (kHz)"
+        })
+        .y_axis_label("power (dB)");
+    plot = if on_air {
+        plot.label_formatter(hover_label_mhz(1))
+    } else {
+        plot.label_formatter(hover_label("kHz", 2, "dB", 1))
+    };
+    plot.show(ui, |p| {
+        p.set_plot_bounds(PlotBounds::from_min_max([x0, y0], [x1, y1]));
+        if let Some((lo, hi)) = s.band_khz {
+            p.span(
+                Span::new("DRM signal", lo..=hi)
+                    .fill(pal.band)
+                    .border_width(0.0),
+            );
+        }
+        if let Some(dc) = s.dc_khz {
+            p.vline(
+                VLine::new("DC carrier", dc)
+                    .color(pal.marker)
+                    .style(LineStyle::dashed_dense()),
+            );
+        }
+        if !s.points.is_empty() {
+            p.line(line(name, &s.points, pal.spectrum).width(1.0));
+        }
+    });
 }
 
 /// The spectrum's history, newest at the top, on the Spectrum plot's frequency axis

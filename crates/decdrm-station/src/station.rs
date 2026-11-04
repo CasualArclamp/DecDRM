@@ -59,6 +59,9 @@ pub struct StationStatus {
     pub device_underruns: u64,
     /// Signal queued on the sound card (not yet played), milliseconds.
     pub device_buffer_ms: Option<f64>,
+    /// The HackRF the signal is transmitted through, if any.
+    #[cfg(feature = "hackrf")]
+    pub hackrf: Option<crate::hackrf::HackrfStatus>,
     /// SDC blocks produced.
     pub sdc_blocks: u64,
     /// Data field bytes used by the last SDC block, and the capacity.
@@ -210,6 +213,8 @@ pub struct Station {
     output: OutputStage,
     file: Option<FileWriter>,
     device: Option<DeviceSink>,
+    #[cfg(feature = "hackrf")]
+    hackrf: Option<crate::hackrf::HackrfSink>,
     /// (Short Id, chain) of every audio service.
     audio: Vec<(usize, AudioChain)>,
     data: Vec<DataStream>,
@@ -332,6 +337,9 @@ impl Station {
 
         // The outputs last, so that a configuration error leaves no empty file behind.
         let channels = output.channels();
+        // The radio first: a missing or busy HackRF is the likeliest failure.
+        #[cfg(feature = "hackrf")]
+        let hackrf = cfg.output.hackrf.as_ref().map(crate::hackrf::HackrfSink::open).transpose()?;
         let file = crate::output::open_file(&cfg, channels)?;
         let device = DeviceSink::open(&cfg.output, channels)?;
 
@@ -352,6 +360,8 @@ impl Station {
             output,
             file,
             device,
+            #[cfg(feature = "hackrf")]
+            hackrf,
             audio,
             data,
             journaline,
@@ -605,6 +615,10 @@ impl Station {
         if let Some(d) = self.device.as_mut() {
             d.drain(&self.stop);
         }
+        #[cfg(feature = "hackrf")]
+        if let Some(h) = self.hackrf.as_mut() {
+            h.drain(&self.stop)?;
+        }
         self.update_status();
         Ok(self.status)
     }
@@ -638,6 +652,10 @@ impl Station {
         if let Some(d) = self.device.as_mut() {
             d.write(&self.samples, &self.stop)?;
         }
+        #[cfg(feature = "hackrf")]
+        if let Some(h) = self.hackrf.as_mut() {
+            h.write(&self.samples, &self.stop)?;
+        }
         Ok(())
     }
 
@@ -656,6 +674,23 @@ impl Station {
         st.device = self.device.as_ref().map(|d| d.name().to_string());
         st.device_underruns = self.device.as_ref().map_or(0, DeviceSink::underruns);
         st.device_buffer_ms = self.device.as_ref().map(|d| d.queued().as_secs_f64() * 1000.0);
+        #[cfg(feature = "hackrf")]
+        {
+            let (band_lo, band_hi) = decdrm_core::tx::output::carrier_span_hz(self.plan.layout);
+            st.hackrf = self.hackrf.as_ref().map(|h| crate::hackrf::HackrfStatus {
+                frequency_hz: h.settings().frequency_hz,
+                band_lo_hz: h.settings().frequency_hz as f64 + band_lo,
+                band_hi_hz: h.settings().frequency_hz as f64 + band_hi,
+                lo_hz: h.settings().lo_hz(),
+                sample_rate_hz: h.settings().sample_rate_hz,
+                if_offset_hz: h.settings().if_offset_hz,
+                tx_gain_db: h.settings().tx_gain_db,
+                amp: h.settings().amp_enable,
+                transmitted_s: h.transmitted_s(),
+                queued_s: h.queued_s(),
+                underruns: h.underruns(),
+            });
+        }
         st.sdc_blocks = self.sdc.blocks;
         st.sdc_bytes_used = self.sdc.last_used;
         st.time_sent = self.sdc.last_time.as_ref().map(crate::time::format_entity);

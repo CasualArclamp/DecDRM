@@ -2,6 +2,12 @@
 
 A Digital Radio Mondiale (DRM30) receiver **and transmitter** written in Rust.
 
+> **This is a fork.** It adds a HackRF One transmitter output (`[output.hackrf]`) to
+> [CasualArclamp/DecDRM](https://github.com/CasualArclamp/DecDRM). Use it only if you
+> need to transmit through a HackRF; otherwise use the
+> [original repository](https://github.com/CasualArclamp/DecDRM), where the project is
+> developed and kept up to date.
+
 DecDRM decodes DRM robustness modes A–D in every channel bandwidth (4.5–20 kHz) from
 recordings or a live sound card (for example a virtual audio cable fed by a web SDR such
 as a KiwiSDR), and generates DRM signals from a station description. The signal
@@ -21,7 +27,8 @@ encoding) and libopus.
 > **Status:** the receiver decodes audio, text messages and data services from every
 > DRM test recording available here (modes A/B/C, 9–20 kHz, real and I/Q inputs,
 > inverted spectra, clock offsets up to 1250 ppm, AAC/HE-AAC/xHE-AAC/Opus). The
-> transmitter produces complete multiplexes that the receiver decodes. See
+> transmitter produces complete multiplexes that the receiver decodes, and has been put
+> on the air through a HackRF One at low power in lab conditions. See
 > [docs/DESIGN.md](docs/DESIGN.md) for the plan and milestone status.
 
 ## Highlights
@@ -46,8 +53,10 @@ encoding) and libopus.
   every MSC mode incl. hierarchical 64-QAM and unequal protection, programme audio
   from a file, a sound card, a test tone or an internet radio stream (Icecast/SHOUTCAST
   over HTTP/HTTPS, MP3/AAC/Ogg/FLAC, its titles as text messages), WAV/FLAC or
-  sound-card output (clock-drift compensated with a sound-card or stream input), plus a channel
-  simulator (the DRM channel models 1–6, noise, frequency and clock offsets:
+  sound-card output (clock-drift compensated with a sound-card or stream input), a
+  HackRF One output streaming over USB straight to the radio (the radio's vendor USB
+  requests over libusb, no libhackrf needed), plus a channel simulator (the DRM channel
+  models 1–6, noise, frequency and clock offsets:
   `[simulate]` or `decdrm tx … --channel-model 3 --snr 18`) for testing receivers.
 - Desktop GUI (egui): spectrum, waterfall, constellations, audio spectrum, channel,
   impulse response, SNR per carrier, reception history, and two displays Dream lacks: a
@@ -92,21 +101,25 @@ encoding) and libopus.
 ## Building
 
 ```bash
-git clone --recursive https://github.com/CasualArclamp/DecDRM.git
-cd DecDRM
+git clone --recursive https://github.com/Ageres/DecDRM-fork.git
+cd DecDRM-fork
 cargo build --release
 ```
 
 Requirements: Rust 1.88 or newer (1.95 for the GUI), a C/C++ compiler (MSVC Build Tools
 on Windows, gcc on Linux) and CMake for the vendored codecs, and on Linux the ALSA
-development package (`libasound2-dev`).
+development package (`libasound2-dev`) plus `libudev-dev` for the HackRF output's libusb.
+Step-by-step instructions for Windows, Ubuntu/Debian and a Raspberry Pi 4 are in
+[BUILD.md](docs/BUILD.md); all three are covered by CI (the Pi's aarch64 build runs on an
+arm64 runner).
 
 **Portable Windows executables**: `decdrm-gui.exe` and `decdrm.exe` that run on any
 64-bit Windows 10/11 with nothing installed (C runtime linked statically, DAC with its
-weights built in, about 320 MB each) are attached to the
-[releases](https://github.com/CasualArclamp/DecDRM/releases), or built into `exe\`
-with `powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1` (after
-`decdrm models download dac`).
+weights built in, about 320 MB each) are built into `exe\` with
+`powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1` (after
+`decdrm models download dac`). Prebuilt ones are attached to the upstream
+[releases](https://github.com/CasualArclamp/DecDRM/releases); they come from upstream
+and have no HackRF output, so build this fork's own to get it.
 
 ## Usage
 
@@ -138,6 +151,9 @@ decdrm schedule --update
 decdrm tx crates/decdrm-station/examples/station.toml --check     # show the multiplex
 decdrm tx crates/decdrm-station/examples/station.toml --duration 30 --output drm.wav
 
+# straight to a HackRF One ([output.hackrf]: frequency, sample rate, gain)
+decdrm tx crates/decdrm-station/examples/station-tx-hack-rf-radio-example.toml --duration 60
+
 # desktop GUI
 cargo run --release -p decdrm-gui -- recording.flac
 ```
@@ -145,6 +161,25 @@ cargo run --release -p decdrm-gui -- recording.flac
 Korean Central Broadcasting (6140 kHz) sends EVS speech inside a data service. DecDRM
 recognises it and shows it as EVS audio, but does not decode it (see the
 [user guide](docs/USER_GUIDE.md#services-and-audio)).
+
+A station file with `[output.hackrf]` transmits straight through a HackRF One: keep to
+your licence for on-air use, and for tests feed a dummy load, a receiver's IF input or a
+loopback instead of an antenna.
+
+### Transmitting through a HackRF One
+
+`[output.hackrf]` streams the signal straight to the radio: the station's complex
+baseband is resampled to the radio's rate and shifted to an IF away from its DC spike,
+then sent over USB through libusb — no libhackrf and no sound card needed. The radio
+needs its USB driver: on Windows the WinUSB driver, installed once with
+[Zadig](https://zadig.akeo.ie/); on Linux the udev rule from libhackrf's
+`53-hackrf.rules` (`SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="6089",
+MODE="0660", GROUP="plugdev"`), so that a normal user can open the radio (running as root
+also works).
+The [user guide](docs/USER_GUIDE.md#transmitting-through-a-hackrf-one) covers the
+settings and the test setup. Note that `frequency_hz` is the channel's nominal
+frequency (the DC carrier): the 18 and 20 kHz occupancies extend upwards from it rather
+than symmetrically around it, so their occupied band's centre sits 4.5–5 kHz higher.
 
 DAC (optional, pulls in the candle ML library):
 
@@ -167,11 +202,19 @@ messages, data objects and log lines as events.
 | `decdrm-data` | Packet mode, MOT slideshow/website/EPG, Journaline, TPEG capture |
 | `decdrm-io` | WAV/FLAC, resampling, sound-card input/output, drift-compensated playback |
 | `decdrm-engine` | Receiver threads, sources, decoding pipelines, status snapshots, logging |
-| `decdrm-station` | Transmitter station: TOML configuration → multiplex → signal |
+| `decdrm-station` | Transmitter station: TOML configuration → multiplex → signal (file, sound card or HackRF) |
 | `decdrm-dac` | DAC neural codec (feature `dac`) |
 | `decdrm-schedule` | Broadcast schedules (EiBi CSV, Dream's `DRMSchedule.ini`): what is on the air now |
 | `decdrm-cli` | The `decdrm` command-line tool |
 | `decdrm-gui` | The desktop GUI |
+
+## Acknowledgements
+
+DecDRM is written by [Arclamp](https://github.com/CasualArclamp); this fork is that work
+plus the HackRF output, and would not exist without it. Many thanks to the author for
+building and sharing it. Thanks also to the [Dream](https://sourceforge.net/projects/drm/)
+project, whose algorithms the signal processing borrows, and to the maintainers of the
+vendored FDK-AAC, libxaac and libopus.
 
 ## Licence
 
@@ -181,5 +224,8 @@ encoder) is Apache-2.0, which is compatible with GPLv3 but not GPLv2, so binarie
 include it are distributed under GPL-3.0; its LICENSE and NOTICE must ship with them.
 The vendored FDK-AAC library has its own licence (see `third_party/fdk-aac/NOTICE`),
 which is generally regarded as incompatible with the GPL: fine for personal use, but
-check before distributing binaries. AAC, xHE-AAC (MPEG-D USAC) and DRM technologies are
-covered by patents licensed through Via LA.
+check before distributing binaries. The HackRF One output links libusb (LGPL-2.1,
+through the `rusb` crate) statically: the LGPL allows that from GPL code, provided that
+whoever receives a binary can relink the library — ship the object files, or the
+library's sources and the scripts that build them. AAC, xHE-AAC (MPEG-D USAC) and DRM
+technologies are covered by patents licensed through Via LA.

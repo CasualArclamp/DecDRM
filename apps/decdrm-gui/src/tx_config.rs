@@ -5,7 +5,7 @@
 use crate::settings::TxOutput;
 use decdrm_core::params::ChannelLayout;
 use decdrm_core::tx::output::OutputFormat;
-use decdrm_station::{MultiplexPlan, StationConfig, StationError};
+use decdrm_station::{MultiplexPlan, SignalFormat, StationConfig, StationError};
 use std::path::{Path, PathBuf};
 
 /// The shipped example (`crates/decdrm-station/examples/station.toml`). Rust note:
@@ -48,6 +48,14 @@ pub struct Overrides {
     pub file: Option<PathBuf>,
     /// Sound card for [`TxOutput::Device`] (`None` = system default).
     pub device: Option<String>,
+    /// Nominal frequency (the DC carrier) of the DRM channel for [`TxOutput::Hackrf`], kHz.
+    pub hackrf_frequency_khz: f64,
+    /// HackRF IF for [`TxOutput::Hackrf`], kHz (`None` = as the station file has it).
+    pub hackrf_if_khz: Option<f64>,
+    /// HackRF transmit VGA gain for [`TxOutput::Hackrf`], dB.
+    pub hackrf_gain_db: u32,
+    /// The HackRF's RF amplifier for [`TxOutput::Hackrf`].
+    pub hackrf_amp: bool,
 }
 
 /// Every problem an error describes: the configuration problems, else the message.
@@ -104,6 +112,25 @@ pub fn prepare(text: &str, base_dir: &Path, ov: &Overrides) -> Result<StationCon
             cfg.output.device = Some(ov.device.clone().unwrap_or_else(|| "default".into()));
             cfg.output.file = None;
         }
+        TxOutput::Hackrf => {
+            // Only the radio, as with the File and Device choices: the station file
+            // may name a file or a sound card too ("As configured" keeps them).
+            cfg.output.file = None;
+            cfg.output.device = None;
+            // The HackRF output wants zero-IF complex baseband: it does the IF shift
+            // itself. The sample rate, IF, buffer and serial stay as the file has them.
+            cfg.output.format = SignalFormat::Iq;
+            cfg.output.iq_offset_hz = 0.0;
+            cfg.output.iq_swap = false;
+            let mut h = cfg.output.hackrf.clone().unwrap_or_default();
+            h.frequency_hz = (ov.hackrf_frequency_khz.max(0.0) * 1_000.0).round() as u64;
+            if let Some(khz) = ov.hackrf_if_khz {
+                h.if_offset_hz = khz * 1_000.0;
+            }
+            h.tx_gain_db = ov.hackrf_gain_db;
+            h.amp_enable = ov.hackrf_amp;
+            cfg.output.hackrf = Some(h);
+        }
     }
     Ok(cfg)
 }
@@ -150,6 +177,21 @@ pub fn inputs_finite(cfg: &StationConfig) -> bool {
     cfg.inputs_finite()
 }
 
+/// The `[output.hackrf]` values the HackRF mode's quick fields start from when the
+/// station file has them: the nominal frequency (kHz), the IF (kHz), the transmit gain
+/// (dB) and the RF amplifier. `None` when the file has no such section (or does not
+/// parse), so the fields keep whatever they had.
+pub fn hackrf_fields(text: &str) -> Option<(f64, f64, u32, bool)> {
+    let cfg = StationConfig::from_toml_str(text).ok()?;
+    let h = cfg.output.hackrf?;
+    Some((
+        h.frequency_hz as f64 / 1_000.0,
+        h.if_offset_hz / 1_000.0,
+        h.tx_gain_db,
+        h.amp_enable,
+    ))
+}
+
 /// Why a checked configuration cannot be transmitted as it stands. `allow_device` is
 /// false when sound-card output is disabled for this run (`--no-audio`).
 pub fn start_check(
@@ -158,16 +200,16 @@ pub fn start_check(
     allow_device: bool,
 ) -> Result<(), String> {
     let out = &cfg.output;
-    if out.file.is_none() && out.device.is_none() {
+    if out.file.is_none() && out.device.is_none() && out.hackrf.is_none() {
         return Err(
-            "the configuration has no output: set [output] file or device, or choose one above"
+            "the configuration has no output: set [output] file, device or hackrf, or choose one above"
                 .into(),
         );
     }
     if out.device.is_some() && !allow_device {
         return Err("sound-card output is disabled in this run (--no-audio)".into());
     }
-    if frames.is_none() && out.device.is_none() && !inputs_finite(cfg) {
+    if frames.is_none() && out.device.is_none() && out.hackrf.is_none() && !inputs_finite(cfg) {
         return Err(
             "the signal goes to a file but has no end: set a duration limit \
              (or `loop = false` on every audio input file)"
@@ -186,6 +228,12 @@ pub fn describe_output(cfg: &StationConfig, plan: &MultiplexPlan) -> String {
     }
     if let Some(d) = &o.device {
         sinks.push(format!("sound card \"{d}\""));
+    }
+    if let Some(h) = &o.hackrf {
+        sinks.push(format!(
+            "hackrf at {:.4} MHz",
+            h.frequency_hz as f64 / 1e6
+        ));
     }
     if sinks.is_empty() {
         sinks.push("no output".into());
@@ -232,6 +280,23 @@ mod tests {
     use super::*;
     use decdrm_core::params::{RobustnessMode, SpectrumOccupancy};
 
+    /// The HackRF mode's quick fields start from the station file when it has the
+    /// section; without it (or with unparsable text) there is nothing to take.
+    #[test]
+    fn hackrf_fields_come_from_the_file() {
+        let text = EXAMPLE_STATION.replace(
+            "# [output.hackrf]",
+            "[output.hackrf]\nfrequency_hz = 26_070_000\nif_offset_hz = 250_000.0\ntx_gain_db = 30\namp_enable = true",
+        );
+        assert_eq!(hackrf_fields(&text), Some((26_070.0, 250.0, 30, true)));
+        assert_eq!(
+            hackrf_fields(EXAMPLE_STATION),
+            None,
+            "the example's section is commented out"
+        );
+        assert_eq!(hackrf_fields("[output"), None, "unparsable text");
+    }
+
     /// A fresh example directory per test (tests run in parallel threads).
     fn example_dir_for_tests(test: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("decdrm-gui-tx-{test}-{}", std::process::id()));
@@ -266,6 +331,7 @@ mod tests {
             output: TxOutput::File,
             file: Some(dir.join("x.wav")),
             device: None,
+            ..Default::default()
         };
         let cfg = prepare(EXAMPLE_STATION, &dir, &file).unwrap();
         assert_eq!(
@@ -281,6 +347,7 @@ mod tests {
             output: TxOutput::Device,
             file: None,
             device: None,
+            ..Default::default()
         };
         let cfg = prepare(EXAMPLE_STATION, &dir, &device).unwrap();
         assert_eq!(cfg.output.device.as_deref(), Some("default"));
@@ -293,6 +360,52 @@ mod tests {
             start_check(&cfg, None, false).is_err(),
             "--no-audio forbids it"
         );
+
+        // The HackRF override: complex baseband at zero offset, the quick fields
+        // (frequency, IF, gain, amp) on top of what the file has.
+        let hackrf = Overrides {
+            output: TxOutput::Hackrf,
+            file: None,
+            device: None,
+            hackrf_frequency_khz: 15_500.0,
+            hackrf_gain_db: 30,
+            hackrf_amp: true,
+            ..Default::default()
+        };
+        let cfg = prepare(EXAMPLE_STATION, &dir, &hackrf).unwrap();
+        assert_eq!(cfg.output.format, SignalFormat::Iq);
+        assert_eq!(cfg.output.iq_offset_hz, 0.0);
+        assert!(!cfg.output.iq_swap);
+        assert!(
+            cfg.output.file.is_none() && cfg.output.device.is_none(),
+            "the HackRF choice is the only output"
+        );
+        let h = cfg.output.hackrf.as_ref().expect("an output.hackrf");
+        assert_eq!(
+            (h.frequency_hz, h.tx_gain_db, h.amp_enable),
+            (15_500_000, 30, true)
+        );
+        assert_eq!(
+            h.if_offset_hz, -250_000.0,
+            "without an IF override the file's value stays (its default here)"
+        );
+        assert_eq!(h.sample_rate_hz, 2_000_000, "the defaults fill the rest");
+        assert!(start_check(&cfg, None, true).is_ok(), "the radio needs no end");
+
+        // The IF is a quick field too: the preset in the page wins over the file.
+        let hackrf_if = Overrides { hackrf_if_khz: Some(250.0), ..hackrf };
+        let cfg = prepare(EXAMPLE_STATION, &dir, &hackrf_if).unwrap();
+        let h = cfg.output.hackrf.as_ref().expect("an output.hackrf");
+        assert_eq!(h.if_offset_hz, 250_000.0);
+
+        // "As configured" keeps a file and a sound card next to the radio.
+        let text = EXAMPLE_STATION.replace(
+            "sample_format = \"int16\"",
+            "sample_format = \"int16\"\ndevice = \"default\"",
+        );
+        let as_configured = Overrides { output: TxOutput::Config, ..Default::default() };
+        let cfg = prepare(&text, &dir, &as_configured).unwrap();
+        assert!(cfg.output.file.is_some() && cfg.output.device.is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

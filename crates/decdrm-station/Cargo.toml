@@ -8,6 +8,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
+default = ["hackrf"]
+# The HackRF One transmitter output (USB access through libusb). Without it a station
+# that asks for [output.hackrf] is rejected ("not built in") and the radio types are
+# absent.
+hackrf = ["dep:rusb"]
 # Encode DecDRM's DAC services (neural codec; pulls in candle). Without it such
 # configurations are recognised but rejected ("not built in"). The receiving engine of
 # the loopback tests gets it too.
@@ -36,6 +41,8 @@ symphonia = { version = "0.6.1", default-features = false, features = ["mp1", "m
 # and the operating system's trusted root certificates.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
+# HackRF transmitter output: USB access (libusb level, no libhackrf needed).
+rusb = { version = "0.9", optional = true }
 
 [dev-dependencies]
 # The receiver session decodes the loopback tests' output.

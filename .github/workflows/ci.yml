@@ -72,6 +72,29 @@ jobs:
           path: ${{ runner.temp }}/smoke
           if-no-files-found: warn
 
+  arm:
+    name: Build (aarch64)
+    # The Raspberry Pi's architecture, on a GitHub-hosted arm64 runner: the CLI is what a
+    # headless station runs, so that is what is built and smoke-tested here.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: System packages (ALSA for cpal, libusb/udev for the HackRF output, CMake for libopus)
+        run: >-
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          libasound2-dev libusb-1.0-0-dev libudev-dev pkg-config cmake
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (the CLI, which is what runs on the Pi)
+        run: cargo build --release -p decdrm-cli
+      - name: Station unit tests
+        run: cargo test --release -p decdrm-station --lib
+      - name: Smoke (the example station's plan)
+        run: ./target/release/decdrm tx crates/decdrm-station/examples/station.toml --check
+
   dac:
     name: DAC codec (real weights)
     runs-on: ubuntu-latest

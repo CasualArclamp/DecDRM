@@ -35,6 +35,9 @@ pub struct SpectrumPlot {
     pub band_khz: Option<(f64, f64)>,
     /// DRM DC carrier, kHz.
     pub dc_khz: Option<f64>,
+    /// The channel's nominal frequency when the axis shows absolute frequencies on
+    /// air (a HackRF output); `None` keeps the axis in baseband offsets.
+    pub on_air_khz: Option<f64>,
 }
 
 impl SpectrumPlot {
@@ -65,7 +68,27 @@ impl SpectrumPlot {
             points,
             band_khz: band_hz.map(|(a, b)| (a / 1e3, b / 1e3)),
             dc_khz: dc_hz.map(|f| f / 1e3),
+            on_air_khz: None,
         }
+    }
+
+    /// Move the axis to the channel's on-air frequency (a HackRF output): every
+    /// frequency becomes absolute and the DC carrier lands at the nominal frequency.
+    pub fn on_air(mut self, centre_hz: f64) -> Self {
+        let centre_khz = centre_hz / 1e3;
+        for point in &mut self.points {
+            point[0] += centre_khz;
+        }
+        self.span_khz = (self.span_khz.0 + centre_khz, self.span_khz.1 + centre_khz);
+        if let Some((lo, hi)) = &mut self.band_khz {
+            *lo += centre_khz;
+            *hi += centre_khz;
+        }
+        if let Some(dc) = &mut self.dc_khz {
+            *dc += centre_khz;
+        }
+        self.on_air_khz = Some(centre_khz);
+        self
     }
 
     /// The receiver's input spectrum.
@@ -421,6 +444,28 @@ mod tests {
         assert_eq!(tx.points.len(), 8);
         assert_eq!((tx.dc_khz, tx.band_khz), (Some(12.0), Some((7.0, 17.0))));
         assert_eq!(tx.db_range, (-80.0, -40.0), "at least 40 dB shown");
+        assert_eq!(tx.on_air_khz, None, "baseband offsets by default");
+    }
+
+    /// A HackRF output: the axis becomes the on-air frequency, and the DC carrier
+    /// lands at the channel's nominal frequency.
+    #[test]
+    fn spectrum_on_air_axis() {
+        let tx = SpectrumPlot::new(
+            &[-50.0; 16],
+            0.0,
+            48_000.0,
+            false,
+            Some(0.0),
+            Some((-5_000.0, 5_000.0)),
+        )
+        .on_air(1_530_000.0);
+        assert_eq!(tx.on_air_khz, Some(1_530.0));
+        assert_eq!(tx.span_khz, (1_506.0, 1_554.0));
+        assert_eq!(tx.dc_khz, Some(1_530.0));
+        assert_eq!(tx.band_khz, Some((1_525.0, 1_535.0)));
+        assert_eq!(tx.points[0][0], 1_506.0, "the first bin moved too");
+        assert_eq!(tx.points[8][0], 1_530.0);
     }
 
     #[test]

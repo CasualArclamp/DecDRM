@@ -28,7 +28,7 @@ decdrm-core = { path = "../../crates/decdrm-core" }
 decdrm-data = { path = "../../crates/decdrm-data" }
 decdrm-io = { path = "../../crates/decdrm-io" }
 decdrm-schedule = { path = "../../crates/decdrm-schedule" }
-decdrm-station = { path = "../../crates/decdrm-station" }
+decdrm-station = { path = "../../crates/decdrm-station", features = ["hackrf"] }
 # Only to switch on its `embed-weights` feature.
 decdrm-dac = { path = "../../crates/decdrm-dac", optional = true }
 anyhow.workspace = true

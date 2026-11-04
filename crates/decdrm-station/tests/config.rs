@@ -392,7 +392,7 @@ fn every_problem_is_reported() {
     let p = problems(text);
     for needle in [
         "only defined with occupancy 3 or 5",
-        "set `file` and/or `device`",
+        "set `file`, `device` and/or `hackrf`",
         "not an ISO 8601 time",
         "longer than 16 characters",
         "does not fit in 24 bits",
@@ -594,4 +594,224 @@ fn modulator_section() {
     assert!(p.iter().any(|x| x.contains("buffer_frames 99")), "{p:?}");
     assert!(problems("[mdi]\ninput = \"8000\"\n").iter().any(|x| x.contains("output: set")));
     assert!(problems("[output]\nfile = \"o.wav\"\n[mdi]\ninput = \"nonsense\"\n").iter().any(|x| x.starts_with("mdi: input")));
+}
+
+/// The HackRF output: needs I/Q format (zero offset, not swapped), a frequency,
+/// sample rate and IF within the radio's ranges, and works without a file or
+/// sound card.
+#[cfg(feature = "hackrf")]
+#[test]
+fn hackrf_output() {
+    use decdrm_station::SignalFormat;
+
+    // Valid on its own: no file, no sound card, just the radio.
+    let mut cfg = parse(&base());
+    cfg.output.file = None;
+    cfg.output.format = SignalFormat::Iq;
+    cfg.output.hackrf = Some(Default::default());
+    let plan = cfg.validate().unwrap();
+    assert!(plan.describe(&cfg).contains("hackrf"), "the plan names the output");
+
+    // The defaults: 1.53 MHz, 2 Msps, IF -250 kHz, LO 1.78 MHz.
+    let h = cfg.output.hackrf.clone().unwrap();
+    assert_eq!(
+        (h.frequency_hz, h.sample_rate_hz, h.tx_gain_db),
+        (1_530_000, 2_000_000, 40)
+    );
+    assert_eq!(h.if_offset_hz, -250_000.0);
+    assert_eq!(h.lo_hz(), 1_780_000);
+
+    // Real format, a non-zero I/Q offset and swapped channels are rejected.
+    for (what, format, offset, swap) in [
+        ("format", SignalFormat::Real, 0.0, false),
+        ("iq_offset_hz", SignalFormat::Iq, 1000.0, false),
+        ("iq_swap", SignalFormat::Iq, 0.0, true),
+    ] {
+        let mut cfg = parse(&base());
+        cfg.output.file = None;
+        cfg.output.format = format;
+        cfg.output.iq_offset_hz = offset;
+        cfg.output.iq_swap = swap;
+        cfg.output.hackrf = Some(Default::default());
+        let p = cfg.validate().unwrap_err().problems().to_vec();
+        assert!(p.iter().any(|x| x.contains(what)), "{what}: {p:?}");
+    }
+
+    // Out-of-range settings are rejected.
+    for (what, h) in [
+        ("frequency_hz", decdrm_station::HackrfSettings { frequency_hz: 500_000, ..Default::default() }),
+        ("sample_rate_hz", decdrm_station::HackrfSettings { sample_rate_hz: 1_000_000, ..Default::default() }),
+        ("tx_gain_db", decdrm_station::HackrfSettings { tx_gain_db: 48, ..Default::default() }),
+        ("if_offset_hz", decdrm_station::HackrfSettings { if_offset_hz: 10_000.0, ..Default::default() }),
+        ("if_offset_hz", decdrm_station::HackrfSettings { if_offset_hz: 1_000_000.0, ..Default::default() }),
+        ("buffer_s", decdrm_station::HackrfSettings { buffer_s: 0.0, ..Default::default() }),
+        ("buffer_s", decdrm_station::HackrfSettings { buffer_s: 11.0, ..Default::default() }),
+        // With a positive offset, the oscillator at 1.1 MHz - 250 kHz = 850 kHz is
+        // below the radio's floor.
+        (
+            "local oscillator",
+            decdrm_station::HackrfSettings { frequency_hz: 1_100_000, if_offset_hz: 250_000.0, ..Default::default() },
+        ),
+        // ... and at 5.9999 GHz - (-250 kHz) = 6 000.15 MHz, above its ceiling.
+        (
+            "local oscillator",
+            decdrm_station::HackrfSettings { frequency_hz: 5_999_900_000, if_offset_hz: -250_000.0, ..Default::default() },
+        ),
+    ] {
+        let mut cfg = parse(&base());
+        cfg.output.file = None;
+        cfg.output.format = SignalFormat::Iq;
+        cfg.output.hackrf = Some(h);
+        let p = cfg.validate().unwrap_err().problems().to_vec();
+        assert!(p.iter().any(|x| x.contains(what)), "{what}: {p:?}");
+    }
+
+    // The ends of the buffer range are fine.
+    for buffer_s in [0.05, 1.0, 10.0] {
+        let mut cfg = parse(&base());
+        cfg.output.file = None;
+        cfg.output.format = SignalFormat::Iq;
+        cfg.output.hackrf =
+            Some(decdrm_station::HackrfSettings { buffer_s, ..Default::default() });
+        if let Err(e) = cfg.validate() {
+            panic!("buffer_s {buffer_s} should validate: {:?}", e.problems());
+        }
+    }
+
+    // A negative offset moves the local oscillator above the channel: 1.1 MHz is
+    // then usable (the oscillator lands at 1.35 MHz), where +250 kHz was not.
+    let mut cfg = parse(&base());
+    cfg.output.file = None;
+    cfg.output.format = SignalFormat::Iq;
+    cfg.output.hackrf = Some(decdrm_station::HackrfSettings {
+        frequency_hz: 1_100_000,
+        if_offset_hz: -250_000.0,
+        ..Default::default()
+    });
+    let h = cfg.output.hackrf.clone().unwrap();
+    assert_eq!(h.lo_hz(), 1_350_000);
+    if let Err(e) = cfg.validate() {
+        panic!("1.1 MHz with a negative IF should validate: {:?}", e.problems());
+    }
+
+    // Unknown keys are denied, as everywhere.
+    assert!(StationConfig::from_toml_str("[output]\nformat = \"iq\"\n[output.hackrf]\nfrequency = 1\n").is_err());
+
+    // A rate the station cannot usually feed in real time is flagged in the plan, but
+    // stays valid: it is a warning about the machine, not about the configuration.
+    let plan_of = |rate: u32| {
+        let mut cfg = parse(&base());
+        cfg.output.file = None;
+        cfg.output.format = SignalFormat::Iq;
+        cfg.output.hackrf = Some(decdrm_station::HackrfSettings {
+            sample_rate_hz: rate,
+            ..Default::default()
+        });
+        let plan = cfg.validate().expect("valid");
+        plan.describe(&cfg)
+    };
+    assert!(!plan_of(2_000_000).contains("may not keep real time"));
+    assert!(!plan_of(4_000_000).contains("may not keep real time"));
+    assert!(plan_of(8_000_000).contains("may not keep real time"));
+}
+
+/// The channel and the local oscillator must both fit the radio's 1 MHz-6 GHz
+/// span, so the usable frequency range follows the IF offset.
+#[cfg(feature = "hackrf")]
+#[test]
+fn hackrf_frequency_span_follows_the_if() {
+    use decdrm_station::HackrfSettings;
+    // The default: the oscillator 250 kHz above the channel.
+    assert_eq!(
+        HackrfSettings::frequency_range_for(-250_000.0),
+        (1_000_000, 5_999_750_000)
+    );
+    // A positive offset sits below the channel: the top stays reachable, the bottom moves up.
+    assert_eq!(
+        HackrfSettings::frequency_range_for(250_000.0),
+        (1_250_000, 6_000_000_000)
+    );
+    assert_eq!(HackrfSettings::frequency_range_for(0.0), (1_000_000, 6_000_000_000));
+    assert_eq!(HackrfSettings::default().frequency_range(), (1_000_000, 5_999_750_000));
+
+    // The top of the default span validates; a channel above it reports the oscillator.
+    let with_hackrf = |hz: u64| {
+        let mut text = base().replace("[output]", "[output]\nformat = \"iq\"");
+        text.push_str(&format!("\n[output.hackrf]\nfrequency_hz = {hz}\n"));
+        text
+    };
+    assert!(parse(&with_hackrf(5_999_700_000)).validate().is_ok());
+    assert!(has(&problems(&with_hackrf(5_999_800_000)), "local oscillator"));
+}
+
+/// The 18 and 20 kHz occupancies are not symmetric about the DC carrier (the signal
+/// reaches about 14.6 kHz above it and 4.6 kHz below), so the check that the channel
+/// fits the radio's passband must use the real span, not half the nominal bandwidth.
+#[cfg(feature = "hackrf")]
+#[test]
+fn hackrf_if_check_uses_the_real_spectrum() {
+    let check = |occupancy: u8, if_offset_hz: f64| {
+        let mut cfg = parse(&base());
+        cfg.output.file = None;
+        cfg.output.format = decdrm_station::SignalFormat::Iq;
+        cfg.channel.occupancy = occupancy;
+        // A high frequency, so only the passband check can object (the oscillator
+        // would otherwise leave the radio's range).
+        cfg.output.hackrf = Some(decdrm_station::HackrfSettings {
+            frequency_hz: 100_000_000,
+            if_offset_hz,
+            ..Default::default()
+        });
+        cfg.validate().map(|_| ()).map_err(|e| e.problems().to_vec())
+    };
+    // 10 kHz: -4.83..+4.83 kHz around the IF, so +990 kHz still fits into +-1 MHz.
+    assert!(check(3, 990_000.0).is_ok());
+    // 20 kHz: -4.64..+14.58 kHz, so the top carrier of +990 kHz lands at 1004.6 kHz.
+    let p = check(5, 990_000.0).unwrap_err();
+    assert!(p.iter().any(|x| x.contains("outside +-1000 kHz")), "{p:?}");
+    assert!(check(5, 985_000.0).is_ok());
+}
+
+/// The whole channel, not only the nominal frequency, has to stay inside the radio's
+/// range: a 10 kHz channel on 1 MHz reaches 4.8 kHz below the floor.
+#[cfg(feature = "hackrf")]
+#[test]
+fn hackrf_channel_stays_inside_the_radios_range() {
+    let check = |frequency_hz: u64| {
+        let mut cfg = parse(&base());
+        cfg.output.file = None;
+        cfg.output.format = decdrm_station::SignalFormat::Iq;
+        cfg.output.hackrf = Some(decdrm_station::HackrfSettings {
+            frequency_hz,
+            ..Default::default()
+        });
+        cfg.validate().map(|_| ()).map_err(|e| e.problems().to_vec())
+    };
+    let p = check(1_000_000).unwrap_err();
+    assert!(
+        p.iter().any(|x| x.contains("outside the HackRF's 1 MHz")),
+        "the lower carriers are below the floor: {p:?}"
+    );
+    assert!(check(1_010_000).is_ok(), "1.01 MHz clears it");
+}
+
+/// Every step of the GUI's -950..+950 kHz IF preset grid is usable with a 20 kHz
+/// channel at 2 Msps and a channel frequency that keeps the oscillator in range.
+#[cfg(feature = "hackrf")]
+#[test]
+fn hackrf_if_preset_grid_validates() {
+    for if_khz in (-950..=950).step_by(50) {
+        let mut cfg = parse(&base());
+        cfg.output.file = None;
+        cfg.output.format = decdrm_station::SignalFormat::Iq;
+        cfg.channel.occupancy = 5;
+        cfg.output.hackrf = Some(decdrm_station::HackrfSettings {
+            frequency_hz: 100_000_000,
+            if_offset_hz: f64::from(if_khz) * 1_000.0,
+            ..Default::default()
+        });
+        if let Err(e) = cfg.validate() {
+            panic!("if_offset_hz {if_khz} kHz should validate: {:?}", e.problems());
+        }
+    }
 }

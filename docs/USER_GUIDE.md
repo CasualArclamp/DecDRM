@@ -517,7 +517,8 @@ multiplex: streams, bit rates, codec settings and what goes where.
     stream, and `protection_a` for streams with `part = "A"` (unequal error
     protection; it must be more robust, i.e. lower, than `protection_b`).
 - **`[output]`:**
-  - `file` (WAV/FLAC) and/or `device` (sound card);
+  - `file` (WAV/FLAC), `device` (sound card) and/or `hackrf` (a HackRF One, see
+    [below](#transmitting-through-a-hackrf-one));
   - `format`: `real` IF with the DC carrier at `if_hz`, or `iq`. By default a real
     signal is centred at 12 kHz: the DC carrier sits at 12 kHz for 9/10 kHz, at about
     9.7 kHz for 4.5/5 kHz (their carriers all lie above it) and at about 7 kHz for
@@ -669,6 +670,79 @@ buffer. The CLI's status lines show this as *clock trim*.
 
 To hear your own station, point `decdrm rx --device …` (or the GUI) at the other end of
 the cable.
+
+### Transmitting through a HackRF One
+
+`[output.hackrf]` streams the signal straight to a [HackRF One](https://greatscottgadgets.com/hackrf/)
+over USB, on the radio's own clock — no libhackrf or sound card needed. The station's
+complex baseband is resampled to the HackRF's sample rate and shifted to an intermediate
+frequency inside its passband, so the DRM channel keeps clear of the radio's DC spike
+and LO leakage; the local oscillator runs at the nominal frequency minus that IF.
+
+```toml
+[output]
+format = "iq"        # required, with iq_offset_hz = 0: the HackRF does its own IF shift
+
+[output.hackrf]
+frequency_hz = 1_530_000   # nominal frequency of the channel (the DC carrier), 1 MHz–6 GHz
+sample_rate_hz = 2_000_000 # 2–20 MHz; 2 MHz is plenty for a DRM channel
+if_offset_hz = -250_000   # IF within the passband; negative puts the LO above the channel
+tx_gain_db = 40            # transmit VGA gain, 0–47 dB
+amp_enable = false         # the 14 dB RF amplifier
+# serial = "…23cc7"        # which HackRF (any one if omitted)
+# buffer_s = 1.0           # signal buffered before transmitting starts
+```
+
+Everything is optional but `format`: the defaults above transmit a 1.53 MHz
+medium-wave channel at 2 Msps, the local oscillator at 1.78 MHz (250 kHz above the
+channel). `frequency_hz` may be set anywhere the radio and its oscillator both fit:
+1 MHz–6 GHz for the channel *and* for `frequency_hz - if_offset_hz`. With the default
+−250 kHz that is **1 MHz … 5 999.75 MHz** (the oscillator would leave the top of the
+band above that); with a positive offset the span becomes 1.25 MHz … 6 GHz. The GUI's
+frequency field is clamped to that span. `buffer_s` of signal is queued before the
+radio starts, so a burst of encoding delay does not leave a gap on air (0.05–10 s; the
+queue is capped at 64 MB, so a high sample rate shortens it).
+
+Keep `sample_rate_hz` at 2 Msps (or up to about 4): the station resamples its 48 kHz
+baseband to the radio's rate on its own thread, and from 8 Msps upwards a typical
+machine cannot hand two bytes per sample to USB in real time. The radio then underruns —
+gaps on air, counted as *underruns* in the status — and can stop taking data, which ends
+the transmission with a write timeout. A higher rate buys nothing for a DRM channel; it
+only widens the passband. The plan printed by `decdrm tx --check` says so too.
+
+The GUI's HackRF mode offers **IF presets** from −950 to +950 kHz in 50 kHz steps:
+negative puts the local oscillator above the channel (the default −250 kHz), positive
+below; 0 is zero IF and puts the radio's DC spike on the channel. A preset that would
+push the local oscillator out of the radio's range at the current channel frequency is
+shown greyed out, with the frequency span it would need; a value from the station file
+that is not on the grid is kept and shown as it is. As with the frequency, gain and
+amplifier, the choice is an override — the station file's `if_offset_hz` still applies
+to `decdrm tx` and to "As configured".
+
+With the HackRF output the **Output spectrum** plot shows absolute frequencies: its
+axis reads `frequency (kHz on air)`, the DC carrier sits at the nominal frequency, and
+the hover label is in MHz.
+
+**Where the channel sits.** `frequency_hz` is the channel's *nominal* frequency: the
+position of the DC carrier. The 9 and 10 kHz occupancies use carriers symmetric about
+it, but the others do not: 4.5 and 5 kHz use the upper sideband only, and 18 and 20 kHz
+extend upwards from it. A 20 kHz signal in mode A therefore spans `frequency_hz`
+−4.58 kHz … +14.58 kHz (18 kHz: −4.08 … +13.08; mode B differs by less than 100 Hz), so
+the band's centre lies about 5 kHz (4.5 kHz) above the nominal frequency. That is the
+DRM spectrum table (ES 201 980 §8.1, table 84), not a tuning error: receivers lock onto
+the DC carrier, and the occupied band is 19.2 kHz (17.2 kHz) wide. The GUI's Output card
+lists the actual band next to the nominal frequency.
+
+**Windows driver.** The HackRF needs a WinUSB-class driver; install it once with
+[Zadig](https://zadig.akeo.ie/) (choose *WinUSB* for the HackRF One). On Linux the
+[udev rules](https://github.com/greatscottgadgets/hackrf/tree/master/host/libhackrf)
+of libhackrf's package let a normal user open the radio.
+
+To watch your own station, `decdrm rx` (or the GUI) with an SDR receiver — or a KiwiSDR,
+which takes the signal off the air the same way it does a real broadcaster's.
+
+> **Keep to your licence and to lab conditions.** Even at the HackRF's milliwatt level,
+> an antenna turns it into a transmitter that needs one.
 
 ### Relaying an internet radio stream
 

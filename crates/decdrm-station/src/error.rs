@@ -43,6 +43,9 @@ pub enum StationError {
     /// The sound card stopped taking samples (e.g. a virtual cable whose reader went away).
     #[error("output: the sound card \"{device}\" took no samples for {seconds:.1} s")]
     DeviceStalled { device: String, seconds: f64 },
+    /// The HackRF output failed (USB communication or configuration).
+    #[error("hackrf: {0}")]
+    Hackrf(String),
     /// The transmitter chain rejected its input (a bug if the plan was validated).
     #[error("transmitter: {0}")]
     Tx(#[from] decdrm_core::tx::TxError),
