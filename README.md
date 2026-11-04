@@ -1,5 +1,7 @@
 # DecDRM
 
+If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
+
 A Digital Radio Mondiale (DRM30) receiver **and transmitter** written in Rust.
 
 DecDRM decodes DRM robustness modes A–D in every channel bandwidth (4.5–20 kHz) from
