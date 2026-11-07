@@ -362,9 +362,9 @@ pub enum TxOutput {
     File,
     /// Only to the sound card [`Settings::tx_output_device`].
     Device,
-    /// Only to a HackRF One, on [`Settings::tx_hackrf_frequency_khz`] and
-    /// [`Settings::tx_hackrf_if_khz`] (the sample rate, buffer and serial come from
-    /// the station file when it has them).
+    /// Only to a HackRF One: the frequency, IF, gain, amplifier and resampler
+    /// quick fields override the station file's `[output.hackrf]` (whose sample
+    /// rate, buffer and serial are used as they are).
     Hackrf,
 }
 

@@ -1368,7 +1368,7 @@ fn output_hackrf_picker(
     };
     egui::ComboBox::from_id_salt("tx_hackrf_resampler")
         .selected_text(resampler_text)
-        .width(150.0)
+        .width(180.0)
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut settings.tx_hackrf_resampler, None, "as in file");
             for q in [
