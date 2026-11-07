@@ -686,6 +686,7 @@ impl Station {
                 if_offset_hz: h.settings().if_offset_hz,
                 tx_gain_db: h.settings().tx_gain_db,
                 amp: h.settings().amp_enable,
+                resampler: h.settings().resampler,
                 transmitted_s: h.transmitted_s(),
                 queued_s: h.queued_s(),
                 underruns: h.underruns(),

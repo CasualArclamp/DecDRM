@@ -21,7 +21,7 @@
 //! which older firmware does not reliably survive — hence the thread, and hence
 //! the headroom the queue carries.
 
-use crate::config::HackrfSettings;
+use crate::config::{HackrfSettings, ResamplerSetting};
 use crate::error::{Result, StationError};
 use crate::station::StopHandle;
 use decdrm_io::Resampler;
@@ -101,6 +101,8 @@ pub struct HackrfStatus {
     pub tx_gain_db: u32,
     /// Whether the 14 dB RF amplifier is on.
     pub amp: bool,
+    /// Resampler quality of the 48 kHz baseband to [`Self::sample_rate_hz`].
+    pub resampler: ResamplerSetting,
     /// Seconds of signal sent to the radio since it started transmitting.
     pub transmitted_s: f64,
     /// Seconds of signal buffered in the station, not yet handed to USB.

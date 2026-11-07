@@ -92,13 +92,14 @@ pub fn run(a: TxArgs) -> Result<()> {
     }
     if let Some(h) = &station.status().hackrf {
         println!(
-            "hackrf: {:.4} MHz (LO {:.4} MHz + IF {:.0} kHz), {} Msps, TX gain {} dB{}",
+            "hackrf: {:.4} MHz (LO {:.4} MHz + IF {:.0} kHz), {} Msps, TX gain {} dB{}, resampler {}",
             h.frequency_hz as f64 / 1e6,
             h.lo_hz as f64 / 1e6,
             h.if_offset_hz / 1e3,
             h.sample_rate_hz as f64 / 1e6,
             h.tx_gain_db,
-            if h.amp { ", RF amp on" } else { "" }
+            if h.amp { ", RF amp on" } else { "" },
+            h.resampler
         );
         println!(
             "        occupied band: {:.1}..{:.1} kHz",

@@ -898,6 +898,10 @@ fn output_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
                     ),
                 );
                 ui.end_row();
+                value(ui, "Resampler", h.resampler.to_string()).on_hover_text(
+                    "Quality of the 48 kHz -> sample-rate interpolation: \"fast\" is transparent for the 9/10 kHz occupancies and is what a Raspberry Pi 4 needs at 2 Msps.",
+                );
+                ui.end_row();
                 value(ui, "Sent", format!("{:.1} s", h.transmitted_s))
                     .on_hover_text("Signal handed to the radio since it started transmitting.");
                 ui.end_row();
