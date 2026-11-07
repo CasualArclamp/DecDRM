@@ -10,7 +10,9 @@
 #   scripts/pi/stationctl logs    station-talk-3
 #
 # No output is written anywhere unless `--log` is given: then the station
-# appends to $LOG_DIR/decdrm-<name>.log and `logs` tails it. Every start first
+# appends to $LOG_DIR/decdrm-<name>.log and `logs` tails it (the file is rotated
+# to .log.1 when it passes 5 MB (STATIONCTL_LOG_MAX), at start and at each
+# automatic restart). Every start first
 # runs `--check` (no radio is opened), so a broken station file is reported even
 # when logging is off. The argument is a
 # station name (resolved against $STATION_DIR, with .toml added) or a path to a
@@ -21,6 +23,7 @@
 #   LOG_DIR      where the logs go (default: $STATION_DIR/logs)
 #   STATE_DIR    where the per-session "logging on/off" marker goes
 #                (default: $STATION_DIR/.stationctl)
+#   STATIONCTL_LOG_MAX  the log size that triggers rotation, bytes (default 5 MiB)
 #
 # One station per radio: a second session on the same HackRF fails to open it,
 # and its log (if asked for) says so. `stop` sends SIGINT (as Ctrl-C does), so
@@ -44,6 +47,7 @@ fi
 LOG_DIR=${LOG_DIR:-$STATION_DIR/logs}
 STATE_DIR=${STATE_DIR:-$STATION_DIR/.stationctl}
 RESTART_S=${STATIONCTL_RESTART_S:-10}
+LOG_MAX=${STATIONCTL_LOG_MAX:-5242880}
 # Relative overrides are taken from where the script was run, not from $repo.
 case "$BIN" in /*) ;; *) BIN=$PWD/$BIN ;; esac
 case "$LOG_DIR" in /*) ;; *) LOG_DIR=$PWD/$LOG_DIR ;; esac
@@ -60,6 +64,7 @@ Nothing is logged unless start is given --log (it then appends to
 \$LOG_DIR/decdrm-<name>.log; 'logs' tails that file). Needs screen
 (sudo apt install screen). A station that exits with an error is restarted
 after $RESTART_S s (STATIONCTL_RESTART_S changes it); 'status' counts them.
+The log is rotated to .log.1 at $LOG_MAX bytes (STATIONCTL_LOG_MAX).
   DECDRM_BIN   the binary (now: $BIN)
   STATION_DIR  the station folder (now: $STATION_DIR)
   LOG_DIR      the logs (now: $LOG_DIR)
@@ -141,6 +146,9 @@ cmd_start() {
     local target=/dev/null
     if [ "$log_on" = 1 ]; then
         mkdir -p "$LOG_DIR"
+        if [ -f "$log" ] && [ "$(wc -c <"$log")" -gt "$LOG_MAX" ]; then
+            mv -f "$log" "$log.1"
+        fi
         printf '\n=== %s start %s ===\n' "$(date -Is)" "$cfg" >>"$log"
         target=$log
     fi
@@ -153,7 +161,7 @@ cmd_start() {
     # in it leaves the station. A nonzero exit is retried after a pause; a
     # clean one (Ctrl-C, `stop`, the inputs finishing) ends the loop.
     (cd "$repo" && screen -dmS "$session" bash -c '
-        bin=$1; cfg=$2; out=$3; counter=$4; delay=$5
+        bin=$1; cfg=$2; out=$3; counter=$4; delay=$5; max=$6
         tries=0
         while :; do
             "$bin" tx "$cfg" >>"$out" 2>&1
@@ -161,11 +169,14 @@ cmd_start() {
             [ "$rc" -eq 0 ] && break
             tries=$((tries + 1))
             printf "%s\n" "$tries" >"$counter"
+            if [ -f "$out" ] && [ "$(wc -c <"$out")" -gt "$max" ]; then
+                mv -f "$out" "$out.1"
+            fi
             printf "\n=== %s restart %d (exit %s), again in %ss ===\n" \
                 "$(date -Is)" "$tries" "$rc" "$delay" >>"$out"
             sleep "$delay"
         done
-    ' _ "$BIN" "$cfg" "$target" "$restart_file" "$RESTART_S")
+    ' _ "$BIN" "$cfg" "$target" "$restart_file" "$RESTART_S" "$LOG_MAX")
     sleep 1
     if running; then
         echo "started: $session"
