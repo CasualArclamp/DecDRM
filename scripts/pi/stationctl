@@ -10,7 +10,9 @@
 #   scripts/pi/stationctl logs    station-talk-3
 #
 # No output is written anywhere unless `--log` is given: then the station
-# appends to $LOG_DIR/<session>.log and `logs` tails it. The argument is a
+# appends to $LOG_DIR/decdrm-<name>.log and `logs` tails it. Every start first
+# runs `--check` (no radio is opened), so a broken station file is reported even
+# when logging is off. The argument is a
 # station name (resolved against $STATION_DIR, with .toml added) or a path to a
 # .toml file. Environment:
 #   DECDRM_BIN   the CLI binary (default: <repo>/target/release/decdrm)
@@ -50,7 +52,7 @@ usage: $(basename "$0") start|restart [--log] STATION
 
 STATION is a name in \$STATION_DIR (the .toml is added) or a path to a .toml.
 Nothing is logged unless start is given --log (it then appends to
-\$LOG_DIR/<name>.log; 'logs' tails that file).
+\$LOG_DIR/decdrm-<name>.log; 'logs' tails that file).
   DECDRM_BIN   the binary (now: $BIN)
   STATION_DIR  the station folder (now: $STATION_DIR)
   LOG_DIR      the logs (now: $LOG_DIR)
@@ -120,6 +122,14 @@ cmd_start() {
             echo "log: $log"
         fi
         return 0
+    fi
+    # Validate first: --check opens no radio and writes nothing, and its stderr
+    # is kept in a variable, so logging can stay off and still show the problem.
+    local err
+    if ! err=$("$BIN" tx "$cfg" --check 2>&1 >/dev/null); then
+        echo "the station file does not validate:" >&2
+        printf '%s\n' "$err" >&2
+        exit 1
     fi
     local target=/dev/null
     if [ "$log_on" = 1 ]; then
