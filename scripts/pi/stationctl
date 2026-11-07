@@ -97,7 +97,23 @@ need_screen() {
 }
 
 screen_line() {
-    screen -ls 2>/dev/null | grep -E "[.]$session[[:space:]]" | head -1
+    # `screen -ls` prints "\t<pid>.<session>\t(state)". Match the session name
+    # exactly (no regex: station names may contain dots, brackets and the like)
+    # and require a boundary after it, so "foo" does not match "foo-bar".
+    screen -ls 2>/dev/null | N_SESSION=$session awk '
+        BEGIN { n = ENVIRON["N_SESSION"] }
+        {
+            line = $0
+            sub(/^[ \t]+/, "", line)
+            sub(/^[0-9]+\./, "", line)
+            if (index(line, n) == 1) {
+                rest = substr(line, length(n) + 1)
+                if (rest == "" || rest ~ /^[ \t]/) {
+                    print $0
+                    exit
+                }
+            }
+        }'
 }
 
 running() {
