@@ -1527,4 +1527,13 @@ mod tests {
         }
         assert_eq!(AppKind::of(UserApplication::from_id(AppDomain::Dab, 0x123)), AppKind::Raw);
     }
+
+    #[test]
+    fn resampler_settings_map_to_the_io_qualities() {
+        use decdrm_io::ResamplerQuality;
+        assert_eq!(ResamplerSetting::default(), ResamplerSetting::Balanced);
+        assert_eq!(ResamplerSetting::Fast.quality(), ResamplerQuality::Fast);
+        assert_eq!(ResamplerSetting::Balanced.quality(), ResamplerQuality::Balanced);
+        assert_eq!(ResamplerSetting::High.quality(), ResamplerQuality::High);
+    }
 }
