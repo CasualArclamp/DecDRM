@@ -148,9 +148,19 @@ thin.
 5. **Run** `decdrm tx station.toml` (read the plan first with `--check`). Keep
    `sample_rate_hz = 2_000_000`: the plan warns that above about 4 Msps the station
    may not keep real time, and a Pi 4 is slower than the desktop where that was
-   measured. Watch the status's `underruns` (it should stay 0) and
-   `vcgencmd measure_temp` / `vcgencmd get_throttled` — a throttled Pi drops
-   samples.
+   measured. **Set `resampler = "fast"` in `[output.hackrf]`.** Measured on a Pi
+   4B (Ubuntu 24.04, 1.8 GHz, `get_throttled = 0x0`): encoding alone runs about
+   20 times faster than real time (10 s of three xHE-AAC services in 0.52 s), but
+   the default `"balanced"` resampler to 2 Msps costs about 2 GMAC/s and keeps
+   only ~0.5 of real time on one core — after the prebuffer drains, the radio
+   underruns and either stops taking data (`writing to the HackRF failed:
+   Operation timed out`) or the drain reports `the HackRF did not take the last
+   of the signal`. `"fast"` (64 taps, linear) is about eight times cheaper and is
+   transparent for the 9/10 kHz occupancies; the 18 and 20 kHz ones reach the
+   edge of its passband, keep `"balanced"` for them. `buffer_s` only delays the
+   problem: the deficit is continuous. Watch the status's `underruns` (it should
+   stay 0) and `vcgencmd measure_temp` / `vcgencmd get_throttled` — a throttled
+   Pi drops samples.
 6. A systemd unit for a station on the Pi, as a sketch:
 
    ```ini
@@ -183,6 +193,11 @@ thin.
 - **The plan rejects `buffer_s`, `sample_rate_hz`, `frequency_hz` or
   `if_offset_hz`** — the message names the allowed range. `decdrm tx file.toml
   --check` prints the plan and the problems without opening the radio.
+- **`the HackRF did not take the last of the signal` or `writing to the HackRF
+  failed: Operation timed out`** — the station is not keeping real time, or the
+  radio wedged after an underrun. On a Raspberry Pi 4 set `resampler = "fast"`
+  in `[output.hackrf]`; keep `sample_rate_hz = 2_000_000`. A larger `buffer_s`
+  only postpones the failure.
 - **Windows linker `LNK1106`/`LNK1140`** — the disk filled up: set
   `$env:CARGO_PROFILE_RELEASE_DEBUG = 'false'`, free space, and retry with
   `--jobs 1`.

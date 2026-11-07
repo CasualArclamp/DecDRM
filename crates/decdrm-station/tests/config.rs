@@ -620,6 +620,7 @@ fn hackrf_output() {
     );
     assert_eq!(h.if_offset_hz, -250_000.0);
     assert_eq!(h.lo_hz(), 1_780_000);
+    assert_eq!(h.resampler, decdrm_station::ResamplerSetting::Balanced);
 
     // Real format, a non-zero I/Q offset and swapped channels are rejected.
     for (what, format, offset, swap) in [
@@ -697,6 +698,21 @@ fn hackrf_output() {
     // Unknown keys are denied, as everywhere.
     assert!(StationConfig::from_toml_str("[output]\nformat = \"iq\"\n[output.hackrf]\nfrequency = 1\n").is_err());
 
+    // The resampler quality: names are accepted, an unknown one is rejected.
+    let fast = StationConfig::from_toml_str(
+        "[output]\nformat = \"iq\"\n[output.hackrf]\nresampler = \"fast\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fast.output.hackrf.unwrap().resampler,
+        decdrm_station::ResamplerSetting::Fast
+    );
+    let e = StationConfig::from_toml_str(
+        "[output]\nformat = \"iq\"\n[output.hackrf]\nresampler = \"slow\"\n",
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("resampler"), "{e}");
+
     // A rate the station cannot usually feed in real time is flagged in the plan, but
     // stays valid: it is a warning about the machine, not about the configuration.
     let plan_of = |rate: u32| {
@@ -713,6 +729,25 @@ fn hackrf_output() {
     assert!(!plan_of(2_000_000).contains("may not keep real time"));
     assert!(!plan_of(4_000_000).contains("may not keep real time"));
     assert!(plan_of(8_000_000).contains("may not keep real time"));
+
+    // The plan names the resampler; "fast" stays valid but is flagged for the
+    // 18 and 20 kHz occupancies, whose signal reaches its passband edge.
+    let plan_with = |resampler, occupancy: u8| {
+        let mut cfg = parse(&base());
+        cfg.channel.occupancy = occupancy;
+        cfg.output.file = None;
+        cfg.output.format = SignalFormat::Iq;
+        cfg.output.hackrf = Some(decdrm_station::HackrfSettings {
+            resampler,
+            ..Default::default()
+        });
+        let plan = cfg.validate().expect("valid");
+        plan.describe(&cfg)
+    };
+    assert!(plan_with(decdrm_station::ResamplerSetting::Fast, 3).contains("resampler fast"));
+    assert!(!plan_with(decdrm_station::ResamplerSetting::Fast, 3).contains("flat only to"));
+    assert!(plan_with(decdrm_station::ResamplerSetting::Fast, 5).contains("flat only to"));
+    assert!(!plan_with(decdrm_station::ResamplerSetting::Fast, 5).contains("may not keep real time"));
 }
 
 /// The channel and the local oscillator must both fit the radio's 1 MHz-6 GHz

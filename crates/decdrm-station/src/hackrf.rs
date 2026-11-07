@@ -24,7 +24,7 @@
 use crate::config::HackrfSettings;
 use crate::error::{Result, StationError};
 use crate::station::StopHandle;
-use decdrm_io::{Resampler, ResamplerQuality};
+use decdrm_io::Resampler;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -170,7 +170,7 @@ impl HackrfSink {
         set_amp(&mut handle, settings.amp_enable)?;
 
         let rate = settings.sample_rate_hz;
-        let resampler = Resampler::new(48_000, rate, 2, ResamplerQuality::Balanced)
+        let resampler = Resampler::new(48_000, rate, 2, settings.resampler.quality())
             .map_err(StationError::Output)?;
         let prebuffer_bytes = prebuffer_bytes(settings);
 
@@ -297,7 +297,9 @@ impl HackrfSink {
                 drop(s);
                 self.join();
                 return Err(StationError::Hackrf(
-                    "the HackRF did not take the last of the signal".into(),
+                    "the HackRF did not take the last of the signal (a slow machine may not keep \
+                     real time: try resampler = \"fast\" in [output.hackrf])"
+                        .into(),
                 ));
             }
             let (guard, _) = self.sync.room.wait_timeout(s, POLL).expect("the queue lock");

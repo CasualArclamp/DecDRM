@@ -261,12 +261,20 @@ pub struct HackrfSettings {
     /// centre of power is a few kHz higher.
     pub frequency_hz: u64,
     /// HackRF sample rate, Hz. The radio accepts 2–20 MHz, but the station has to
-    /// resample its 48 kHz baseband to it on its own thread and hand two bytes per
+    /// resample its 48 kHz baseband to it on every frame and hand two bytes per
     /// sample to USB: 2 MHz (the default) is plenty for a DRM channel (≤ 20 kHz
     /// wide), and above [`Self::REAL_TIME_RATE_HZ`] a typical machine falls behind,
     /// the radio underruns and may stop taking data altogether. A higher rate buys
     /// nothing for DRM; it only widens the passband.
     pub sample_rate_hz: u32,
+    /// Sinc-interpolation quality of the 48 kHz -> [`Self::sample_rate_hz`]
+    /// resampler: `"fast"`, `"balanced"` (the default) or `"high"` (see
+    /// [`ResamplerSetting`]). At 2 Msps `"balanced"` costs roughly 2 GMAC/s,
+    /// which a Raspberry Pi 4 cannot sustain: the station keeps only about half
+    /// of real time, the radio underruns and may then stop taking data.
+    /// `"fast"` costs about eight times less and is transparent for the
+    /// 4.5-10 kHz occupancies; the 18 and 20 kHz ones stay on `"balanced"`.
+    pub resampler: ResamplerSetting,
     /// Intermediate frequency the signal is shifted to within the HackRF's
     /// passband, Hz. The local oscillator runs at `frequency_hz - if_offset_hz`,
     /// keeping the DRM channel clear of the HackRF's DC spike and LO leakage.
@@ -291,6 +299,7 @@ impl Default for HackrfSettings {
         Self {
             frequency_hz: 1_530_000,
             sample_rate_hz: 2_000_000,
+            resampler: ResamplerSetting::Balanced,
             if_offset_hz: -250_000.0,
             tx_gain_db: 40,
             amp_enable: false,
@@ -1085,6 +1094,59 @@ string_setting!(
     }
     .to_string()
 );
+
+/// Sinc-interpolation quality of the station's 48 kHz -> HackRF resampler.
+///
+/// The resampler runs on every sample handed to the radio: at 2 Msps
+/// [`Balanced`](Self::Balanced) costs about 4 x 256 multiply-adds per output
+/// sample (some 2 GMAC/s), which a Raspberry Pi 4 cannot sustain - it keeps
+/// only about half of real time, the radio underruns and may then stop taking
+/// data. [`Fast`](Self::Fast) costs about eight times less (2 x 64) and is
+/// still transparent for the 4.5-10 kHz occupancies; the 18 and 20 kHz ones
+/// reach +/-10 kHz, at the edge of its passband.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum ResamplerSetting {
+    /// 64 taps, Blackman window, linear interpolation: flat to 0.42 x 24 kHz
+    /// (~10.1 kHz), images about -36 dB at 2.5 % past Nyquist. The cheapest.
+    Fast,
+    /// 256 taps, Blackman-Harris window, cubic interpolation: flat to
+    /// 0.45 x 24 kHz (~10.8 kHz), images about -64 dB. The default.
+    #[default]
+    Balanced,
+    /// 512 taps, Blackman-Harris window, cubic interpolation: flat to
+    /// 0.47 x 24 kHz, images at most -105 dB. The most expensive.
+    High,
+}
+
+string_setting!(
+    ResamplerSetting,
+    |s: &str| match norm(s).as_str() {
+        "fast" | "low" | "cheap" => Ok(ResamplerSetting::Fast),
+        "balanced" | "medium" | "default" => Ok(ResamplerSetting::Balanced),
+        "high" | "best" => Ok(ResamplerSetting::High),
+        _ => Err(format!(
+            "unknown resampler quality \"{s}\" (use fast, balanced or high)"
+        )),
+    },
+    |q: ResamplerSetting| match q {
+        ResamplerSetting::Fast => "fast",
+        ResamplerSetting::Balanced => "balanced",
+        ResamplerSetting::High => "high",
+    }
+    .to_string()
+);
+
+impl ResamplerSetting {
+    /// The matching [`decdrm_io::ResamplerQuality`].
+    pub fn quality(self) -> decdrm_io::ResamplerQuality {
+        match self {
+            ResamplerSetting::Fast => decdrm_io::ResamplerQuality::Fast,
+            ResamplerSetting::Balanced => decdrm_io::ResamplerQuality::Balanced,
+            ResamplerSetting::High => decdrm_io::ResamplerQuality::High,
+        }
+    }
+}
 
 impl Codec {
     /// Whether the codec is one of the AAC family (FDK encoder, 5/10 frames per 400 ms).

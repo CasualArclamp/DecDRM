@@ -46,6 +46,10 @@ band_limit = true            # transmit channel filter against the OFDM side lob
 # amp_enable = false         # 14 dB RF amplifier
 # serial = "0000000000000000600463dc2b723cc7"  # which HackRF (any one if omitted)
 # buffer_s = 1.0             # signal buffered before transmitting starts
+# resampler = "balanced"     # 48 kHz -> sample_rate_hz interpolation: "fast" is ~8x cheaper
+                             # and a Raspberry Pi 4 needs it at 2 Msps; "balanced" (default)
+                             # or "high" (512 taps) for the best images; "fast" is for the
+                             # 4.5-10 kHz occupancies, the 18/20 kHz ones reach its edge
 
 # --- Channel simulator (for testing receivers): impairs the signal before the outputs --
 # [simulate]                 # the CLI's --channel-model N / --snr DB set or override this

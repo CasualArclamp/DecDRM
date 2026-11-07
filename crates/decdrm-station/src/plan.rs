@@ -58,7 +58,9 @@
 //! or 4:1 stereo) and then creates the encoder once, for the xHE-AAC Static Config that
 //! SDC type 9 carries.
 
-use crate::config::{AppKind, Codec, HackrfSettings, Part, SbrRatio, SignalFormat, StationConfig};
+use crate::config::{
+    AppKind, Codec, HackrfSettings, Part, ResamplerSetting, SbrRatio, SignalFormat, StationConfig,
+};
 use crate::error::{ConfigProblems, Result, StationError};
 use crate::sdc;
 use decdrm_core::cellmap::CellMap;
@@ -339,19 +341,25 @@ impl MultiplexPlan {
         if let Some(h) = &cfg.output.hackrf {
             let _ = writeln!(
                 s,
-                "hackrf: {:.4} MHz (LO {:.4} MHz + IF {:.0} kHz), {} Msps, TX gain {} dB{}",
+                "hackrf: {:.4} MHz (LO {:.4} MHz + IF {:.0} kHz), {} Msps, TX gain {} dB{}, resampler {}",
                 h.frequency_hz as f64 / 1e6,
                 h.lo_hz() as f64 / 1e6,
                 h.if_offset_hz / 1e3,
                 h.sample_rate_hz as f64 / 1e6,
                 h.tx_gain_db,
-                if h.amp_enable { ", RF amp on" } else { "" }
+                if h.amp_enable { ", RF amp on" } else { "" },
+                h.resampler
             );
             if h.sample_rate_hz > HackrfSettings::REAL_TIME_RATE_HZ {
                 let _ = writeln!(
                     s,
-                    "        note: above {} Msps the station may not keep real time (the resampler runs on its thread): expect underruns, and the radio may stop taking data; 2 Msps is plenty for DRM",
+                    "        note: above {} Msps the station may not keep real time (every sample is resampled and written to USB): expect underruns, and the radio may stop taking data; 2 Msps is plenty for DRM, and a slow machine can try resampler = \"fast\"",
                     HackrfSettings::REAL_TIME_RATE_HZ / 1_000_000
+                );
+            } else if h.resampler == ResamplerSetting::Fast && cfg.channel.occupancy >= 4 {
+                let _ = writeln!(
+                    s,
+                    "        note: resampler \"fast\" is flat only to about 10.1 kHz; the 18 and 20 kHz occupancies reach 10 kHz, keep \"balanced\" or \"high\" for them"
                 );
             }
         }
