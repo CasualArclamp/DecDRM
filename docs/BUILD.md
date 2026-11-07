@@ -276,6 +276,26 @@ repository, the build, the kernel module and udev, the radio, the station.
    `sudo systemctl daemon-reload && sudo systemctl enable --now decdrm`, then
    `journalctl -u decdrm -f`.
 
+   **Without root, or without a service:** `scripts/pi/stationctl` keeps the
+   station in a detached `screen` session, so it survives the SSH session (but
+   not a reboot):
+
+   ```bash
+   scripts/pi/stationctl start station-talk-3          # no output is logged
+   scripts/pi/stationctl start --log station-talk-3    # append to station/logs/<name>.log
+   scripts/pi/stationctl status station-talk-3
+   scripts/pi/stationctl logs station-talk-3           # tail -f; Ctrl-C stops the tail only
+   scripts/pi/stationctl restart station-talk-3
+   scripts/pi/stationctl stop station-talk-3           # SIGINT: the radio drains first
+   ```
+
+   Nothing is written unless `start` (or `restart`) is given `--log`; `logs`
+   then tails that file. The station files come from `station/` (`STATION_DIR`
+   overrides it), the binary from `target/release/decdrm` (`DECDRM_BIN`), and
+   the log goes to `station/logs/<name>.log`. It needs `screen`
+   (`sudo apt install screen`). One station per radio: a second session on the
+   same HackRF fails to open it, and its log (if asked for) says so.
+
    **Clock and network.** The station transmits the time and date (SDC type 8),
    so the clock must be right: `timedatectl set-ntp true`. A web-stream station
    needs a steady network; a wired link is steadier than Wi-Fi.

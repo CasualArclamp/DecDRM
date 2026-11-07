@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+# Start, stop, restart and watch a DecDRM station in a detached screen session:
+# it keeps transmitting after the SSH session ends, and needs no root and no
+# service files. (For a station that also starts at boot, use systemd instead.)
+#
+#   scripts/pi/stationctl start [--log] station-talk-3
+#   scripts/pi/stationctl stop    station-talk-3
+#   scripts/pi/stationctl restart [--log] station-talk-3
+#   scripts/pi/stationctl status  station-talk-3
+#   scripts/pi/stationctl logs    station-talk-3
+#
+# No output is written anywhere unless `--log` is given: then the station
+# appends to $LOG_DIR/<session>.log and `logs` tails it. The argument is a
+# station name (resolved against $STATION_DIR, with .toml added) or a path to a
+# .toml file. Environment:
+#   DECDRM_BIN   the CLI binary (default: <repo>/target/release/decdrm)
+#   STATION_DIR  where the station files are (default: <repo>/station, or
+#                <repo>/stations-local when that is the folder that exists)
+#   LOG_DIR      where the logs go (default: $STATION_DIR/logs)
+#   STATE_DIR    where the per-session "logging on/off" marker goes
+#                (default: $STATION_DIR/.stationctl)
+#
+# One station per radio: a second session on the same HackRF fails to open it,
+# and its log (if asked for) says so. `stop` sends SIGINT (as Ctrl-C does), so
+# the station drains the radio queue before it exits; give it up to 30 s.
+set -u
+
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../.." && pwd)
+BIN=${DECDRM_BIN:-$repo/target/release/decdrm}
+if [ -n "${STATION_DIR:-}" ]; then
+    :
+elif [ -d "$repo/station" ]; then
+    STATION_DIR=$repo/station
+else
+    STATION_DIR=$repo/stations-local
+fi
+LOG_DIR=${LOG_DIR:-$STATION_DIR/logs}
+STATE_DIR=${STATE_DIR:-$STATION_DIR/.stationctl}
+# Relative overrides are taken from where the script was run, not from $repo.
+case "$BIN" in /*) ;; *) BIN=$PWD/$BIN ;; esac
+case "$LOG_DIR" in /*) ;; *) LOG_DIR=$PWD/$LOG_DIR ;; esac
+case "$STATE_DIR" in /*) ;; *) STATE_DIR=$PWD/$STATE_DIR ;; esac
+
+usage() {
+    cat <<EOF
+usage: $(basename "$0") start|restart [--log] STATION
+       $(basename "$0") stop|status STATION
+       $(basename "$0") logs STATION
+
+STATION is a name in \$STATION_DIR (the .toml is added) or a path to a .toml.
+Nothing is logged unless start is given --log (it then appends to
+\$LOG_DIR/<name>.log; 'logs' tails that file).
+  DECDRM_BIN   the binary (now: $BIN)
+  STATION_DIR  the station folder (now: $STATION_DIR)
+  LOG_DIR      the logs (now: $LOG_DIR)
+EOF
+}
+
+resolve() { # $1 -> $cfg (absolute)
+    case "$1" in
+        */* | *.toml) cfg=$1 ;;
+        *) cfg=$STATION_DIR/$1.toml ;;
+    esac
+    if [ ! -f "$cfg" ]; then
+        echo "station file not found: $cfg" >&2
+        exit 1
+    fi
+    cfg=$(cd "$(dirname "$cfg")" && pwd)/$(basename "$cfg")
+}
+
+session_of() { # $cfg -> $session
+    local base
+    base=$(basename "$cfg")
+    session="decdrm-${base%.toml}"
+}
+
+need_screen() {
+    command -v screen >/dev/null 2>&1 || {
+        echo "screen is not installed: sudo apt install screen" >&2
+        exit 1
+    }
+}
+
+screen_line() {
+    screen -ls 2>/dev/null | grep -E "[.]$session[[:space:]]" | head -1
+}
+
+running() {
+    local line
+    line=$(screen_line)
+    [ -n "$line" ] && ! printf '%s' "$line" | grep -q Dead
+}
+
+logging_state() { # -> "" (unknown/not started), "0" or "1"
+    [ -f "$state_file" ] || {
+        echo ""
+        return
+    }
+    cat "$state_file"
+}
+
+set_logging_state() {
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$1" >"$state_file"
+}
+
+cmd_start() {
+    if [ ! -x "$BIN" ]; then
+        echo "binary not found: $BIN" >&2
+        echo "build it on the Pi: CARGO_BUILD_JOBS=1 cargo build --release -p decdrm-cli" >&2
+        exit 1
+    fi
+    need_screen
+    if running; then
+        echo "already running: $session"
+        if [ "$(logging_state)" = 0 ]; then
+            echo "logs: off"
+        else
+            echo "log: $log"
+        fi
+        return 0
+    fi
+    local target=/dev/null
+    if [ "$log_on" = 1 ]; then
+        mkdir -p "$LOG_DIR"
+        printf '\n=== %s start %s ===\n' "$(date -Is)" "$cfg" >>"$log"
+        target=$log
+    fi
+    set_logging_state "$log_on"
+    # A crashed earlier session can leave a dead socket with this name.
+    screen -wipe >/dev/null 2>&1 || true
+    # The station writes straight to the log file (or to /dev/null); the screen
+    # session only carries the process, so `logs` is a plain tail -f and Ctrl-C
+    # in it leaves the station running.
+    (cd "$repo" && screen -dmS "$session" bash -c 'exec "$1" tx "$2" >>"$3" 2>&1' \
+        _ "$BIN" "$cfg" "$target")
+    sleep 1
+    if running; then
+        echo "started: $session"
+        echo "config: $cfg"
+        if [ "$log_on" = 1 ]; then
+            echo "log: $log"
+        else
+            echo "logs: off (start with --log to capture)"
+        fi
+    else
+        if [ "$log_on" = 1 ]; then
+            echo "the station did not stay up; its log:" >&2
+            tail -n 10 "$log" >&2
+        else
+            echo "the station did not stay up; re-run with --log to see why" >&2
+        fi
+        exit 1
+    fi
+}
+
+cmd_stop() {
+    need_screen
+    if ! running; then
+        rm -f "$state_file"
+        echo "not running: $session"
+        return 0
+    fi
+    echo "stopping $session (SIGINT, the radio drains first)..."
+    screen -S "$session" -p 0 -X stuff "$(printf '\003')"
+    local i=0
+    while running && [ "$i" -lt 30 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if running; then
+        echo "still running after ${i}s; closing the session" >&2
+        screen -S "$session" -X quit
+        sleep 1
+    fi
+    screen -wipe >/dev/null 2>&1 || true
+    if running; then
+        echo "could not stop $session" >&2
+        return 1
+    fi
+    rm -f "$state_file"
+    echo "stopped: $session"
+}
+
+cmd_status() {
+    need_screen
+    if running; then
+        echo "running: $session ($(screen_line))"
+    else
+        echo "not running: $session"
+    fi
+    echo "binary: $BIN"
+    echo "config: $cfg"
+    local state
+    state=$(logging_state)
+    if [ "$state" = 1 ]; then
+        echo "log: $log"
+        if [ -f "$log" ]; then
+            echo "--- last lines ---"
+            tail -n 8 "$log"
+        fi
+    elif [ "$state" = 0 ]; then
+        echo "log: off (started without --log)"
+    elif [ -f "$log" ]; then
+        echo "log: $log (from an earlier run)"
+        echo "--- last lines ---"
+        tail -n 8 "$log"
+    else
+        echo "log: off"
+    fi
+}
+
+cmd_logs() {
+    if [ "$(logging_state)" = 0 ]; then
+        echo "the running station has no log (start it with --log)" >&2
+        exit 1
+    fi
+    if [ ! -f "$log" ]; then
+        echo "no log: $log (start with --log first)" >&2
+        exit 1
+    fi
+    echo "(tail -f; Ctrl-C stops the tail, not the station)"
+    tail -n 20 -f "$log"
+}
+
+cmd=${1:-}
+shift || true
+case "$cmd" in
+    start | stop | restart | status | logs) ;;
+    '' | -h | --help | help)
+        usage
+        exit 0
+        ;;
+    *)
+        echo "unknown command: $cmd" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
+log_on=0
+station=
+for arg in "$@"; do
+    case "$arg" in
+        -l | --log) log_on=1 ;;
+        -*)
+            echo "unknown option: $arg" >&2
+            usage >&2
+            exit 2
+            ;;
+        *)
+            if [ -n "$station" ]; then
+                echo "one station at a time" >&2
+                usage >&2
+                exit 2
+            fi
+            station=$arg
+            ;;
+    esac
+done
+if [ -z "$station" ]; then
+    usage >&2
+    exit 2
+fi
+if [ "$log_on" = 1 ] && [ "$cmd" != start ] && [ "$cmd" != restart ]; then
+    echo "--log applies to start and restart only" >&2
+    exit 2
+fi
+resolve "$station"
+session_of
+log=$LOG_DIR/$session.log
+state_file=$STATE_DIR/$session.logging
+
+case "$cmd" in
+    start) cmd_start ;;
+    stop) cmd_stop ;;
+    restart)
+        cmd_stop
+        cmd_start
+        ;;
+    status) cmd_status ;;
+    logs) cmd_logs ;;
+esac
