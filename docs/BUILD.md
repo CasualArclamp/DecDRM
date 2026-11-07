@@ -9,7 +9,8 @@ runs the tests, the lints and the smoke tests there, and additionally builds the
 and runs the station's unit tests on **aarch64** — the Raspberry Pi's architecture, on
 a GitHub-hosted arm64 runner (not a Pi itself). The Pi-specific advice below (powered
 hub, the kernel module, throttling, systemd) is still a guide rather than a CI step;
-the resampler numbers were measured on a Pi 4B.
+the resampler numbers and the write-timeout recovery were measured on a Pi 4B
+(Model B Rev 1.4, 8 GB, Ubuntu 24.04).
 
 ## Common requirements
 
@@ -127,9 +128,11 @@ session and Rust 1.95).
 Ubuntu 24.04 arm64. The GUI does not build on a 32-bit userland, and the Rust
 support for 32-bit ARM is thin. Use the official 5 V/3 A supply (a sagging one
 shows up as `get_throttled` below), a heatsink or fan, and a card with about 16 GB
-free: the release build of the vendored C/C++ codecs is large. Eight gigabytes of
-RAM make the build comfortable; on 2–4 GB add swap. The radio draws about 500 mA
-at peaks, so power it through a **powered USB hub**.
+free: the release build of the vendored C/C++ codecs is large. Eight gigabytes
+of RAM make the build comfortable; on 2–4 GB add swap. A 1 GB Pi runs the CLI
+fine but cannot build it comfortably — take the arm64 artifact from CI (or
+build on a PC), or add a large swap and be patient. The radio draws about
+500 mA at peaks, so power it through a **powered USB hub**.
 
 The order below is the one that works: OS, updates and swap, packages, Rust, the
 repository, the build, the kernel module and udev, the radio, the station.
@@ -231,7 +234,8 @@ repository, the build, the kernel module and udev, the radio, the station.
 
    Keep `sample_rate_hz = 2_000_000`: the plan warns that above about 4 Msps the
    station may not keep real time at all. **Set `resampler = "fast"` in
-   `[output.hackrf]`.** Measured on a Pi 4B (Ubuntu 24.04, 1.8 GHz,
+   `[output.hackrf]`.** Measured on a Raspberry Pi 4 Model B Rev 1.4 (4 cores,
+   8 GB, Ubuntu 24.04, kernel 7.3.0-1004-raspi, 1.8 GHz,
    `get_throttled = 0x0`): encoding alone runs about 20 times faster than real
    time (10 s of three xHE-AAC services in 0.52 s with a file output), but
    resampling the 48 kHz baseband to 2 Msps is the bottleneck. With the default
@@ -334,7 +338,8 @@ repository, the build, the kernel module and udev, the radio, the station.
   failed: Operation timed out`** — the station is not keeping real time, or the
   radio wedged after an underrun. The writer restarts the transmitter a few times
   after such a failure (counted as *recoveries* in the status), so one glitch may
-  pass; a repeating one still needs its cause fixed. On a Raspberry Pi 4 set
+  pass — on a Pi 4B a wedged write recovered once and the transmission finished; a
+  repeating one still needs its cause fixed. On a Raspberry Pi 4 set
   `resampler = "fast"` in `[output.hackrf]`; keep `sample_rate_hz = 2_000_000`. A
   larger `buffer_s` only postpones the failure.
 - **Windows linker `LNK1106`/`LNK1140`** — the disk filled up: set
