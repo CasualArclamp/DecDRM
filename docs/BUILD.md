@@ -69,8 +69,8 @@ screenshot).
    check the configuration without opening the radio, and transmit:
 
    ```powershell
-   .\target\release\decdrm.exe tx stations-local\station.toml --check
-   .\target\release\decdrm.exe tx stations-local\station.toml
+.\target\release\decdrm.exe tx station\station.toml --check
+.\target\release\decdrm.exe tx station\station.toml
    ```
 
    The GUI's Output card lists the radios it finds; *Scan* repeats the USB scan.

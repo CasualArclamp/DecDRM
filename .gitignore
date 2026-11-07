@@ -11,7 +11,7 @@
 # Neural codec weights (DAC), fetched with `decdrm models download dac`
 /models/
 # Personal station files (e.g. relaying a public stream: see README)
-/stations-local/
+/station/
 
 # Editor/OS noise
 .vscode/
