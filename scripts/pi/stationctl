@@ -14,7 +14,7 @@
 # runs `--check` (no radio is opened), so a broken station file is reported even
 # when logging is off. The argument is a
 # station name (resolved against $STATION_DIR, with .toml added) or a path to a
-# .toml file. Environment:
+# .toml file. Needs `screen` (`sudo apt install screen`). Environment:
 #   DECDRM_BIN   the CLI binary (default: <repo>/target/release/decdrm)
 #   STATION_DIR  where the station files are (default: <repo>/station, or
 #                <repo>/stations-local when that is the folder that exists)
@@ -52,7 +52,8 @@ usage: $(basename "$0") start|restart [--log] STATION
 
 STATION is a name in \$STATION_DIR (the .toml is added) or a path to a .toml.
 Nothing is logged unless start is given --log (it then appends to
-\$LOG_DIR/decdrm-<name>.log; 'logs' tails that file).
+\$LOG_DIR/decdrm-<name>.log; 'logs' tails that file). Needs screen
+(sudo apt install screen).
   DECDRM_BIN   the binary (now: $BIN)
   STATION_DIR  the station folder (now: $STATION_DIR)
   LOG_DIR      the logs (now: $LOG_DIR)
