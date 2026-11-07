@@ -720,6 +720,12 @@ there; it is transparent for the 9 and 10 kHz occupancies, while the 18 and 20 k
 reach the edge of its passband (keep `"balanced"` for them). `buffer_s` only postpones
 the problem: the deficit is continuous.
 
+On a **Raspberry Pi** the repository's `scripts/pi/stationctl` keeps a station running in
+a detached `screen` session: `start`, `stop`, `restart`, `status` and `logs` (no root;
+the station survives the SSH session, and one that exits with an error is restarted).
+`start --log` appends to `station/logs/decdrm-<name>.log`. The
+[build guide](BUILD.md#raspberry-pi-4-64-bit) has the details.
+
 The GUI's HackRF mode offers **IF presets** from −950 to +950 kHz in 50 kHz steps:
 negative puts the local oscillator above the channel (the default −250 kHz), positive
 below; 0 is zero IF and puts the radio's DC spike on the channel. A preset that would

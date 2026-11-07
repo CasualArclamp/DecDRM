@@ -25,6 +25,10 @@
 # One station per radio: a second session on the same HackRF fails to open it,
 # and its log (if asked for) says so. `stop` sends SIGINT (as Ctrl-C does), so
 # the station drains the radio queue before it exits; give it up to 30 s.
+# A station that exits with an error is started again after
+# $STATIONCTL_RESTART_S seconds (default 10), so the session survives a USB
+# glitch unattended; a clean exit, Ctrl-C or `stop` ends the session, and
+# `status` shows how many restarts happened.
 set -u
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -39,6 +43,7 @@ else
 fi
 LOG_DIR=${LOG_DIR:-$STATION_DIR/logs}
 STATE_DIR=${STATE_DIR:-$STATION_DIR/.stationctl}
+RESTART_S=${STATIONCTL_RESTART_S:-10}
 # Relative overrides are taken from where the script was run, not from $repo.
 case "$BIN" in /*) ;; *) BIN=$PWD/$BIN ;; esac
 case "$LOG_DIR" in /*) ;; *) LOG_DIR=$PWD/$LOG_DIR ;; esac
@@ -53,7 +58,8 @@ usage: $(basename "$0") start|restart [--log] STATION
 STATION is a name in \$STATION_DIR (the .toml is added) or a path to a .toml.
 Nothing is logged unless start is given --log (it then appends to
 \$LOG_DIR/decdrm-<name>.log; 'logs' tails that file). Needs screen
-(sudo apt install screen).
+(sudo apt install screen). A station that exits with an error is restarted
+after $RESTART_S s (STATIONCTL_RESTART_S changes it); 'status' counts them.
   DECDRM_BIN   the binary (now: $BIN)
   STATION_DIR  the station folder (now: $STATION_DIR)
   LOG_DIR      the logs (now: $LOG_DIR)
@@ -139,13 +145,27 @@ cmd_start() {
         target=$log
     fi
     set_logging_state "$log_on"
+    rm -f "$restart_file"
     # A crashed earlier session can leave a dead socket with this name.
     screen -wipe >/dev/null 2>&1 || true
     # The station writes straight to the log file (or to /dev/null); the screen
     # session only carries the process, so `logs` is a plain tail -f and Ctrl-C
-    # in it leaves the station running.
-    (cd "$repo" && screen -dmS "$session" bash -c 'exec "$1" tx "$2" >>"$3" 2>&1' \
-        _ "$BIN" "$cfg" "$target")
+    # in it leaves the station. A nonzero exit is retried after a pause; a
+    # clean one (Ctrl-C, `stop`, the inputs finishing) ends the loop.
+    (cd "$repo" && screen -dmS "$session" bash -c '
+        bin=$1; cfg=$2; out=$3; counter=$4; delay=$5
+        tries=0
+        while :; do
+            "$bin" tx "$cfg" >>"$out" 2>&1
+            rc=$?
+            [ "$rc" -eq 0 ] && break
+            tries=$((tries + 1))
+            printf "%s\n" "$tries" >"$counter"
+            printf "\n=== %s restart %d (exit %s), again in %ss ===\n" \
+                "$(date -Is)" "$tries" "$rc" "$delay" >>"$out"
+            sleep "$delay"
+        done
+    ' _ "$BIN" "$cfg" "$target" "$restart_file" "$RESTART_S")
     sleep 1
     if running; then
         echo "started: $session"
@@ -169,7 +189,7 @@ cmd_start() {
 cmd_stop() {
     need_screen
     if ! running; then
-        rm -f "$state_file"
+        rm -f "$state_file" "$restart_file"
         echo "not running: $session"
         return 0
     fi
@@ -190,7 +210,7 @@ cmd_stop() {
         echo "could not stop $session" >&2
         return 1
     fi
-    rm -f "$state_file"
+    rm -f "$state_file" "$restart_file"
     echo "stopped: $session"
 }
 
@@ -219,6 +239,9 @@ cmd_status() {
         tail -n 8 "$log"
     else
         echo "log: off"
+    fi
+    if [ -f "$restart_file" ]; then
+        echo "restarts: $(cat "$restart_file")"
     fi
 }
 
@@ -281,6 +304,7 @@ resolve "$station"
 session_of
 log=$LOG_DIR/$session.log
 state_file=$STATE_DIR/$session.logging
+restart_file=$STATE_DIR/$session.restarts
 
 case "$cmd" in
     start) cmd_start ;;

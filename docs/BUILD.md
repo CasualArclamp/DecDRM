@@ -294,7 +294,9 @@ repository, the build, the kernel module and udev, the radio, the station.
    overrides it), the binary from `target/release/decdrm` (`DECDRM_BIN`), and
    the log goes to `station/logs/decdrm-<name>.log`. It needs `screen`
    (`sudo apt install screen`). One station per radio: a second session on the
-   same HackRF fails to open it, and its log (if asked for) says so.
+   same HackRF fails to open it, and its log (if asked for) says so. A station
+   that exits with an error is restarted after 10 s (`STATIONCTL_RESTART_S`
+   changes that), and `status` counts the restarts.
 
    **Clock and network.** The station transmits the time and date (SDC type 8),
    so the clock must be right: `timedatectl set-ntp true`. A web-stream station
