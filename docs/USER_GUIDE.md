@@ -735,6 +735,11 @@ that is not on the grid is kept and shown as it is. As with the frequency, gain 
 amplifier, the choice is an override — the station file's `if_offset_hz` still applies
 to `decdrm tx` and to "As configured".
 
+The **resampler** quality is a quick field too: **as in file** (whatever
+`[output.hackrf] resampler` says; balanced when it sets none), **fast**, **balanced** or
+**high**. As with the other quick fields, a choice you make here wins over the file; a
+Raspberry Pi 4 wants **fast** at 2 Msps.
+
 With the HackRF output the **Output spectrum** plot shows absolute frequencies: its
 axis reads `frequency (kHz on air)`, the DC carrier sits at the nominal frequency, and
 the hover label is in MHz.

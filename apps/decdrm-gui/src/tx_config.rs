@@ -5,7 +5,7 @@
 use crate::settings::TxOutput;
 use decdrm_core::params::ChannelLayout;
 use decdrm_core::tx::output::OutputFormat;
-use decdrm_station::{MultiplexPlan, SignalFormat, StationConfig, StationError};
+use decdrm_station::{MultiplexPlan, ResamplerSetting, SignalFormat, StationConfig, StationError};
 use std::path::{Path, PathBuf};
 
 /// The shipped example (`crates/decdrm-station/examples/station.toml`). Rust note:
@@ -56,6 +56,9 @@ pub struct Overrides {
     pub hackrf_gain_db: u32,
     /// The HackRF's RF amplifier for [`TxOutput::Hackrf`].
     pub hackrf_amp: bool,
+    /// The resampler quality for [`TxOutput::Hackrf`] (`None` = as the station
+    /// file has it).
+    pub hackrf_resampler: Option<ResamplerSetting>,
 }
 
 /// Every problem an error describes: the configuration problems, else the message.
@@ -129,6 +132,9 @@ pub fn prepare(text: &str, base_dir: &Path, ov: &Overrides) -> Result<StationCon
             }
             h.tx_gain_db = ov.hackrf_gain_db;
             h.amp_enable = ov.hackrf_amp;
+            if let Some(q) = ov.hackrf_resampler {
+                h.resampler = q;
+            }
             cfg.output.hackrf = Some(h);
         }
     }
@@ -402,6 +408,24 @@ mod tests {
                 .expect("an output.hackrf")
                 .resampler,
             decdrm_station::ResamplerSetting::Fast
+        );
+
+        // A quick field for the quality too: the choice wins over the file.
+        let hackrf_high = Overrides {
+            output: TxOutput::Hackrf,
+            hackrf_frequency_khz: 15_500.0,
+            hackrf_gain_db: 30,
+            hackrf_amp: true,
+            hackrf_resampler: Some(decdrm_station::ResamplerSetting::High),
+            ..Default::default()
+        };
+        let cfg = prepare(EXAMPLE_STATION, &dir, &hackrf_high).unwrap();
+        assert_eq!(
+            cfg.output.hackrf
+                .as_ref()
+                .expect("an output.hackrf")
+                .resampler,
+            decdrm_station::ResamplerSetting::High
         );
 
         // The IF is a quick field too: the preset in the page wins over the file.

@@ -251,6 +251,7 @@ impl TxPage {
             hackrf_if_khz: Some(settings.tx_hackrf_if_khz),
             hackrf_gain_db: settings.tx_hackrf_gain_db,
             hackrf_amp: settings.tx_hackrf_amp,
+            hackrf_resampler: settings.tx_hackrf_resampler,
         }
     }
 
@@ -1361,6 +1362,27 @@ fn output_hackrf_picker(
     .on_hover_text("HackRF transmit VGA gain, 0–47 dB.");
     ui.checkbox(&mut settings.tx_hackrf_amp, "RF amp")
         .on_hover_text("The HackRF's 14 dB RF amplifier.");
+    let resampler_text = match settings.tx_hackrf_resampler {
+        None => "resampler: as in file".to_string(),
+        Some(q) => format!("resampler: {q}"),
+    };
+    egui::ComboBox::from_id_salt("tx_hackrf_resampler")
+        .selected_text(resampler_text)
+        .width(150.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut settings.tx_hackrf_resampler, None, "as in file");
+            for q in [
+                decdrm_station::ResamplerSetting::Fast,
+                decdrm_station::ResamplerSetting::Balanced,
+                decdrm_station::ResamplerSetting::High,
+            ] {
+                ui.selectable_value(&mut settings.tx_hackrf_resampler, Some(q), q.to_string());
+            }
+        })
+        .response
+        .on_hover_text(
+            "The 48 kHz -> sample-rate interpolation filter. \"as in file\" uses the station's [output.hackrf] resampler (balanced when it sets none); on a Raspberry Pi 4 choose \"fast\" at 2 Msps. It is transparent for the 9/10 kHz occupancies.",
+        );
     if other_outputs {
         ui.label(RichText::new("file/sound card ignored").weak())
             .on_hover_text(

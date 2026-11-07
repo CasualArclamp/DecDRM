@@ -10,6 +10,7 @@
 //! from newer versions are ignored).
 
 use decdrm_engine::{EngineConfig, InputFormat, InputSpec, RealChannel, ReceiverConfig};
+use decdrm_station::ResamplerSetting;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -435,6 +436,9 @@ pub struct Settings {
     pub tx_hackrf_gain_db: u32,
     /// The HackRF's 14 dB RF amplifier.
     pub tx_hackrf_amp: bool,
+    /// Quality of the 48 kHz -> sample-rate resampler for [`TxOutput::Hackrf`]
+    /// (`None` = as the station file's `[output.hackrf]` has it).
+    pub tx_hackrf_resampler: Option<ResamplerSetting>,
     /// Stop transmitting after [`Settings::tx_duration_s`] seconds of signal.
     pub tx_duration_enabled: bool,
     pub tx_duration_s: f64,
@@ -482,6 +486,7 @@ impl Default for Settings {
             tx_hackrf_if_khz: -250.0,
             tx_hackrf_gain_db: 40,
             tx_hackrf_amp: false,
+            tx_hackrf_resampler: None,
             tx_duration_enabled: true,
             tx_duration_s: 60.0,
             schedule: crate::schedule::ScheduleSettings::default(),
@@ -756,6 +761,7 @@ mod tests {
             tx_hackrf_if_khz: -237.5,
             tx_hackrf_gain_db: 47,
             tx_hackrf_amp: true,
+            tx_hackrf_resampler: Some(ResamplerSetting::Fast),
             tx_duration_enabled: false,
             tx_duration_s: 12.5,
             schedule: crate::schedule::ScheduleSettings {
