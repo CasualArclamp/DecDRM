@@ -948,3 +948,5 @@ it records ALSA's `default` device; route that to the cable's monitor as describ
 | DAC weights | `models/dac_24khz/model.safetensors` (see `decdrm models list`) |
 | KiwiSDR list (*Find…*) | `kiwi/kiwisdr_com.js` next to the GUI settings (`%APPDATA%\decdrm\kiwi` on Windows) |
 | Broadcast schedules | `schedule/` next to the GUI settings (`%APPDATA%\decdrm\schedule` on Windows): `sked-a26.csv` (EiBi), `DRMSchedule.ini` (Dream), optional `sources.toml`; `decdrm schedule --dir DIR` uses another folder |
+| Station logs (`scripts/pi/stationctl start --log`) | `station/logs/decdrm-<name>.log` in the checkout, rotated to `.log.1` at 5 MB (`STATIONCTL_LOG_MAX`); see the [build guide](BUILD.md#raspberry-pi-4-64-bit) |
+| Station session markers (`stationctl`) | `station/.stationctl/`: `<session>.logging` (whether the log is on) and `<session>.restarts` (restart count); `stop` removes both |
