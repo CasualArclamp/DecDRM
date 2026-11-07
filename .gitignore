@@ -12,6 +12,8 @@
 /models/
 # Personal station files (e.g. relaying a public stream: see README)
 /station/
+# The old name of that folder, kept so existing clones stay out of git.
+/stations-local/
 
 # Editor/OS noise
 .vscode/

@@ -351,9 +351,14 @@ impl MultiplexPlan {
                 h.resampler
             );
             if h.sample_rate_hz > HackrfSettings::REAL_TIME_RATE_HZ {
+                let hint = if h.resampler == ResamplerSetting::Fast {
+                    ""
+                } else {
+                    ", and a slow machine can try resampler = \"fast\""
+                };
                 let _ = writeln!(
                     s,
-                    "        note: above {} Msps the station may not keep real time (every sample is resampled and written to USB): expect underruns, and the radio may stop taking data; 2 Msps is plenty for DRM, and a slow machine can try resampler = \"fast\"",
+                    "        note: above {} Msps the station may not keep real time (every sample is resampled and written to USB): expect underruns, and the radio may stop taking data; 2 Msps is plenty for DRM{hint}",
                     HackrfSettings::REAL_TIME_RATE_HZ / 1_000_000
                 );
             } else if h.resampler == ResamplerSetting::Fast && cfg.channel.occupancy >= 4 {

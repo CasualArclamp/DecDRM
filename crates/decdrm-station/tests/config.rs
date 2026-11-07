@@ -730,6 +730,20 @@ fn hackrf_output() {
     assert!(!plan_of(4_000_000).contains("may not keep real time"));
     assert!(plan_of(8_000_000).contains("may not keep real time"));
 
+    // With "fast" already chosen the rate note does not advise it again.
+    let mut cfg = parse(&base());
+    cfg.output.file = None;
+    cfg.output.format = SignalFormat::Iq;
+    cfg.output.hackrf = Some(decdrm_station::HackrfSettings {
+        sample_rate_hz: 8_000_000,
+        resampler: decdrm_station::ResamplerSetting::Fast,
+        ..Default::default()
+    });
+    let plan = cfg.validate().expect("valid");
+    let text = plan.describe(&cfg);
+    assert!(text.contains("may not keep real time"), "{text}");
+    assert!(!text.contains("try resampler"), "{text}");
+
     // The plan names the resampler; "fast" stays valid but is flagged for the
     // 18 and 20 kHz occupancies, whose signal reaches its passband edge.
     let plan_with = |resampler, occupancy: u8| {

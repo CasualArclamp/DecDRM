@@ -22,6 +22,8 @@ sample_rate_hz = 2_000_000
 if_offset_hz = -250_000
 tx_gain_db = 40
 amp_enable = true
+resampler = "fast"       # 64-tap interpolation, ~8x cheaper: a Raspberry Pi 4 needs it
+                         # at 2 Msps; transparent for this 10 kHz channel
 
 [[service]]
 label = "RADIO EXAMPLE"

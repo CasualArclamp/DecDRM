@@ -392,6 +392,18 @@ mod tests {
         assert_eq!(h.sample_rate_hz, 2_000_000, "the defaults fill the rest");
         assert!(start_check(&cfg, None, true).is_ok(), "the radio needs no end");
 
+        // The quick fields do not reset the interpolation quality from the file.
+        let fast_station =
+            format!("{EXAMPLE_STATION}\n[output.hackrf]\nresampler = \"fast\"\n");
+        let cfg = prepare(&fast_station, &dir, &hackrf).unwrap();
+        assert_eq!(
+            cfg.output.hackrf
+                .as_ref()
+                .expect("an output.hackrf")
+                .resampler,
+            decdrm_station::ResamplerSetting::Fast
+        );
+
         // The IF is a quick field too: the preset in the page wins over the file.
         let hackrf_if = Overrides { hackrf_if_khz: Some(250.0), ..hackrf };
         let cfg = prepare(EXAMPLE_STATION, &dir, &hackrf_if).unwrap();

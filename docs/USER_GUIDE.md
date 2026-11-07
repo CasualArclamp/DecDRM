@@ -691,6 +691,7 @@ tx_gain_db = 40            # transmit VGA gain, 0–47 dB
 amp_enable = false         # the 14 dB RF amplifier
 # serial = "…23cc7"        # which HackRF (any one if omitted)
 # buffer_s = 1.0           # signal buffered before transmitting starts
+# resampler = "balanced"   # 48 kHz -> sample_rate_hz interpolation: "fast", "balanced" or "high"
 ```
 
 Everything is optional but `format`: the defaults above transmit a 1.53 MHz
@@ -704,11 +705,20 @@ radio starts, so a burst of encoding delay does not leave a gap on air (0.05–1
 queue is capped at 64 MB, so a high sample rate shortens it).
 
 Keep `sample_rate_hz` at 2 Msps (or up to about 4): the station resamples its 48 kHz
-baseband to the radio's rate on its own thread, and from 8 Msps upwards a typical
-machine cannot hand two bytes per sample to USB in real time. The radio then underruns —
-gaps on air, counted as *underruns* in the status — and can stop taking data, which ends
-the transmission with a write timeout. A higher rate buys nothing for a DRM channel; it
-only widens the passband. The plan printed by `decdrm tx --check` says so too.
+baseband to the radio's rate on every frame (the USB writes then run on the writer
+thread), and from 8 Msps upwards a typical machine cannot keep up in real time. The
+radio then underruns — gaps on air, counted as *underruns* in the status — and can stop
+taking data, which ends the transmission with a write timeout. A higher rate buys
+nothing for a DRM channel; it only widens the passband. The plan printed by `decdrm tx
+--check` says so too.
+
+`resampler` picks the interpolation filter: `"balanced"` (the default, 256 taps),
+`"high"` (512 taps, the best images) or `"fast"` (64 taps), which costs about eight
+times less. On a **Raspberry Pi 4** the default keeps only about half of real time at
+2 Msps — the radio underruns and may stop taking data — so set `resampler = "fast"`
+there; it is transparent for the 9 and 10 kHz occupancies, while the 18 and 20 kHz ones
+reach the edge of its passband (keep `"balanced"` for them). `buffer_s` only postpones
+the problem: the deficit is continuous.
 
 The GUI's HackRF mode offers **IF presets** from −950 to +950 kHz in 50 kHz steps:
 negative puts the local oscillator above the channel (the default −250 kHz), positive

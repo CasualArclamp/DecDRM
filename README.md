@@ -151,7 +151,7 @@ decdrm schedule --update
 decdrm tx crates/decdrm-station/examples/station.toml --check     # show the multiplex
 decdrm tx crates/decdrm-station/examples/station.toml --duration 30 --output drm.wav
 
-# straight to a HackRF One ([output.hackrf]: frequency, sample rate, gain)
+# straight to a HackRF One ([output.hackrf]: frequency, sample rate, gain, resampler)
 decdrm tx crates/decdrm-station/examples/station-tx-hack-rf-radio-example.toml --duration 60
 
 # desktop GUI
@@ -175,7 +175,9 @@ needs its USB driver: on Windows the WinUSB driver, installed once with
 [Zadig](https://zadig.akeo.ie/); on Linux the udev rule from libhackrf's
 `53-hackrf.rules` (`SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="6089",
 MODE="0660", GROUP="plugdev"`), so that a normal user can open the radio (running as root
-also works).
+also works). On a **Raspberry Pi 4** the default resampler (256 taps) keeps only about
+half of real time at 2 Msps: set `resampler = "fast"` in `[output.hackrf]` (64 taps,
+about eight times cheaper; transparent for the 9/10 kHz occupancies).
 The [user guide](docs/USER_GUIDE.md#transmitting-through-a-hackrf-one) covers the
 settings and the test setup. Note that `frequency_hz` is the channel's nominal
 frequency (the DC carrier): the 18 and 20 kHz occupancies extend upwards from it rather
