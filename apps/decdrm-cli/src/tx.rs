@@ -155,13 +155,15 @@ fn print_status(s: &StationStatus) {
         if s.device.is_some() { format!(", {} underruns", s.device_underruns) } else { String::new() }
     );
     if let Some(h) = &s.hackrf {
-        let underruns = if h.underruns > 0 {
-            format!(", {} underruns", h.underruns)
-        } else {
-            String::new()
-        };
+        let mut extra = String::new();
+        if h.underruns > 0 {
+            extra.push_str(&format!(", {} underruns", h.underruns));
+        }
+        if h.recoveries > 0 {
+            extra.push_str(&format!(", {} recoveries", h.recoveries));
+        }
         println!(
-            "          hackrf: {:.1} s transmitted, {:.1} s buffered{underruns}",
+            "          hackrf: {:.1} s transmitted, {:.1} s buffered{extra}",
             h.transmitted_s, h.queued_s
         );
     }

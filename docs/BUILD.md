@@ -332,9 +332,11 @@ repository, the build, the kernel module and udev, the radio, the station.
   --check` prints the plan and the problems without opening the radio.
 - **`the HackRF did not take the last of the signal` or `writing to the HackRF
   failed: Operation timed out`** — the station is not keeping real time, or the
-  radio wedged after an underrun. On a Raspberry Pi 4 set `resampler = "fast"`
-  in `[output.hackrf]`; keep `sample_rate_hz = 2_000_000`. A larger `buffer_s`
-  only postpones the failure.
+  radio wedged after an underrun. The writer restarts the transmitter a few times
+  after such a failure (counted as *recoveries* in the status), so one glitch may
+  pass; a repeating one still needs its cause fixed. On a Raspberry Pi 4 set
+  `resampler = "fast"` in `[output.hackrf]`; keep `sample_rate_hz = 2_000_000`. A
+  larger `buffer_s` only postpones the failure.
 - **Windows linker `LNK1106`/`LNK1140`** — the disk filled up: set
   `$env:CARGO_PROFILE_RELEASE_DEBUG = 'false'`, free space, and retry with
   `--jobs 1`.

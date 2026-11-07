@@ -708,7 +708,9 @@ Keep `sample_rate_hz` at 2 Msps (or up to about 4): the station resamples its 48
 baseband to the radio's rate on every frame (the USB writes then run on the writer
 thread), and from 8 Msps upwards a typical machine cannot keep up in real time. The
 radio then underruns — gaps on air, counted as *underruns* in the status — and can stop
-taking data, which ends the transmission with a write timeout. A higher rate buys
+taking data, which ends the transmission with a write timeout. The writer now restarts
+the transmitter a few times after such a failure (counted as *recoveries* in the
+status), so a single glitch may pass. A higher rate buys
 nothing for a DRM channel; it only widens the passband. The plan printed by `decdrm tx
 --check` says so too.
 

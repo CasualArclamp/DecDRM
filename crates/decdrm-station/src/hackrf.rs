@@ -65,6 +65,11 @@ const POLL: Duration = Duration::from_millis(50);
 /// underrun: the radio's own buffer bridges shorter gaps.
 const UNDERRUN_GUARD: Duration = Duration::from_millis(100);
 
+/// How long the radio is left off before a failed write restarts the transmitter.
+const RECOVERY_PAUSE: Duration = Duration::from_millis(100);
+/// Consecutive restarts without a successful block before the writer gives up.
+const MAX_RECOVERIES: u32 = 5;
+
 /// Extra time `drain` allows on top of the queued signal's own length before it
 /// gives up on a radio that stopped taking data.
 const DRAIN_GRACE: Duration = Duration::from_secs(5);
@@ -110,6 +115,9 @@ pub struct HackrfStatus {
     /// Times the station fell behind and left the radio's buffer empty while
     /// transmitting (each risks a gap on air; should stay 0).
     pub underruns: u64,
+    /// Times the writer restarted the transmitter after a USB write failure (an
+    /// underrun can wedge the radio's bulk endpoint; the station carries on).
+    pub recoveries: u64,
 }
 
 /// The queue between the station and the writer thread.
@@ -121,6 +129,8 @@ struct Shared {
     sent_bytes: u64,
     /// Times the queue ran dry while transmitting: the station fell behind.
     underruns: u64,
+    /// Times the writer restarted the transmitter after a USB write failure.
+    recoveries: u64,
     /// The station asked for the tail to be flushed and the radio stopped.
     finishing: bool,
     /// The writer is done (radio off, or failed, or stopped).
@@ -215,6 +225,12 @@ impl HackrfSink {
     /// Times the queue ran dry while transmitting (see [`HackrfStatus::underruns`]).
     pub fn underruns(&self) -> u64 {
         self.sync.state.lock().expect("the queue lock").underruns
+    }
+
+    /// Times the writer restarted the transmitter after a USB write failure (see
+    /// [`HackrfStatus::recoveries`]).
+    pub fn recoveries(&self) -> u64 {
+        self.sync.state.lock().expect("the queue lock").recoveries
     }
 
     /// Queue interleaved 48 kHz I/Q samples for the radio. Waits while the
@@ -357,6 +373,9 @@ fn writer_loop(
     // counted already (one per episode, and only past `UNDERRUN_GUARD`).
     let mut starving_since: Option<Instant> = None;
     let mut starving_counted = false;
+    // Failed writes since the last successful block: a wedged radio is restarted a
+    // few times, then reported as an error.
+    let mut consecutive_failures = 0u32;
     'outer: loop {
         // Wait for work: data to send, the finish signal, or abandonment.
         let mut s = sync.state.lock().expect("the queue lock");
@@ -428,7 +447,53 @@ fn writer_loop(
             Ok(written) => {
                 let mut s = sync.state.lock().expect("the queue lock");
                 s.sent_bytes += written as u64;
+                consecutive_failures = 0;
                 sync.room.notify_all();
+            }
+            Err(e) if recoverable(&e) && consecutive_failures < MAX_RECOVERIES => {
+                consecutive_failures += 1;
+                // An underrun wedges the radio's bulk endpoint: cycle the
+                // transmitter, clear a possible stall and drop what was queued (the
+                // radio's DMA state is unknown, and stale signal would only stretch
+                // the gap). The station keeps generating and refills the queue.
+                let _ = handle.write_control(
+                    request_type_out(),
+                    REQ_SET_TRANSCEIVER_MODE,
+                    MODE_OFF,
+                    0,
+                    &[],
+                    USB_TIMEOUT,
+                );
+                let _ = handle.clear_halt(ENDPOINT_TX);
+                std::thread::sleep(RECOVERY_PAUSE);
+                let restarted = handle
+                    .write_control(
+                        request_type_out(),
+                        REQ_SET_TRANSCEIVER_MODE,
+                        MODE_TRANSMIT,
+                        0,
+                        &[],
+                        USB_TIMEOUT,
+                    )
+                    .is_ok();
+                let mut s = sync.state.lock().expect("the queue lock");
+                s.queue.clear();
+                s.recoveries += 1;
+                starving_since = None;
+                starving_counted = false;
+                sync.data.notify_all();
+                sync.room.notify_all();
+                drop(s);
+                if !restarted {
+                    let mut s = sync.state.lock().expect("the queue lock");
+                    s.error = Some(format!(
+                        "the HackRF did not restart after a write failure: {e}"
+                    ));
+                    stop_radio(&mut handle);
+                    s.finished = true;
+                    sync.room.notify_all();
+                    return;
+                }
             }
             Err(e) => {
                 let mut s = sync.state.lock().expect("the queue lock");
@@ -550,6 +615,16 @@ fn starvation_episode(
         }
         Some(_) => false,
     }
+}
+
+/// Errors a transmitter restart can clear: an underrun wedges the firmware's bulk
+/// endpoint, so writes time out (or the endpoint stalls) until the mode is cycled.
+/// An unplugged radio or an I/O failure cannot be fixed here.
+fn recoverable(e: &rusb::Error) -> bool {
+    matches!(
+        e,
+        rusb::Error::Timeout | rusb::Error::Pipe | rusb::Error::Interrupted
+    )
 }
 
 /// Find the HackRF with this serial (or the first one) and open it.
@@ -938,5 +1013,13 @@ mod tests {
             guard,
             t0 + Duration::from_millis(200)
         ));
+    }
+
+    #[test]
+    fn write_errors_that_a_restart_can_clear() {
+        assert!(recoverable(&rusb::Error::Timeout));
+        assert!(recoverable(&rusb::Error::Pipe));
+        assert!(recoverable(&rusb::Error::Interrupted));
+        assert!(!recoverable(&rusb::Error::NoDevice));
     }
 }

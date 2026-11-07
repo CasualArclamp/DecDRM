@@ -919,6 +919,13 @@ fn output_card(ui: &mut Ui, tx: &TxSession, pal: &Palette) {
                         "Times the station fell behind and left the radio's buffer empty — each risks a gap on air; should stay 0.",
                     );
                 ui.end_row();
+                let recoveries = RichText::new(h.recoveries.to_string()).monospace();
+                ui.label(RichText::new("Recoveries").weak());
+                ui.label(if h.recoveries > 0 { recoveries.color(pal.error) } else { recoveries })
+                    .on_hover_text(
+                        "Times the transmitter was restarted after a USB write failure (an underrun can wedge the radio); should stay 0, and the station keeps going when it happens.",
+                    );
+                ui.end_row();
             }
             if let Some(dev) = &s.device {
                 value(ui, "Sound card", dev.as_str());
