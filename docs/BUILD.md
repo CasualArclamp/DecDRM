@@ -150,12 +150,14 @@ thin.
    may not keep real time, and a Pi 4 is slower than the desktop where that was
    measured. **Set `resampler = "fast"` in `[output.hackrf]`.** Measured on a Pi
    4B (Ubuntu 24.04, 1.8 GHz, `get_throttled = 0x0`): encoding alone runs about
-   20 times faster than real time (10 s of three xHE-AAC services in 0.52 s), but
-   the default `"balanced"` resampler to 2 Msps costs about 2 GMAC/s and keeps
-   only ~0.5 of real time on one core — after the prebuffer drains, the radio
-   underruns and either stops taking data (`writing to the HackRF failed:
-   Operation timed out`) or the drain reports `the HackRF did not take the last
-   of the signal`. `"fast"` (64 taps, linear) is about eight times cheaper and is
+   20 times faster than real time (10 s of three xHE-AAC services in 0.52 s with a
+   file output), but resampling the 48 kHz baseband to 2 Msps is the bottleneck.
+   With the default `"balanced"` the resampler pegs one core (99.6 %), sustains
+   only ~0.5 of real time, and a 20 s transmission ends at 18.4 s with four
+   underruns and `the HackRF did not take the last of the signal`. With `"fast"`
+   the same 20 s goes out cleanly (exit 0) at about 60 % of one core (~1.6 times
+   real time), with a 1 s and a 10 s buffer alike; three services and one service
+   cost about the same, the resampler dominating. `"fast"` (64 taps, linear) is
    transparent for the 9/10 kHz occupancies; the 18 and 20 kHz ones reach the
    edge of its passband, keep `"balanced"` for them. `buffer_s` only delays the
    problem: the deficit is continuous. Watch the status's `underruns` (it should
