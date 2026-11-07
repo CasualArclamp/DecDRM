@@ -273,8 +273,14 @@ cmd_status() {
 }
 
 cmd_logs() {
-    if [ "$(logging_state)" = 0 ]; then
-        echo "the running station has no log (start it with --log)" >&2
+    local state
+    state=$(logging_state)
+    if [ "$state" = 0 ]; then
+        if running; then
+            echo "this station is running without a log (it was started without --log)" >&2
+        else
+            echo "the last run of this station had no log (start it with --log)" >&2
+        fi
         exit 1
     fi
     if [ ! -f "$log" ]; then
