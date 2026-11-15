@@ -277,6 +277,7 @@ impl DecDrmApp {
     fn top_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("DecDRM").strong().size(16.0));
+            ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).weak().size(12.0));
             ui.separator();
             // A marker for a page whose engine is running (both may run at once). "▶" is
             // in egui's default fonts; "●" is not.

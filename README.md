@@ -1,5 +1,7 @@
 # DecDRM
 
+[![release](https://img.shields.io/github/v/release/CasualArclamp/DecDRM?logo=github&label=release)](https://github.com/CasualArclamp/DecDRM/releases/latest)
+
 If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
 
 A Digital Radio Mondiale (DRM30) receiver **and transmitter** written in Rust.
