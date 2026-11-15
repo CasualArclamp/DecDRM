@@ -113,7 +113,7 @@ fn main() -> eframe::Result {
     let args = Args::parse();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("DecDRM")
+            .with_title(concat!("DecDRM v", env!("CARGO_PKG_VERSION")))
             .with_app_id("decdrm-gui")
             .with_inner_size(args.window_size.map_or([1280.0, 800.0], |(w, h)| [w, h]))
             .with_min_inner_size([900.0, 560.0])
