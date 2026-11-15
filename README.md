@@ -1,6 +1,6 @@
 # DecDRM
 
-[![release](https://img.shields.io/github/v/release/CasualArclamp/DecDRM?logo=github&label=release)](https://github.com/CasualArclamp/DecDRM/releases/latest)
+[![release](https://img.shields.io/github/v/release/CasualArclamp/DecDRM?logo=github&label=release)](https://github.com/CasualArclamp/DecDRM/releases/latest) [![downloads](https://img.shields.io/github/downloads/CasualArclamp/DecDRM/total?logo=github&label=downloads)](https://github.com/CasualArclamp/DecDRM/releases)
 
 If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
 
