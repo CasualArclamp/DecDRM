@@ -17,3 +17,5 @@
 *.swp
 Thumbs.db
 .DS_Store
+# Notes for Claude Code sessions: local only
+CLAUDE.md
